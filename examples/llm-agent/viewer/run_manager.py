@@ -1,0 +1,156 @@
+"""Starts agent runs from the viewer, one at a time, on a background thread.
+
+The server process has no terminal, so nothing can confirm restart_target: the manager
+hands every toolbox a confirm callback that always declines. Requests are validated
+before a run folder exists, and a run that crashes still ends with a final status.
+A run started with approval holds each app-changing action until decide() answers it.
+"""
+
+import threading
+from pathlib import Path, PureWindowsPath
+
+from agent.approval import ApprovalGate, Decision
+from agent.desktop import DesktopClient, start_session
+from agent.loop import RunResult, run_agent
+from agent.recorder import RunRecorder
+from agent.task import TaskError, task_from_args
+from agent.tools import Toolbox
+
+
+class RunBusy(Exception):
+    """Another run is still in progress."""
+
+
+class InvalidRun(ValueError):
+    """The request cannot start a run; the message says why, in Korean, for the viewer."""
+
+
+class RunStartFailed(Exception):
+    """The request was valid but the run could not start (no session, no model, ...)."""
+
+
+def decline(_prompt):
+    return False
+
+
+def default_toolbox(desktop, task, confirm, observer):
+    return Toolbox(desktop, task, confirm=confirm, observer=observer)
+
+
+class RunManager:
+    def __init__(self, runs_dir, binary, default_exe, model_factory, toolbox_factory=default_toolbox,
+                 desktop_factory=None, gate_factory=ApprovalGate):
+        self.runs_dir = Path(runs_dir)
+        self.binary = str(binary)
+        self.default_exe = default_exe
+        self._model_factory = model_factory
+        self._toolbox_factory = toolbox_factory
+        self._desktop_factory = desktop_factory or self._new_session
+        self._gate_factory = gate_factory
+        self._lock = threading.Lock()
+        self._active = None
+        self._gate = None
+        self._thread = None
+
+    def active(self):
+        with self._lock:
+            return self._active
+
+    def decide(self, run_id, proposal_id, approved, comment=""):
+        """Answers a proposal of the active run. False when the run is not active, it was
+        started without approval, or the proposal is unknown or already answered."""
+        with self._lock:
+            gate = self._gate if run_id == self._active else None
+        if gate is None:
+            return False
+        return gate.decide(proposal_id, Decision(approved, comment))
+
+    def start(self, goal, exe=None, level=3, approve=False):
+        """Returns the new run id once its folder exists; the run continues in the background.
+        With approve, every app-changing action waits for decide() or times out as a stop."""
+        task = self.build_task(goal, exe, level)
+        if type(approve) is not bool:
+            raise InvalidRun("approve는 true 또는 false여야 합니다")
+        with self._lock:
+            if self._active is not None:
+                raise RunBusy(f"실행 중인 작업이 있습니다: {self._active}")
+            self._active = "starting"
+        try:
+            model = self._model_factory(task)
+            desktop = self._desktop_factory()
+            recorder = RunRecorder(self.runs_dir, desktop, self._meta(task))
+        except RunStartFailed:
+            self._release()
+            raise
+        except Exception as error:
+            self._release()
+            raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
+        try:
+            toolbox = self._toolbox_factory(desktop, task, decline, recorder)
+            gate = self._gate_factory() if approve else None
+        except Exception as error:
+            recorder.finish(RunResult("stopped", 0, f"실행을 시작하지 못했습니다: {error}"))
+            self._release()
+            raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
+        with self._lock:
+            self._active = recorder.run_id
+            self._gate = gate
+            self._thread = threading.Thread(
+                target=self._run, args=(model, toolbox, task, recorder, gate), name=f"run-{recorder.run_id}",
+                daemon=True,
+            )
+            self._thread.start()
+        return recorder.run_id
+
+    def join(self, timeout=None):
+        """Waits for the current run's thread; for tests and shutdown."""
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+
+    def build_task(self, goal, exe, level):
+        if not isinstance(goal, str) or not goal.strip():
+            raise InvalidRun("지시를 입력해 주세요")
+        exe = exe or self.default_exe
+        if not exe:
+            raise InvalidRun("실행 파일 경로를 입력해 주세요")
+        if not isinstance(exe, str) or not PureWindowsPath(exe).is_absolute():
+            raise InvalidRun("실행 파일 경로는 절대 경로여야 합니다")
+        if not Path(exe).is_file():
+            raise InvalidRun(f"실행 파일이 없습니다: {exe}")
+        if type(level) is not int or not 0 <= level <= 3:
+            raise InvalidRun("권한 단계는 0부터 3까지의 정수여야 합니다")
+        try:
+            return task_from_args(goal.strip(), exe, level)
+        except TaskError as error:
+            raise InvalidRun(str(error)) from error
+
+    def _run(self, model, toolbox, task, recorder, gate):
+        try:
+            result = run_agent(model, toolbox, task, recorder.on_event, gate=gate)
+        except Exception as error:
+            result = RunResult("stopped", 0, f"실행 중 오류: {type(error).__name__}: {error}")
+        try:
+            recorder.finish(result)
+        finally:
+            self._release()
+
+    def _release(self):
+        with self._lock:
+            self._active = None
+            self._gate = None
+
+    def _meta(self, task):
+        return {
+            "goal": task.goal,
+            "exe": task.exe,
+            "model": task.model,
+            "permission_level": task.permission_level,
+            "started_by": "viewer",
+        }
+
+    def _new_session(self):
+        session = start_session(self.binary, "llm-agent viewer")
+        if session is None:
+            raise RunStartFailed("agent-desktop 세션을 시작하지 못했습니다")
+        return DesktopClient(self.binary, session)

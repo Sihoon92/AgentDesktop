@@ -1,0 +1,18 @@
+{
+  "format": 2,
+  "exe": "C:\\apps\\AgentDeskSample.exe",
+  "model": "gpt-6.1-terra",
+  "permission_level": 3,
+  "goal": "차트를 5분봉으로 바꿔줘 (바뀐 점 예시)",
+  "run_id": "20261108-005000",
+  "started_by": "viewer",
+  "started_at": "2026-11-08T00:50:00Z",
+  "finished_at": "2026-11-08T00:50:48Z",
+  "heartbeat_at": "2026-11-08T00:50:48Z",
+  "pid": 41300,
+  "process_started_at": "2026-11-08T00:48:10.000Z",
+  "status": "verified",
+  "reason": "5분 스위치가 켜지고 차트가 5분으로 바뀜",
+  "tokens": 5600,
+  "steps": 4
+}

@@ -1,0 +1,12 @@
+{
+  "run_id": "20261107-115500",
+  "goal": "지표를 켜줘",
+  "exe": "C:\\apps\\AgentDeskSample.exe",
+  "model": "gpt-6.1-terra",
+  "permission_level": 3,
+  "started_at": "2026-11-07T11:55:00Z",
+  "status": "gave_up",
+  "reason": "창을 찾지 못함",
+  "tokens": 900,
+  "steps": 1
+}

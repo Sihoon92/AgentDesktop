@@ -1,0 +1,12 @@
+{
+  "run_id": "20261107-120000",
+  "goal": "설정 패널을 열어줘",
+  "exe": "C:\\apps\\AgentDeskSample.exe",
+  "model": "gpt-6.1-terra",
+  "permission_level": 3,
+  "started_at": "2026-11-07T12:00:00Z",
+  "status": "verified",
+  "reason": "성공 조건을 하니스가 확인함",
+  "tokens": 4050,
+  "steps": 2
+}

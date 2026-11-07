@@ -1,0 +1,19 @@
+goal: FootprintChart를 실행하고, 차트 창의 오른쪽 지표 설정 패널을 열어라.
+exe: C:\Users\sihoo\AppData\Local\FootprintChart\try\creamer-v1-pivots-20261107\FootprintChart.exe
+permission_level: 3
+max_steps: 12
+token_budget: 200000
+model: gpt-6.1-terra
+reasoning_effort: low
+
+success:
+  require:
+    - role: switch
+      description_contains: 설정 패널
+      states: [checked]
+    - role: statictext
+      name: 지표
+
+baseline_target:
+  role: switch
+  description_contains: 설정 패널

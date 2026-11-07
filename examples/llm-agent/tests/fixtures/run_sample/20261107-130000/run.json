@@ -1,0 +1,12 @@
+{
+  "run_id": "20261107-130000",
+  "goal": "표의 값을 읽어줘 (텍스트 400개 제한 예시)",
+  "exe": "C:\\apps\\AgentDeskSample.exe",
+  "model": "gpt-6.1-terra",
+  "permission_level": 3,
+  "started_at": "2026-11-07T13:00:00Z",
+  "status": "claimed",
+  "reason": "표를 읽음",
+  "tokens": 5200,
+  "steps": 1
+}

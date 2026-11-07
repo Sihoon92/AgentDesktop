@@ -1,0 +1,12 @@
+{
+  "run_id": "20261107-140000",
+  "goal": "지표가 보일 때까지 기다렸다가 없으면 설정을 열어줘 (대기 예시)",
+  "exe": "C:\\apps\\AgentDeskSample.exe",
+  "model": "gpt-6.1-terra",
+  "permission_level": 3,
+  "started_at": "2026-11-07T14:00:00Z",
+  "status": "claimed",
+  "reason": "지표가 보임",
+  "tokens": 4500,
+  "steps": 5
+}

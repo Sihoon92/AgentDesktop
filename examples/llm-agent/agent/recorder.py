@@ -1,0 +1,299 @@
+"""Writes each run to runs/<run_id>/ so a person can replay what the agent saw and did.
+
+run.json holds the run's summary, events.jsonl one event per line, frames/ one window
+screenshot per observation. Element boxes are stored in image pixels, so the viewer only
+draws them. Recording must never end a run: every failure inside the recorder becomes a
+warning on the event, or an entry in `errors` printed to stderr.
+
+run.json is format 2: it names the recording process (pid and its start time) and carries a
+heartbeat_at that moves with every event and, from a daemon thread, at least every
+heartbeat_s seconds until finish. A viewer that finds a running run whose process is gone or
+whose heartbeat is old shows it as interrupted.
+"""
+
+import functools
+import json
+import os
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from agent.frames import frame_origin, to_image_rect
+from agent.observe import visible_elements
+from agent.process_identity import process_started_at
+
+RUN_FORMAT = 2
+HEARTBEAT_S = 10
+REPLACE_ATTEMPTS = 5
+REPLACE_PAUSE_S = 0.02
+MAX_TEXT_ELEMENTS = 400
+META_FIELDS = ("goal", "exe", "model", "permission_level", "started_by")
+WINDOW_FIELDS = ("id", "title", "bounds")
+RESULT_FIELDS = ("ok", "disposition", "code", "message", "refused", "post_state")
+
+
+def _never_raises(method):
+    @functools.wraps(method)
+    def guarded(self, *args, **kwargs):
+        try:
+            method(self, *args, **kwargs)
+        except Exception as error:
+            self._note_error(method.__name__, error)
+
+    return guarded
+
+
+class RunRecorder:
+    def __init__(self, runs_dir, desktop, meta, run_id=None, now=None, heartbeat_s=HEARTBEAT_S):
+        """Creates runs_dir/<run_id>/ and starts the heartbeat thread; finish() or close() stops it.
+        A generated id is YYYYMMDD-HHMMSS in UTC, with -2, -3, ... when that second is taken; a
+        given run_id must be free."""
+        self._desktop = desktop
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        started = self._now().astimezone(timezone.utc)
+        self.run_id, self.path = _claim_run_dir(Path(runs_dir), run_id, started.strftime("%Y%m%d-%H%M%S"))
+        (self.path / "frames").mkdir()
+        self.errors = []
+        self._observations = 0
+        self._step = None
+        self._last_frame = None
+        self._run_lock = threading.Lock()
+        self._finished = False
+        self._stop = threading.Event()
+        pid = os.getpid()
+        self._run = {
+            "format": RUN_FORMAT,
+            "run_id": self.run_id,
+            **{key: meta.get(key) for key in META_FIELDS},
+            "started_at": _stamp(started),
+            "finished_at": None,
+            "heartbeat_at": _stamp(started),
+            "pid": pid,
+            "process_started_at": process_started_at(pid),
+            "status": "running",
+            "reason": None,
+            "tokens": 0,
+            "steps": 0,
+        }
+        self._write_run()
+        self._heartbeat_s = heartbeat_s
+        self._heartbeat_thread = threading.Thread(
+            target=self._beat_until_stopped, name=f"heartbeat-{self.run_id}", daemon=True
+        )
+        self._heartbeat_thread.start()
+
+    @_never_raises
+    def on_observation(self, window, envelope, text, source=None, wait=None):
+        self._observations += 1
+        event = {
+            "type": "observation",
+            "id": self._observations,
+            "source": source,
+            **({"wait": wait} if wait is not None else {}),
+            "window": {key: window.get(key) for key in WINDOW_FIELDS},
+            "frame": None,
+            "image": None,
+            "geometry_stale": False,
+            "elements": [],
+            "text_truncated": False,
+            "text": text,
+            "warning": None,
+        }
+        frame = self._capture(window, event)
+        self._last_frame = {"id": event["id"], "window_id": window.get("id"), "geometry": frame}
+        event["elements"], event["text_truncated"] = _elements(envelope["data"]["tree"], frame)
+        self._append(event)
+
+    @_never_raises
+    def on_action(self, tool, arguments, target, result):
+        self._append(
+            {
+                "type": "action",
+                "step": self._step,
+                "tool": tool,
+                "intent": arguments.get("intent"),
+                "arguments": arguments,
+                "target": self._image_target(target),
+                "before": self._last_frame["id"] if self._last_frame else None,
+                "result": {key: result[key] for key in RESULT_FIELDS if key in result},
+            }
+        )
+
+    @_never_raises
+    def on_event(self, event):
+        """Takes the loop's log events. Model turns, proposals and decisions are recorded; tool
+        calls are not, because on_action already recorded each one."""
+        if event.get("type") == "proposal":
+            self._append({**event, "target": self._image_target(event.get("target"))})
+            return
+        if event.get("type") == "decision":
+            self._append(event)
+            return
+        if event.get("type") != "model":
+            return
+        self._step = event["step"]
+        with self._run_lock:
+            self._run.update(steps=event["step"], tokens=event["tokens"])
+        self._append({"type": "model", "step": event["step"], "tokens": event["tokens"]})
+
+    @_never_raises
+    def finish(self, result):
+        """Writes the final status and finished_at, then stops the heartbeat for good."""
+        self.close()
+        with self._run_lock:
+            self._finished = True
+            stamp = self._stamp_now()
+            self._run.update(status=result.status, reason=result.reason, tokens=result.tokens,
+                             steps=result.steps, finished_at=stamp, heartbeat_at=stamp)
+            self._write_run_locked()
+        self._append(
+            {
+                "type": "finish",
+                "status": result.status,
+                "steps": result.steps,
+                "reason": result.reason,
+                "tokens": result.tokens,
+            }
+        )
+
+    def close(self):
+        """Stops the heartbeat thread without finishing the run. Safe to call more than once."""
+        self._stop.set()
+        if self._heartbeat_thread is not threading.current_thread():
+            self._heartbeat_thread.join(timeout=5)
+
+    def _beat_until_stopped(self):
+        while not self._stop.wait(self._heartbeat_s):
+            self._heartbeat()
+
+    @_never_raises
+    def _heartbeat(self):
+        """Moves heartbeat_at to now and rewrites run.json. Does nothing after finish."""
+        with self._run_lock:
+            if self._finished:
+                return
+            self._run["heartbeat_at"] = self._stamp_now()
+            self._write_run_locked()
+
+    def _stamp_now(self):
+        return _stamp(self._now())
+
+    def _capture(self, window, event):
+        """Takes the screenshot; returns (origin, size) for mapping boxes, or None."""
+        name = f"{event['id']:04d}.png"
+        shot = self._desktop.run("screenshot", "--window-id", window["id"], str(self.path / "frames" / name))
+        if not shot.get("ok"):
+            error = shot.get("error") or {}
+            event["warning"] = f"스크린샷 실패: {error.get('code')}: {error.get('message')}"
+            return None
+        size = (shot["data"]["width"], shot["data"]["height"])
+        event["frame"] = name
+        event["image"] = {"width": size[0], "height": size[1]}
+        after = self._window_bounds(window["id"])
+        event["geometry_stale"] = after != window.get("bounds")
+        if after is None:
+            event["warning"] = "스크린샷 뒤에 창을 찾지 못해 박스 위치를 확인할 수 없습니다"
+        if not window.get("bounds"):
+            event["warning"] = "창 영역을 몰라 박스를 그릴 수 없습니다"
+            return None
+        return frame_origin(window["bounds"], *size), size
+
+    def _window_bounds(self, window_id):
+        listing = self._desktop.run("list-windows")
+        rows = listing.get("data") or [] if listing.get("ok") else []
+        return next((row.get("bounds") for row in rows if row.get("id") == window_id), None)
+
+    def _image_target(self, target):
+        if target is None:
+            return None
+        frame = self._last_frame["geometry"] if self._last_frame else None
+        mapped = dict(target)
+        if "bounds" in target:
+            mapped["rect"] = _rect(target["bounds"], frame)
+        if "points" in target:
+            same_window = self._last_frame and self._last_frame["window_id"] == target.get("window_id")
+            points_frame = frame if same_window else None
+            mapped["image_points"] = [_point(point, points_frame) for point in target["points"]]
+        return mapped
+
+    def _append(self, event):
+        line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
+        with (self.path / "events.jsonl").open("a", encoding="utf-8") as file:
+            file.write(line)
+        self._heartbeat()
+
+    def _write_run(self):
+        with self._run_lock:
+            self._write_run_locked()
+
+    def _write_run_locked(self):
+        temporary = self.path / "run.json.tmp"
+        temporary.write_text(json.dumps(self._run, ensure_ascii=False, default=str), encoding="utf-8")
+        _replace_retrying(temporary, self.path / "run.json")
+
+    def _note_error(self, where, error):
+        message = f"{where}: {type(error).__name__}: {error}"
+        self.errors.append(message)
+        print(f"기록 오류 ({self.run_id}) {message}", file=sys.stderr)
+
+
+def _replace_retrying(source, target):
+    """os.replace, retried briefly: on Windows it fails while another process (the viewer)
+    has the target open for reading."""
+    for _ in range(REPLACE_ATTEMPTS - 1):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            time.sleep(REPLACE_PAUSE_S)
+    os.replace(source, target)
+
+
+def _stamp(moment):
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _claim_run_dir(runs_dir, run_id, base):
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    if run_id is not None:
+        (runs_dir / run_id).mkdir()
+        return run_id, runs_dir / run_id
+    suffix = 1
+    while True:
+        candidate = base if suffix == 1 else f"{base}-{suffix}"
+        try:
+            (runs_dir / candidate).mkdir()
+            return candidate, runs_dir / candidate
+        except FileExistsError:
+            suffix += 1
+
+
+def _elements(tree, frame):
+    """Returns every control and at most MAX_TEXT_ELEMENTS text elements, and whether text was cut."""
+    elements = []
+    texts = 0
+    for element in visible_elements(tree):
+        if element["kind"] == "text":
+            texts += 1
+            if texts > MAX_TEXT_ELEMENTS:
+                continue
+        bounds = element.pop("bounds")
+        elements.append({**element, "rect": _rect(bounds, frame)})
+    return elements, texts > MAX_TEXT_ELEMENTS
+
+
+def _rect(bounds, frame):
+    if not bounds or frame is None:
+        return None
+    origin, size = frame
+    return to_image_rect(bounds, origin, size)
+
+
+def _point(point, frame):
+    if frame is None:
+        return None
+    (left, top), (width, height) = frame
+    x, y = point[0] - left, point[1] - top
+    return [x, y] if 0 <= x < width and 0 <= y < height else None

@@ -1,0 +1,369 @@
+"""The tools the model may call, confined to one process of the target app."""
+
+import time
+from dataclasses import dataclass
+
+from agent.guard import ActionGuard, signature
+from agent.observe import render_tree
+from agent.tool_schemas import READ_ONLY_TOOLS, SCHEMAS
+from agent.verify import first_unmet
+
+OBSERVE_TIMEOUT_MS = "8000"
+RESTART_WAIT_S = 15
+POLL_S = 0.5
+WINDOW_FIELDS = ("id", "title", "minimized", "is_focused", "bounds")
+
+
+@dataclass(frozen=True)
+class RefAction:
+    command: str
+    headed: bool = False
+    positional: str | None = None
+    options: tuple = ()
+
+
+REF_ACTIONS = {
+    "click": RefAction("click"),
+    "toggle": RefAction("toggle"),
+    "expand": RefAction("expand"),
+    "collapse": RefAction("collapse"),
+    "set_value": RefAction("set-value", positional="value"),
+    "select": RefAction("select", positional="value"),
+    "check": RefAction("check"),
+    "uncheck": RefAction("uncheck"),
+    "scroll": RefAction("scroll", options=("direction", "amount")),
+    "type": RefAction("type", headed=True, positional="text"),
+    "double_click": RefAction("double-click", headed=True),
+    "right_click": RefAction("right-click", headed=True),
+}
+POINT_TOOLS = {
+    "mouse_click": (("x", "y"),),
+    "mouse_wheel": (("x", "y"),),
+    "drag": (("from_x", "from_y"), ("to_x", "to_y")),
+}
+WINDOW_TOOLS = frozenset({"press", "restore_window"})
+REOBSERVING_TOOLS = frozenset(REF_ACTIONS) | frozenset(POINT_TOOLS) | WINDOW_TOOLS
+NON_IDENTITY_ARGUMENTS = frozenset({"window_id", "intent"})
+
+
+class _NoObserver:
+    def on_observation(self, window, envelope, text, source=None, wait=None):
+        pass
+
+    def on_action(self, tool, arguments, target, result):
+        pass
+
+
+def _refused(reason):
+    return {
+        "ok": False,
+        "refused": reason,
+        "disposition": {"delivery": "not_delivered", "retry": "safe"},
+    }
+
+
+def _summary(envelope):
+    if envelope.get("ok"):
+        data = envelope.get("data") or {}
+        keys = ("disposition", "post_state", "surfaces")
+        return {"ok": True, **{key: data[key] for key in keys if key in data}}
+    error = envelope.get("error") or {}
+    details = error.get("details") or {}
+    summary = {
+        "ok": False,
+        "code": error.get("code"),
+        "message": error.get("message"),
+        "suggestion": error.get("suggestion"),
+        "kind": details.get("kind"),
+        "post_state": details.get("post_state"),
+        "disposition": error.get("disposition"),
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+class Toolbox:
+    def __init__(self, desktop, task, confirm, sleep=time.sleep, clock=time.monotonic, observer=None):
+        """observer gets on_observation(window, envelope, text, source=..., wait=...) for each tree
+        the agent reads, and on_action(tool, arguments, target, result) for each other tool call,
+        before the re-read. source names what made the observation ("observe", "action" or
+        "wait_for_text"); wait is set only for wait_for_text, which reports one observation per call."""
+        self._desktop = desktop
+        self._observer = observer or _NoObserver()
+        self._task = task
+        self._confirm = confirm
+        self.sleep = sleep
+        self.clock = clock
+        self._guard = ActionGuard()
+        self._pid = None
+        self._instance = None
+        self._current_window = None
+        self._refs = {}
+        self._last_read = None
+        self._levels = {s["definition"]["name"]: s["level"] for s in SCHEMAS}
+
+    def definitions(self):
+        return [s["definition"] for s in SCHEMAS if s["level"] <= self._task.permission_level]
+
+    def call(self, name, arguments):
+        if name in READ_ONLY_TOOLS:
+            return self._dispatch(name, arguments)
+        target = self.preview(name, arguments)
+        result = self._dispatch(name, arguments)
+        self._observer.on_action(name, arguments, target, result)
+        if name in REOBSERVING_TOOLS and "refused" not in result:
+            return {**result, **self._observe_current(source="action")}
+        return result
+
+    def preview(self, name, arguments):
+        """Returns what the call would act on, without running anything.
+
+        A ref tool gives the ref with its role, name, description and bounds from the latest
+        observation; a point tool gives the window and the screen points; a window tool gives the
+        window with no points. Anything else, or a ref not in the latest observation, gives None.
+        """
+        if name in REF_ACTIONS:
+            element = self._refs.get(arguments.get("ref"))
+            return None if element is None else {"ref": arguments["ref"], **element}
+        if name in POINT_TOOLS:
+            points = [[arguments[x], arguments[y]] for x, y in POINT_TOOLS[name]]
+            return {"window_id": arguments.get("window_id"), "points": points}
+        if name in WINDOW_TOOLS:
+            return {"window_id": arguments.get("window_id"), "points": []}
+        return None
+
+    def _dispatch(self, name, arguments):
+        if self._levels.get(name, 99) > self._task.permission_level:
+            return _refused(f"Tool '{name}' is not available at this permission level")
+        if name == "launch_target":
+            return self._launch()
+        if self._pid is None:
+            return _refused("Call launch_target first")
+        if name in REF_ACTIONS:
+            return self._ref_action(name, arguments)
+        return getattr(self, f"_tool_{name}")(arguments)
+
+    def verify(self):
+        """Reads every window of the target and reports whether one meets all requirements."""
+        unmet = "no window of the target process is open"
+        for window in self._rows() if self._pid is not None else []:
+            envelope = self._snapshot(window["id"])
+            if not envelope.get("ok") or not envelope["data"].get("complete"):
+                unmet = f"could not fully read window {window['id']}"
+                continue
+            unmet = first_unmet(self._task.require, envelope["data"]["tree"])
+            if unmet is None:
+                return {"met": True, "window_id": window["id"]}
+        return {"met": False, "unmet": unmet}
+
+    def observed_trees(self, source="observe"):
+        """Reads each target window in turn, leaving the yielded tree's refs current. A None
+        source reads quietly; report_wait() then records the last tree read as one observation."""
+        for window in self._rows():
+            envelope = self._snapshot(window["id"])
+            if envelope.get("ok"):
+                self._current_window = window["id"]
+                text, self._refs = render_tree(envelope["data"]["tree"])
+                self._last_read = (window, envelope, text)
+                if source is not None:
+                    self._observer.on_observation(window, envelope, text, source=source)
+                yield envelope["data"]["tree"]
+
+    def forget_last_read(self):
+        """Starts a quiet wait: report_wait() records nothing until a tree is read."""
+        self._last_read = None
+
+    def report_wait(self, wait):
+        """Records the last tree read as one wait_for_text observation carrying wait
+        ({"text", "found", "polls", "waited_ms"}). Does nothing when no tree was read."""
+        if self._last_read is not None:
+            self._observer.on_observation(*self._last_read, source="wait_for_text", wait=wait)
+
+    def _launch(self):
+        envelope = self._desktop.run("launch", self._task.exe)
+        if not envelope.get("ok"):
+            return _summary(envelope)
+        data = envelope["data"]
+        self._pid = data["pid"]
+        self._instance = data.get("process_instance")
+        self._current_window = (data.get("window") or {}).get("id")
+        return {"ok": True, "pid": self._pid, "windows": self._window_summaries()}
+
+    def _rows(self):
+        envelope = self._desktop.run("list-windows")
+        if not envelope.get("ok"):
+            return []
+        return [
+            row
+            for row in envelope.get("data") or []
+            if row.get("pid") == self._pid and row.get("process_instance") == self._instance
+        ]
+
+    def _window_summaries(self):
+        return [{key: row.get(key) for key in WINDOW_FIELDS} for row in self._rows()]
+
+    def _owned_window(self, window_id):
+        return next((row for row in self._rows() if row["id"] == window_id), None)
+
+    def _snapshot(self, window_id, root_ref=None, surface=None):
+        args = ["snapshot", "--window-id", window_id, "--compact", "--timeout-ms", OBSERVE_TIMEOUT_MS]
+        if root_ref:
+            args += ["--root", root_ref]
+        if surface:
+            args += ["--surface", surface]
+        args.append("--include-bounds")
+        return self._desktop.run(*args)
+
+    def _observe(self, window, root_ref=None, surface=None, include_bounds=False, source="observe"):
+        """Reads one window. A None source reads quietly: no observer call, only _last_read."""
+        window_id = window["id"]
+        envelope = self._snapshot(window_id, root_ref, surface)
+        if not envelope.get("ok"):
+            return {"observation_error": _summary(envelope)}
+        data = envelope["data"]
+        text, refs = render_tree(data["tree"], include_bounds)
+        self._refs = {**self._refs, **refs} if root_ref else refs
+        self._current_window = window_id
+        self._last_read = (window, envelope, text)
+        if source is not None:
+            self._observer.on_observation(window, envelope, text, source=source)
+        return {"window_id": window_id, "complete": data.get("complete"), "observation": text}
+
+    def _observe_current(self, source):
+        rows = self._rows()
+        ids = [row["id"] for row in rows]
+        windows = [{key: row.get(key) for key in WINDOW_FIELDS} for row in rows]
+        if not ids:
+            self._refs = {}
+            return {"windows": [], "observation_error": "The target has no open window"}
+        window_id = self._current_window if self._current_window in ids else ids[0]
+        window = next(row for row in rows if row["id"] == window_id)
+        return {"windows": windows, **self._observe(window, source=source)}
+
+    def _act(self, tool, element, identity, args, headed=False):
+        sig = signature(tool, element, *identity)
+        refusal = self._guard.check(sig)
+        if refusal:
+            return _refused(refusal)
+        result = _summary(self._desktop.run(*args, headed=headed))
+        self._guard.record(sig, result)
+        return result
+
+    def _ref_action(self, name, arguments):
+        ref = arguments["ref"]
+        element = self._refs.get(ref)
+        if element is None:
+            return _refused(f"{ref} is not in the latest observation. Observe again.")
+        spec = REF_ACTIONS[name]
+        args = [spec.command, ref]
+        identity = []
+        for option in spec.options:
+            args.append(f"--{option}={arguments[option]}")
+            identity.append(arguments[option])
+        if spec.positional:
+            args += ["--", arguments[spec.positional]]
+            identity.append(arguments[spec.positional])
+        return self._act(name, element, identity, args, headed=spec.headed)
+
+    def _physical(self, tool, arguments, points, args):
+        window_id = arguments["window_id"]
+        row = self._owned_window(window_id)
+        if row is None:
+            return _refused(f"{window_id} is not a window of the target process")
+        for point in points:
+            if not _inside(row["bounds"], *point):
+                return _refused(f"{point} is outside window {window_id}: {row['bounds']}")
+        self._desktop.run("focus-window", "--window-id", window_id, headed=True)
+        row = self._owned_window(window_id)
+        if row is None or not row.get("is_focused"):
+            return _refused(f"Window {window_id} could not take focus, so the point may hit another app")
+        identity = sorted((k, v) for k, v in arguments.items() if k not in NON_IDENTITY_ARGUMENTS)
+        element = {"role": "window", "name": window_id}
+        self._current_window = window_id
+        return self._act(tool, element, identity, args, headed=True)
+
+    def _tool_list_windows(self, _arguments):
+        return {"ok": True, "windows": self._window_summaries()}
+
+    def _tool_observe(self, arguments):
+        window_id = arguments["window_id"] or self._current_window
+        window = None if window_id is None else self._owned_window(window_id)
+        if window is None:
+            return _refused(f"{window_id} is not a window of the target process")
+        root_ref = arguments["root_ref"]
+        if root_ref and root_ref not in self._refs:
+            return _refused(f"{root_ref} is not in the latest observation")
+        result = self._observe(window, root_ref, arguments["surface"], arguments["include_bounds"])
+        return {"ok": "observation" in result, **result}
+
+    def _tool_wait_for_text(self, arguments):
+        text = arguments["text"]
+        started = self.clock()
+        deadline = started + arguments["timeout_ms"] / 1000
+        self.forget_last_read()
+        polls = 0
+        while True:
+            latest = self._observe_current(source=None)
+            polls += 1
+            found = text in latest.get("observation", "")
+            if found or self.clock() >= deadline:
+                break
+            self.sleep(POLL_S)
+        waited_ms = round((self.clock() - started) * 1000)
+        self.report_wait({"text": text, "found": found, "polls": polls, "waited_ms": waited_ms})
+        return {"ok": True, "found": found, **latest}
+
+    def _tool_restore_window(self, arguments):
+        window_id = arguments["window_id"]
+        if self._owned_window(window_id) is None:
+            return _refused(f"{window_id} is not a window of the target process")
+        self._current_window = window_id
+        return _summary(self._desktop.run("restore", "--window-id", window_id))
+
+    def _tool_press(self, arguments):
+        window_id = arguments["window_id"]
+        if self._owned_window(window_id) is None:
+            return _refused(f"{window_id} is not a window of the target process")
+        combo = arguments["combo"]
+        args = ["press", "--window-id", window_id, combo]
+        headed = self._task.permission_level >= 2
+        element = {"role": "window", "name": window_id}
+        self._current_window = window_id
+        return self._act("press", element, [combo], args, headed=headed)
+
+    def _tool_mouse_click(self, arguments):
+        x, y = arguments["x"], arguments["y"]
+        args = ["mouse-click", f"--xy={x},{y}", f"--button={arguments['button']}"]
+        return self._physical("mouse_click", arguments, [(x, y)], args)
+
+    def _tool_mouse_wheel(self, arguments):
+        x, y = arguments["x"], arguments["y"]
+        args = ["mouse-wheel", f"--x={x}", f"--y={y}", f"--dy={arguments['dy']}"]
+        return self._physical("mouse_wheel", arguments, [(x, y)], args)
+
+    def _tool_drag(self, arguments):
+        start = (arguments["from_x"], arguments["from_y"])
+        end = (arguments["to_x"], arguments["to_y"])
+        args = ["drag", f"--from-xy={start[0]},{start[1]}", f"--to-xy={end[0]},{end[1]}"]
+        return self._physical("drag", arguments, [start, end], args)
+
+    def _tool_restart_target(self, _arguments):
+        if not self._rows():
+            return _refused("Cannot prove the pid still belongs to the target, so nothing was closed")
+        prompt = f"앱을 재시작합니다. 저장하지 않은 작업이 사라질 수 있습니다.\n{self._task.exe} (pid {self._pid})"
+        if not self._confirm(prompt):
+            return _refused("The user declined the restart")
+        if not self._desktop.close_process(self._pid):
+            return {"ok": False, "code": "RESTART_FAILED", "message": "The close request failed"}
+        deadline = self.clock() + RESTART_WAIT_S
+        while self._rows():
+            if self.clock() >= deadline:
+                return {"ok": False, "code": "RESTART_TIMEOUT", "message": "The app is still open; it may be prompting"}
+            self.sleep(POLL_S)
+        return self._launch()
+
+
+def _inside(bounds, x, y):
+    return (
+        bounds["x"] <= x < bounds["x"] + bounds["width"]
+        and bounds["y"] <= y < bounds["y"] + bounds["height"]
+    )
