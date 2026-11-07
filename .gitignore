@@ -58,6 +58,7 @@ logs/
 
 # Local agent tooling
 .claude/
+.coordination/
 .cursor/
 .context/
 skills-lock.json

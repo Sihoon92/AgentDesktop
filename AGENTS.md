@@ -7,6 +7,8 @@ accessibility trees and returns structured JSON with ref-based element ids. The 
 calling agent. It never embeds an LLM and has no GUI or interactive prompt. It does not automate web pages (use
 agent-browser). It cannot see UIs that expose no accessibility tree.
 
+When agents in several terminals work in this checkout at once, follow `ORCHESTRATION.md`: one designated orchestrator assigns the work, and every other agent is a worker.
+
 ## Critical: fixes must be application-agnostic
 
 Every fix must work through the platform's shared accessibility and lifecycle contracts across applications.
