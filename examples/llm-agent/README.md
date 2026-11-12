@@ -177,6 +177,14 @@ python -m pytest -q
 
 테스트는 `tests\fixtures`에 캡처한 CLI 응답을 재생하므로 앱을 조작하지 않습니다.
 
+## 가상 MES 앱
+
+`virtual-mes\`는 회사 MES의 화면과 조작 흐름을 흉내 낸 연습용 앱입니다. 컨트롤이 접근성 트리에 보이는 방식(ref, 글자만, 그림만)을 실행 옵션으로 바꿀 수 있어, 에이전트가 ref 없는 화면을 다루는지 시험할 수 있습니다. 빌드, 옵션, 이벤트 기록은 [`virtual-mes/README.md`](virtual-mes/README.md)에 있습니다.
+
+```powershell
+powershell -NoProfile -File virtual-mes\build.ps1
+```
+
 ## OpenAI 호환 API
 
 `OPENAI_BASE_URL`을 설정하면 다른 엔드포인트로 호출합니다. 도구 호출에 Responses API를 쓰므로, 해당 엔드포인트가 이 API를 지원해야 합니다.

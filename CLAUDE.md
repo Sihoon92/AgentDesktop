@@ -85,6 +85,8 @@ python view.py --prune --older-than 30d [--yes]              # 오래된 기록 
 python view.py --export <run_id|latest> <out.html>           # 실행 하나를 서버 없이 열리는 HTML로
 ```
 
+**가상 MES 앱:** `examples/llm-agent/virtual-mes/`는 CUA 개발용 연습 앱입니다(`virtual-mes/README.md`). `powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1`로 빌드합니다. `tests\test_virtual_mes.py`는 창을 띄우지 않습니다. `tests\test_virtual_mes_live.py`는 `VIRTUAL_MES_LIVE=1`일 때만 돌고 실제 창을 띄우며 커서를 움직이므로, 돌리기 전에 사용자에게 확인받습니다.
+
 실행마다 `runs\<id>\`에 스크린샷과 요소 박스가 기록되고(`agent/recorder.py`), 뷰어(`viewer/`)가 표준 라이브러리 서버로 127.0.0.1에서 토큰을 받아 보여 줍니다.
 
 `run.py`가 작업 파일과 CLI 바이너리를 찾아 `agent/loop.py`의 루프를 돌립니다. 모델은 `agent/tools.py`의 도구로만 앱을 조작하고, 쓸 수 있는 도구는 작업 파일의 `permission_level`로 제한되며, `agent/guard.py`가 반복 동작을 막습니다. 성공 여부는 모델이 아니라 하니스(`agent/verify.py`)가 작업 파일의 `success` 조건으로 판단합니다. 바이너리는 `AGENT_DESKTOP_BIN`, `target/release`, `target/debug` 순으로 찾습니다.
