@@ -70,6 +70,8 @@ $env:AGENT_DESKTOP_HOME = '<임시폴더>\state'
 
 `agent-desktop` CLI 위에 관찰-동작 루프를 올린 Python 에이전트입니다(README 참고). 저장소의 Rust 규칙은 적용되지 않습니다.
 
+**CUA 배경:** 이 예제는 사내 MES용 computer-use agent로 키우는 중입니다. 설계, 기능 추가, workflow 생성, 다른 시스템으로의 일반화, 회사에서 전해 온 현상 해석 전에 `examples/llm-agent/docs/cua-background.md`를 읽습니다. 회사 실행 결과는 집으로 가져올 수 없고 사용자가 말로 전합니다.
+
 ```powershell
 Set-Location examples\llm-agent
 conda activate AgentDesktop
@@ -87,4 +89,4 @@ python view.py --export <run_id|latest> <out.html>           # 실행 하나를 
 
 `run.py`가 작업 파일과 CLI 바이너리를 찾아 `agent/loop.py`의 루프를 돌립니다. 모델은 `agent/tools.py`의 도구로만 앱을 조작하고, 쓸 수 있는 도구는 작업 파일의 `permission_level`로 제한되며, `agent/guard.py`가 반복 동작을 막습니다. 성공 여부는 모델이 아니라 하니스(`agent/verify.py`)가 작업 파일의 `success` 조건으로 판단합니다. 바이너리는 `AGENT_DESKTOP_BIN`, `target/release`, `target/debug` 순으로 찾습니다.
 
-**사내 배포:** 내부 OpenAI 호환 LLM을 `OPENAI_BASE_URL`로 쓸 계획입니다. 이 예제는 Chat Completions가 아니라 **Responses API**를 호출하므로(`agent/llm.py`), 내부 API의 지원 여부를 확인해야 합니다. `scripts/jev/`는 외부 결정 API로 화면 내용을 보내고 OpenAI 형식도 아니므로 사내에서 쓰지 않습니다.
+**사내 배포:** 내부 OpenAI 호환 LLM을 `OPENAI_BASE_URL`로 쓸 계획입니다. 이 예제는 Chat Completions가 아니라 **Responses API**를 호출하며(`agent/llm.py`), 내부 API도 이를 지원한다고 사용자가 확인했습니다. `scripts/jev/`는 외부 결정 API로 화면 내용을 보내고 OpenAI 형식도 아니므로 사내에서 쓰지 않습니다.
