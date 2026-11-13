@@ -3,6 +3,9 @@ import json
 import run
 import yaml
 
+from agent.ask import NoAsker, TerminalAsker
+from agent.registration import register_after_run
+
 
 def write_task(tmp_path, exe):
     path = tmp_path / "task.yaml"
@@ -206,7 +209,7 @@ def test_agent_run_is_recorded_in_its_own_folder(monkeypatch, tmp_path, capsys):
     isolate(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "test")
 
-    def agent(_model, _toolbox, _task, log, gate=None):
+    def agent(_model, _toolbox, _task, log, gate=None, register=None):
         log({"type": "model", "step": 1, "tokens": 7})
         log({"type": "tool", "step": 1, "tool": "launch_target", "arguments": "{}", "result": {"ok": True}})
         return run.RunResult("claimed", 1, "done", 7)
@@ -240,7 +243,7 @@ def test_approve_flag_hands_a_terminal_gate_to_the_agent(monkeypatch, tmp_path):
     monkeypatch.setattr(run, "is_interactive", lambda: True)
     gates = []
 
-    def agent(_model, _toolbox, _task, _log, gate=None):
+    def agent(_model, _toolbox, _task, _log, gate=None, register=None):
         gates.append(gate)
         return run.RunResult("claimed", 1, "done")
 
@@ -402,7 +405,7 @@ def test_viewer_that_cannot_start_only_warns(monkeypatch, tmp_path, capsys):
 
 
 def agent_returning(status):
-    def agent(_model, _toolbox, _task, log, gate=None):
+    def agent(_model, _toolbox, _task, log, gate=None, register=None):
         log({"type": "model", "step": 1, "tokens": 7})
         return run.RunResult(status, 1, "done", 7)
 
@@ -436,3 +439,108 @@ def test_run_prints_how_to_open_it_later(monkeypatch, tmp_path, capsys):
     lines = capsys.readouterr().out.splitlines()
     record = next(i for i, line in enumerate(lines) if line.startswith("기록: "))
     assert lines[record + 1] == f"나중에 보기: python view.py --open {folder.name}"
+
+
+def test_captures_are_written_inside_the_run_folder(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    seen = []
+    monkeypatch.setattr(run, "run_baseline", lambda toolbox, task: seen.append(toolbox._captures_path())
+                        or run.RunResult("verified", 4, "yes"))
+
+    run.main([str(write_task(tmp_path, make_exe(tmp_path))), "--baseline"])
+
+    [run_dir] = [path for path in (tmp_path / "runs").iterdir() if path.is_dir()]
+    assert seen == [run_dir / "captures"]
+
+
+def wired(monkeypatch, tmp_path, *argv, interactive=False, status="claimed"):
+    """Runs main with the agent (or baseline) replaced; returns (exit code, toolbox, register)."""
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("AGENT_KNOWLEDGE_DIR", str(tmp_path / "env-knowledge"))
+    monkeypatch.setattr(run, "is_interactive", lambda: interactive)
+    seen = {}
+
+    def agent(_model, toolbox, _task, _log, gate=None, register=None):
+        seen.update(toolbox=toolbox, register=register)
+        return run.RunResult(status, 2, "done")
+
+    def baseline(toolbox, _task):
+        seen.update(toolbox=toolbox, register=None)
+        return run.RunResult(status, 2, "done")
+
+    monkeypatch.setattr(run, "run_agent", agent)
+    monkeypatch.setattr(run, "run_baseline", baseline)
+    code = run.main([str(arg) for arg in argv])
+    return code, seen.get("toolbox"), seen.get("register")
+
+
+def mes_exe(tmp_path):
+    exe = tmp_path / "VirtualMes.exe"
+    exe.write_text("", encoding="utf-8")
+    return exe
+
+
+def test_confirmed_exits_zero(monkeypatch, tmp_path):
+    assert wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x", status="confirmed")[0] == 0
+
+
+def test_interactive_runs_ask_on_the_terminal_and_others_do_not(monkeypatch, tmp_path):
+    _, asked, _ = wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x", interactive=True)
+    _, silent, _ = wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x", interactive=False)
+
+    assert isinstance(asked.asker, TerminalAsker) and asked.can_ask
+    assert isinstance(silent.asker, NoAsker) and not silent.can_ask
+
+
+def test_system_defaults_to_the_exe_name_and_can_be_overridden(monkeypatch, tmp_path):
+    exe = mes_exe(tmp_path)
+    assert wired(monkeypatch, tmp_path, "--exe", exe, "--goal", "x")[1].knowledge.system == "virtualmes"
+    assert wired(monkeypatch, tmp_path, "--exe", exe, "--goal", "x", "--system", "mes")[1].knowledge.system == "mes"
+
+
+def test_task_file_system_and_knowledge_dir_are_used(monkeypatch, tmp_path):
+    task = write_task(tmp_path, mes_exe(tmp_path))
+    task.write_text(task.read_text(encoding="utf-8")
+                    + f"system: 공정\nknowledge_dir: {tmp_path / 'task-knowledge'}\n", encoding="utf-8")
+
+    store = wired(monkeypatch, tmp_path, task)[1].knowledge
+
+    assert store.system == "공정" and store.folder == tmp_path / "task-knowledge" / "공정"
+
+
+def test_knowledge_dir_argument_wins(monkeypatch, tmp_path):
+    exe = mes_exe(tmp_path)
+    store = wired(monkeypatch, tmp_path, "--exe", exe, "--goal", "x", "--knowledge-dir", tmp_path / "arg")[1].knowledge
+    assert store.folder == tmp_path / "arg" / "virtualmes"
+
+
+def test_knowledge_dir_falls_back_to_the_environment(monkeypatch, tmp_path):
+    store = wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x")[1].knowledge
+    assert store.folder == tmp_path / "env-knowledge" / "virtualmes"
+
+
+def test_register_is_bound_to_the_store_and_the_run(monkeypatch, tmp_path):
+    _, toolbox, register = wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x")
+
+    [run_dir] = [path for path in (tmp_path / "runs").iterdir() if path.is_dir()]
+    assert register.func is register_after_run
+    assert register.keywords == {"store": toolbox.knowledge, "run_id": run_dir.name}
+
+
+def test_baseline_wires_no_asker_knowledge_or_register(monkeypatch, tmp_path):
+    _, toolbox, register = wired(monkeypatch, tmp_path, write_task(tmp_path, mes_exe(tmp_path)), "--baseline",
+                                 interactive=True)
+    assert register is None and toolbox.asker is None and toolbox.knowledge is None
+
+
+def test_run_json_names_the_system(monkeypatch, tmp_path):
+    wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x", "--system", "mes")
+    [(meta, _)] = recorded_runs(tmp_path)
+    assert meta["system"] == "mes"
+
+
+def test_a_bad_system_name_stops_before_touching_the_app(monkeypatch, tmp_path, capsys):
+    code, toolbox, _ = wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x", "--system", "a/b")
+    assert code == 2 and toolbox is None
+    assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())

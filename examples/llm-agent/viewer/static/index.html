@@ -6,11 +6,17 @@
   <meta name="referrer" content="no-referrer">
   <title>에이전트 단계 뷰어</title>
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/chat.js" defer></script>
+  <script src="/static/knowledge.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
     <h1>에이전트 단계 뷰어</h1>
+    <div id="view-switch" class="segmented view-switch" role="group" aria-label="보기" hidden>
+      <button type="button" id="show-runs" aria-pressed="true">실행</button>
+      <button type="button" id="show-knowledge" aria-pressed="false">지식</button>
+    </div>
     <p class="hint" id="key-hint">← → 단계 이동 · B 동작 전/후 · A 전체 요소/대상만 · T 텍스트 박스</p>
   </header>
 
@@ -24,6 +30,10 @@
     <label class="field exe-field">
       <span>실행 파일</span>
       <input id="exe" name="exe" type="text" spellcheck="false">
+    </label>
+    <label class="field system-field">
+      <span>시스템</span>
+      <input id="system" name="system" type="text" maxlength="64" spellcheck="false" placeholder="비우면 실행 파일 이름" title="지식을 나눠 두는 이름. 영문, 숫자, 한글, '.', '_', '-'">
     </label>
     <label class="field">
       <span>권한</span>
@@ -90,14 +100,23 @@
       <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
     </main>
 
-    <aside class="details" aria-label="단계 정보">
-      <div id="step-info"></div>
-      <details id="observation-box" class="observation" hidden>
-        <summary>모델이 받은 관찰 텍스트</summary>
-        <pre id="observation-text"></pre>
-      </details>
+    <aside class="details" aria-label="단계 정보와 대화">
+      <div class="details-scroll">
+        <div id="step-info"></div>
+        <details id="observation-box" class="observation" hidden>
+          <summary>모델이 받은 관찰 텍스트</summary>
+          <pre id="observation-text"></pre>
+        </details>
+      </div>
+      <section id="chat" class="chat" aria-label="질문과 답" hidden>
+        <h2 class="chat-title">대화</h2>
+        <ol id="chat-log" class="chat-log"></ol>
+        <div id="chat-composer" class="chat-composer"></div>
+      </section>
     </aside>
   </div>
+
+  <section id="knowledge-view" class="knowledge-view" aria-label="시스템별 지식" hidden></section>
 
   <footer class="timeline-bar">
     <div id="run-summary" class="run-summary" role="status" hidden></div>

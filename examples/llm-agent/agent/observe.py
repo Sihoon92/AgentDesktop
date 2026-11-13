@@ -16,7 +16,21 @@ def render_tree(tree, include_bounds=False):
     return "\n".join(lines), refs
 
 
-def _render(node, depth, include_bounds, lines, refs):
+def render_marked(tree, include_bounds=False):
+    """Like render_tree, but numbers every visible element and returns that numbering too.
+
+    Each line that visible_elements would return starts with "[n] " after its indentation.
+    The third value maps n to that element with "mark": n added. Numbers follow tree order
+    from 1 and are only meaningful for this one observation.
+    """
+    lines = []
+    refs = {}
+    marks = {}
+    _render(tree, 0, include_bounds, lines, refs, marks, tree.get("role") == "window")
+    return "\n".join(lines), refs, marks
+
+
+def _render(node, depth, include_bounds, lines, refs, marks=None, is_window_root=False):
     if node.get("ref_id"):
         refs[node["ref_id"]] = {
             "role": node.get("role"),
@@ -24,11 +38,16 @@ def _render(node, depth, include_bounds, lines, refs):
             "description": node.get("description"),
             "bounds": node.get("bounds"),
         }
+    prefix = ""
+    if marks is not None and _is_element(node, is_window_root):
+        number = len(marks) + 1
+        marks[number] = dict(_element(node), mark=number)
+        prefix = f"[{number}] "
     if _is_informative(node):
-        lines.append("  " * depth + _line(node, include_bounds))
+        lines.append("  " * depth + prefix + _line(node, include_bounds))
         depth += 1
     for child in node.get("children", []):
-        _render(child, depth, include_bounds, lines, refs)
+        _render(child, depth, include_bounds, lines, refs, marks)
 
 
 def visible_elements(tree):
@@ -43,22 +62,28 @@ def visible_elements(tree):
 
 
 def _collect(node, is_window_root, elements):
-    has_text = any(node.get(key) for key in ("name", "description", "value"))
-    if node.get("ref_id") or (has_text and not is_window_root):
-        elements.append(
-            {
-                "kind": "control" if node.get("ref_id") else "text",
-                "ref": node.get("ref_id"),
-                "role": node.get("role"),
-                "name": node.get("name"),
-                "description": node.get("description"),
-                "states": list(node.get("states") or []),
-                "value": node.get("value"),
-                "bounds": node.get("bounds"),
-            }
-        )
+    if _is_element(node, is_window_root):
+        elements.append(_element(node))
     for child in node.get("children", []):
         _collect(child, False, elements)
+
+
+def _is_element(node, is_window_root):
+    has_text = any(node.get(key) for key in ("name", "description", "value"))
+    return bool(node.get("ref_id") or (has_text and not is_window_root))
+
+
+def _element(node):
+    return {
+        "kind": "control" if node.get("ref_id") else "text",
+        "ref": node.get("ref_id"),
+        "role": node.get("role"),
+        "name": node.get("name"),
+        "description": node.get("description"),
+        "states": list(node.get("states") or []),
+        "value": node.get("value"),
+        "bounds": node.get("bounds"),
+    }
 
 
 def _is_informative(node):

@@ -565,3 +565,164 @@ def test_empty_selection_queries_and_saves_zero_rows(tmp_path):
         app.save_dialog(target)
         assert app.wait_for_event("export_saved")["rows"] == 0
     assert read_xlsx(target) == [["일자", "Shop", "공정", "제품", "생산수", "불량수", "불량률"]]
+
+
+def combo_events(app):
+    return [e["event"] for e in app.events() if e["event"].startswith("combo_")]
+
+
+def tree_node(app, window, automation_id):
+    """The snapshot node with this automation id, children included."""
+    def visit(node):
+        if (node.get("native_id") or {}).get("value") == automation_id:
+            return node
+        for child in node.get("children") or []:
+            found = visit(child)
+            if found is not None:
+                return found
+        return None
+
+    return visit(app.snapshot(window)["tree"])
+
+
+def right_end(bounds):
+    """A point inside the box's arrow square: the right end, one box height wide."""
+    return int(bounds["x"] + bounds["width"] - bounds["height"] / 2), int(bounds["y"] + bounds["height"] / 2)
+
+
+def test_arrow_mode_body_click_shows_no_list(tmp_path):
+    with LiveApp(tmp_path, "--profile", "easy", "--combo-open", "arrow") as app:
+        open_front(app)
+        app.wait_for_event("screen_opened")
+        before = len(app.windows())
+        app.click(app.by_id("filter-shop-3")["ref"])
+        body = app.wait_for_event("combo_body_clicked")
+        assert (body["screen"], body["filter"]) == ("front-process", "shop-3")
+        assert len(app.windows()) == before
+        assert not [w for w in app.windows() if w["title"] == "목록"]
+        assert combo_events(app) == ["combo_body_clicked"]
+
+
+def test_arrow_mode_arrow_click_opens_the_list(tmp_path):
+    with LiveApp(tmp_path, "--profile", "easy", "--combo-open", "arrow") as app:
+        open_front(app)
+        app.wait_for_event("screen_opened")
+        before = len(app.windows())
+        app.click(app.by_id("filter-shop-3-arrow")["ref"])
+        arrow = app.wait_for_event("combo_arrow_clicked")
+        assert (arrow["screen"], arrow["filter"]) == ("front-process", "shop-3")
+        assert [w["title"] for w in app.wait_for_windows(before + 1)].count("목록") == 1
+        assert combo_events(app) == ["combo_arrow_clicked"]
+
+
+def test_arrow_mode_text_filters_open_only_at_the_right_end(tmp_path):
+    with LiveApp(tmp_path, "--combo-open", "arrow", "--delay-ms", "200") as app:
+        open_front(app)
+        app.wait_for_event("screen_opened")
+        before = len(app.windows())
+        period = next(n for n in app.nodes(app.main()) if n.get("name") == "전일")
+        app.click_at_center(period)
+        app.wait_for_event("combo_body_clicked")
+        assert len(app.windows()) == before
+        app.focus(app.main())
+        x, y = right_end(period["bounds"])
+        app.cli("--headed", "mouse-click", f"--xy={x},{y}")
+        assert app.wait_for_event("combo_arrow_clicked")["filter"] == "period"
+        app.wait_for_node(lambda n: n.get("name") == "전주", "the open period list")
+
+
+def test_arrow_is_a_child_button_only_in_ref_mode(tmp_path):
+    with LiveApp(tmp_path, "--profile", "easy", "--combo-open", "arrow") as app:
+        open_front(app)
+        app.wait_for_event("screen_opened")
+        box = tree_node(app, app.main(), "filter-shop-3")
+        children = [child for child in box.get("children") or []
+                    if (child.get("native_id") or {}).get("value") == "filter-shop-3-arrow"]
+        assert len(children) == 1
+        assert children[0]["role"] == "button" and children[0]["name"] == "열기" and children[0].get("ref_id")
+        arrow, body = children[0]["bounds"], box["bounds"]
+        assert arrow["x"] + arrow["width"] == body["x"] + body["width"] and arrow["width"] == body["height"]
+    for options in (("--combo-open", "arrow"), ("--expose", "filters=pixel", "--combo-open", "arrow")):
+        with LiveApp(tmp_path / options[1].replace("=", "-"), *options) as app:
+            open_front(app)
+            app.wait_for_event("screen_opened")
+            assert not [n for n in app.all_nodes() if n.get("name") == "열기"]
+
+
+def test_arrow_mode_disabled_boxes_do_not_react(tmp_path):
+    with LiveApp(tmp_path, "--profile", "easy", "--combo-open", "arrow") as app:
+        open_roller(app)
+        app.wait_for_event("screen_opened")
+        assert "disabled" in app.by_id("filter-shop-1-arrow").get("states", [])
+        before = len(app.windows())
+        app.click_at_center(app.by_id("filter-shop-1"))
+        x, y = right_end(app.by_id("filter-shop-1")["bounds"])
+        app.cli("--headed", "mouse-click", f"--xy={x},{y}")
+        assert len(app.windows()) == before and combo_events(app) == []
+
+
+def test_anywhere_mode_still_opens_on_a_body_click(tmp_path):
+    with LiveApp(tmp_path, "--profile", "easy") as app:
+        open_front(app)
+        app.wait_for_event("screen_opened")
+        assert app.events()[0]["combo_open"] == "anywhere"
+        before = len(app.windows())
+        app.click(app.by_id("filter-shop-3")["ref"])
+        app.wait_for_windows(before + 1)
+        assert not [n for n in app.all_nodes() if n.get("id") == "filter-shop-3-arrow"]
+        assert combo_events(app) == []
+
+
+def open_summary(app):
+    app.click(app.find("생산운영", role="button")["ref"])
+    app.click(app.find("공정별 생산집계")["ref"])
+    app.wait_for_event("screen_opened")
+
+
+def test_menu_lists_six_screens(tmp_path):
+    with LiveApp(tmp_path, "--profile", "easy") as app:
+        before = len(app.windows())
+        app.click(app.find("생산운영", role="button")["ref"])
+        listing = next(w for w in app.wait_for_windows(before + 1) if w["title"] == "메뉴 목록")
+        entries = [n["name"] for n in app.nodes(listing["id"]) if (n.get("id") or "").startswith("screen-")]
+        assert entries == ["전공정 생산현황", "후공정 생산현황", "공정별 불량현황", "권취 Roller 점검일시",
+                           "설비 가동현황", "공정별 생산집계"]
+
+
+def test_grouped_header_cells_span_their_columns(tmp_path):
+    with LiveApp(tmp_path, "--delay-ms", "200") as app:
+        open_summary(app)
+        query(app)
+        nodes = app.nodes(app.main())
+        def text(name):
+            return [n for n in nodes if n.get("name") == name and n.get("role") == "statictext"]
+        production = text("생산")[0]["bounds"]
+        work, yield_rate = text("작업수")[0]["bounds"], text("수율(Loss제외)")[0]["bounds"]
+        assert production["x"] <= work["x"] and production["x"] + production["width"] >= yield_rate["x"] + yield_rate["width"]
+        assert production["y"] + production["height"] <= work["y"]
+        plans = sorted(text("계획"), key=lambda n: n["bounds"]["width"])
+        assert len(plans) == 2 and plans[0]["bounds"]["y"] > plans[1]["bounds"]["y"]
+        shop = text("SHOP")[0]["bounds"]
+        assert shop["height"] >= 2 * work["height"]
+
+
+def test_clicking_a_number_cell_logs_row_and_column_and_opens_the_popup(tmp_path):
+    with LiveApp(tmp_path, "--profile", "easy", "--delay-ms", "200") as app:
+        open_summary(app)
+        query(app)
+        before = len(app.windows())
+        result = app.events()
+        table = [n for n in app.nodes(app.main()) if (n.get("id") or "").startswith("cell-")]
+        row = next(n for n in table if n.get("name") == "극판")
+        subtotal = next(n for n in table if n.get("name") == "소계"
+                        and abs(n["bounds"]["y"] - row["bounds"]["y"]) < 2)
+        cell = next(n for n in table if n["id"] == subtotal["id"].rsplit("-", 1)[0] + "-7")
+        app.click(cell["ref"])
+        clicked = app.wait_for_event("cell_clicked")
+        assert clicked["row"] == ["극판", "소계", ""] and clicked["column"] == ["생산", "양품수"]
+        assert app.wait_for_event("cell_popup_opened")["column"] == "양품수"
+        app.wait_for_windows(before + 1)
+        assert len(result) < len(app.events())
+        label = next(n for n in table if n.get("name") == "코팅")
+        app.click(label["ref"])
+        assert len([e for e in app.events() if e["event"] == "cell_clicked"]) == 1

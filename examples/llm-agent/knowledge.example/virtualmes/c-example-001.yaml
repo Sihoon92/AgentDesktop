@@ -1,0 +1,12 @@
+id: c-example-001
+type: completion
+status: active
+task: 조회 결과를 엑셀 파일로 저장하는 작업
+checks:
+- kind: file
+  pattern: '*.xlsx'
+source:
+  run_id: example
+  date: '2026-11-13'
+uses: 0
+failures: 0

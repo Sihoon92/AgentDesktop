@@ -179,7 +179,49 @@ namespace VirtualMesApp
                 cellClick = this.OpenCellPopup;
             }
             this.CloseCellPopup();
+            if (this.spec.Kind == ScreenSpec.KindGrouped)
+            {
+                GridSurface.FillGrouped(
+                    this.grid, result, this.gridHost.ClientSize.Width, this.OpenSummaryCell, this.OpenRadial);
+                return;
+            }
             GridSurface.Fill(this.grid, result, this.gridHost.ClientSize.Width, cellClick, this.OpenRadial);
+        }
+
+        /// <summary>
+        /// Opens the detail window for a number cell of the grouped table and records the cell by
+        /// its three row names and its upper and lower header names.
+        /// </summary>
+        private void OpenSummaryCell(int row, int column)
+        {
+            QueryResult result = this.session.Result;
+            if (result == null || this.session.ResultFilters == null || row > result.Rows.Count
+                || column < result.LabelColumns)
+            {
+                return;
+            }
+            string[] values = result.Rows[row - 1];
+            string[] rowNames = { values[0], values[1], values[2] };
+            string[] columnNames = { result.GroupOf(column), result.Header[column] };
+            List<string> named = new List<string>();
+            foreach (string name in rowNames)
+            {
+                if (name.Length > 0)
+                {
+                    named.Add(name);
+                }
+            }
+            string rowText = string.Join(" · ", named.ToArray());
+            QueryResult detail = MesData.SummaryDetail(this.session.ResultFilters.Clone(), values[0], values[1]);
+
+            PopupHost.CloseAll(PopupHost.ReasonOutsideClick);
+            this.CloseCellPopup();
+            this.session.CellClicked(rowNames, columnNames);
+            this.session.CellPopupOpened(rowText, columnNames[1]);
+            this.cellPopup = new CellPopup(
+                this.session, this.frame, "생산 상세 · " + rowText + " · " + columnNames[1],
+                "생산 상세 " + rowText.Replace(" · ", " ") + ".xlsx", detail);
+            this.cellPopup.Show(this.frame);
         }
 
         /// <summary>Opens the detail window for a number cell. The first column holds row names and opens nothing.</summary>
@@ -199,7 +241,9 @@ namespace VirtualMesApp
             PopupHost.CloseAll(PopupHost.ReasonOutsideClick);
             this.CloseCellPopup();
             this.session.CellPopupOpened(rowName, columnName);
-            this.cellPopup = new CellPopup(this.session, this.frame, rowName, columnName, detail);
+            this.cellPopup = new CellPopup(
+                this.session, this.frame, "불량 상세 · " + rowName + " · " + columnName,
+                "불량 상세 " + rowName + ".xlsx", detail);
             this.cellPopup.Show(this.frame);
         }
 

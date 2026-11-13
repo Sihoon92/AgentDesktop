@@ -9,6 +9,35 @@ namespace VirtualMesApp
     {
         internal string[] Header;
         internal List<string[]> Rows = new List<string[]>();
+
+        /// <summary>
+        /// The upper header row of a two-row header, or null for a one-row header. Each name
+        /// covers `GroupSpans` of the columns in `Header`, left to right.
+        /// </summary>
+        internal string[] GroupNames;
+        internal int[] GroupSpans;
+
+        /// <summary>How many leading columns name the row rather than hold numbers.</summary>
+        internal int LabelColumns = 1;
+
+        /// <summary>The upper header name over a column, or the column's own name for a one-row header.</summary>
+        internal string GroupOf(int column)
+        {
+            if (this.GroupNames == null)
+            {
+                return this.Header[column];
+            }
+            int start = 0;
+            for (int group = 0; group < this.GroupNames.Length; group++)
+            {
+                if (column < start + this.GroupSpans[group])
+                {
+                    return this.GroupNames[group];
+                }
+                start += this.GroupSpans[group];
+            }
+            return this.Header[column];
+        }
     }
 
     /// <summary>
@@ -21,6 +50,8 @@ namespace VirtualMesApp
         internal const string RollerCheck = "roller-check";
         internal const string DefectByProcess = "defect-by-process";
         internal const string DefectDetail = "defect-detail";
+        internal const string ProcessSummary = "process-summary";
+        internal const string Subtotal = "소계";
 
         internal static readonly DateTime Today = new DateTime(2026, 11, 12);
         internal static readonly DateTime FirstDay = new DateTime(2026, 11, 1);
@@ -99,9 +130,138 @@ namespace VirtualMesApp
             {
                 return Detail(filters, from, to);
             }
+            if (screenId == ProcessSummary)
+            {
+                return Summary(filters, from, to);
+            }
             throw new OptionsException(
                 "Unknown screen: " + screenId + ". Use " + FrontProcess + ", " + RollerCheck + ", "
-                + DefectByProcess + " or " + DefectDetail + ".");
+                + DefectByProcess + ", " + DefectDetail + " or " + ProcessSummary + ".");
+        }
+
+        private sealed class SummaryTotals
+        {
+            internal long Plan;
+            internal long Work;
+            internal long Defects;
+            internal long Loss;
+            internal long Escaped;
+
+            internal void Add(SummaryTotals other)
+            {
+                this.Plan += other.Plan;
+                this.Work += other.Work;
+                this.Defects += other.Defects;
+                this.Loss += other.Loss;
+                this.Escaped += other.Escaped;
+            }
+
+            internal long Good
+            {
+                get { return this.Work - this.Defects - this.Loss - this.Escaped; }
+            }
+        }
+
+        /// <summary>
+        /// Per shop: a subtotal row (그룹공정 소계, 공정 blank) first, then one subtotal row per
+        /// group process (공정 소계). Every count is a sum over the front-process rows, so a
+        /// shop's subtotal is exactly the sum of its group rows.
+        /// </summary>
+        private static QueryResult Summary(FilterValues filters, DateTime from, DateTime to)
+        {
+            QueryResult result = new QueryResult();
+            result.Header = new[]
+            {
+                "SHOP", "그룹공정", "공정", "계획", "실적", "달성률", "작업수", "양품수", "양품율",
+                "수율(Loss제외)", "불량수", "불량율(PPM)", "LOSS수", "LOSS율(PPM)", "이탈수", "이탈율(PPM)"
+            };
+            result.GroupNames = new[] { "SHOP", "공정", "계획", "생산", "불량" };
+            result.GroupSpans = new[] { 1, 2, 3, 4, 6 };
+            result.LabelColumns = 3;
+            for (int shop = 0; shop < ShopCodes.Length; shop++)
+            {
+                if (!filters.Shop.Contains(ShopCodes[shop]))
+                {
+                    continue;
+                }
+                SummaryTotals shopTotals = new SummaryTotals();
+                List<string[]> groupRows = new List<string[]>();
+                foreach (string process in Processes[shop])
+                {
+                    SummaryTotals totals = GroupTotals(shop, process, from, to);
+                    shopTotals.Add(totals);
+                    groupRows.Add(SummaryRow(ShopNames[shop], process, Subtotal, totals));
+                }
+                result.Rows.Add(SummaryRow(ShopNames[shop], Subtotal, string.Empty, shopTotals));
+                result.Rows.AddRange(groupRows);
+            }
+            return result;
+        }
+
+        /// <summary>The front-process rows behind one summary row: a whole shop when `group` is 소계.</summary>
+        internal static QueryResult SummaryDetail(FilterValues filters, string shopName, string group)
+        {
+            DateTime from;
+            DateTime to;
+            string error;
+            if (!filters.TryResolvePeriod(out from, out to, out error))
+            {
+                throw new OptionsException(error);
+            }
+            List<string> only = new List<string>();
+            only.Add(ShopCodes[Array.IndexOf(ShopNames, shopName)]);
+            string process = group == Subtotal ? FilterValues.All : group;
+            QueryResult result = new QueryResult();
+            result.Header = new[] { "일자", "공정", "제품", "작업수", "불량수" };
+            foreach (FrontRow row in FrontRows(only, process, FilterValues.All, from, to))
+            {
+                result.Rows.Add(new[] { Day(row.Date), row.Process, row.Product, Count(row.Quantity), Count(row.Defects) });
+            }
+            return result;
+        }
+
+        private static SummaryTotals GroupTotals(int shop, string process, DateTime from, DateTime to)
+        {
+            SummaryTotals totals = new SummaryTotals();
+            List<string> only = new List<string>();
+            only.Add(ShopCodes[shop]);
+            int processIndex = shop * 2 + Array.IndexOf(Processes[shop], process);
+            foreach (FrontRow row in FrontRows(only, process, FilterValues.All, from, to))
+            {
+                totals.Plan += (row.Quantity * 21 / 20 + 99) / 100 * 100;
+                totals.Work += row.Quantity;
+                totals.Defects += row.Defects;
+                totals.Loss += row.Quantity * 3 / 1000 + (row.Date.Day + processIndex) % 5;
+                totals.Escaped += row.Quantity / 2500 + (3 * row.Date.Day + processIndex) % 3;
+            }
+            return totals;
+        }
+
+        private static string[] SummaryRow(string shop, string group, string process, SummaryTotals totals)
+        {
+            long done = totals.Work - totals.Escaped;
+            return new[]
+            {
+                shop, group, process,
+                Count(totals.Plan), Count(done), Percent(done, totals.Plan, "0.0"),
+                Count(totals.Work), Count(totals.Good), Percent(totals.Good, totals.Work, "0.00"),
+                Percent(totals.Good, totals.Work - totals.Loss, "0.00"),
+                Count(totals.Defects), Ppm(totals.Defects, totals.Work),
+                Count(totals.Loss), Ppm(totals.Loss, totals.Work),
+                Count(totals.Escaped), Ppm(totals.Escaped, totals.Work)
+            };
+        }
+
+        private static string Percent(long part, long whole, string format)
+        {
+            double rate = whole <= 0 ? 0.0 : part * 100.0 / whole;
+            return rate.ToString(format, CultureInfo.InvariantCulture) + "%";
+        }
+
+        private static string Ppm(long part, long whole)
+        {
+            long ppm = whole <= 0 ? 0 : (long)Math.Round(part * 1000000.0 / whole, MidpointRounding.AwayFromZero);
+            return ppm.ToString("N0", CultureInfo.InvariantCulture);
         }
 
         private static QueryResult Front(FilterValues filters, DateTime from, DateTime to)
@@ -283,7 +443,7 @@ namespace VirtualMesApp
             return value.ToString(CultureInfo.InvariantCulture);
         }
 
-        private static string Count(int value)
+        private static string Count(long value)
         {
             return value.ToString("N0", CultureInfo.InvariantCulture);
         }

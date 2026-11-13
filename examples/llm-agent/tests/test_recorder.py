@@ -124,7 +124,9 @@ def test_action_event_links_to_the_observation_it_acted_on(tmp_path):
     assert action["intent"] == "설정 패널을 연다"
     assert action["arguments"] == {"ref": ref, "intent": "설정 패널을 연다"}
     assert action["target"]["rect"] == SETTINGS_RECT
-    assert action["result"] == {
+    result = dict(action["result"])
+    assert result.pop("effects")["added"]["count"] > 0
+    assert result == {
         "ok": True,
         "disposition": {"delivery": "delivered_verified", "retry": "unsafe"},
         "post_state": {"enabled": True, "offscreen": False, "role": "switch", "states": ["checked"], "value": ""},
@@ -483,3 +485,164 @@ def test_baseline_wait_label_is_the_element_condition():
 
     target = {"role": "switch", "description_contains": "설정 패널", "states": ["checked"]}
     assert target_label(target) == "switch 설정 패널 checked"
+
+
+def _settings_ref(observation):
+    import re
+
+    return re.search(r'switch "설정 .*?" (@\S+)', observation).group(1)
+
+
+def test_capture_event_is_written_with_the_current_step_and_observation(tmp_path):
+    recorder, toolbox, _ = recorded(tmp_path)
+    toolbox.call("launch_target", {})
+    toolbox.call("observe", OBSERVE)
+    recorder.on_event({"type": "model", "step": 4, "tokens": 10})
+    capture = {"type": "capture", "id": "c1", "step": None, "observation": None, "mark": 3,
+               "reason": "look", "file": "captures/c1.png"}
+
+    recorder.on_event(capture)
+
+    assert events(recorder)[-1] == {**capture, "step": 4, "observation": 1}
+
+
+def test_capture_event_keeps_the_step_and_observation_it_was_given(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    capture = {"type": "capture", "id": "c2", "step": 2, "observation": 7, "mark": None,
+               "reason": "mismatch", "file": "captures/c2.png"}
+
+    recorder.on_event(capture)
+
+    assert events(recorder)[-1] == capture
+
+
+def test_action_event_carries_the_expectation_and_its_effects(tmp_path):
+    recorder, toolbox, _ = recorded(tmp_path)
+    toolbox.call("launch_target", {})
+    observed_text = toolbox.call("observe", OBSERVE)["observation"]
+    ref = _settings_ref(observed_text)
+
+    toolbox.call("check", {"ref": ref, "intent": "연다", "expect": "content_changed", "knowledge_id": None})
+
+    action = [e for e in events(recorder) if e["type"] == "action"][-1]
+    assert action["result"]["expect"] == "content_changed"
+    assert action["result"]["expected_met"] is True
+    assert action["result"]["effects"]["added"]["count"] > 0
+    assert [e["type"] for e in events(recorder)][-2:] == ["action", "observation"]
+
+
+def test_action_without_expect_records_effects_only(tmp_path):
+    recorder, toolbox, _ = recorded(tmp_path)
+    toolbox.call("launch_target", {})
+    ref = _settings_ref(toolbox.call("observe", OBSERVE)["observation"])
+
+    toolbox.call("check", {"ref": ref, "intent": "연다"})
+
+    result = [e for e in events(recorder) if e["type"] == "action"][-1]["result"]
+    assert "effects" in result and "expect" not in result and "expected_met" not in result
+
+
+SETTINGS_BOUNDS = {"x": 3705.0, "y": 118.0, "width": 108.0, "height": 45.0}
+SETTINGS_ORIGIN = (3705.0 - SETTINGS_RECT["x"], 118.0 - SETTINGS_RECT["y"])
+
+
+def observed_recorder(tmp_path):
+    recorder, toolbox, cli = recorded(tmp_path)
+    toolbox.call("launch_target", {})
+    toolbox.call("observe", OBSERVE)
+    return recorder, toolbox, cli
+
+
+def test_question_event_gets_image_rects_and_the_observation_it_was_asked_on(tmp_path):
+    recorder, _, _ = observed_recorder(tmp_path)
+    recorder.on_event({"type": "model", "step": 2, "tokens": 5})
+    point = [3715, 128]
+    recorder.on_event({
+        "type": "question", "id": "q1", "step": None, "kind": "confirm", "text": "이 칸이 맞나요?",
+        "candidates": [{"n": 1, "label": "설정", "mark": 4, "bounds": SETTINGS_BOUNDS, "point": None},
+                       {"n": 2, "label": "찍은 곳", "mark": None, "bounds": None, "point": point}],
+        "proposed": 1, "basis": [{"mark": 4, "bounds": SETTINGS_BOUNDS}], "items": [], "window_id": "w-3412692"})
+
+    event = events(recorder)[-1]
+    assert (event["step"], event["observation"]) == (2, 1)
+    first, second = event["candidates"]
+    assert first["rect"] == SETTINGS_RECT and first["image_point"] is None
+    assert second["rect"] is None
+    assert second["image_point"] == [point[0] - SETTINGS_ORIGIN[0], point[1] - SETTINGS_ORIGIN[1]]
+    assert event["basis"][0]["rect"] == SETTINGS_RECT
+    assert first["bounds"] == SETTINGS_BOUNDS
+
+
+def test_answer_pin_gets_its_image_point(tmp_path):
+    recorder, _, _ = observed_recorder(tmp_path)
+    recorder.on_event({"type": "answer", "id": "q1", "text": "여기", "accepted": None, "items": [],
+                       "timed_out": False, "pin": {"point": [3715, 128], "image_point": None, "mark": 4}})
+
+    pin = events(recorder)[-1]["pin"]
+    assert pin["image_point"] == [3715 - SETTINGS_ORIGIN[0], 128 - SETTINGS_ORIGIN[1]] and pin["mark"] == 4
+
+
+def test_answer_without_a_pin_is_kept_as_is(tmp_path):
+    recorder, _, _ = observed_recorder(tmp_path)
+    answer = {"type": "answer", "id": "q1", "text": "맞아", "pin": None, "accepted": None, "items": [],
+              "timed_out": False}
+    recorder.on_event(answer)
+    assert events(recorder)[-1] == answer
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "knowledge_loaded", "system": "mes", "ids": ["r-1"], "truncated": False},
+    {"type": "knowledge_used", "step": 3, "id": "r-1", "text": "오른쪽 끝을 눌러 연다"},
+    {"type": "knowledge_failed", "step": 3, "id": "r-1"},
+    {"type": "completion", "by": "knowledge", "id": "c-1", "met": True, "detail": "파일 확인: C:\\out.xlsx"},
+    {"type": "registration", "saved": [{"id": "r-2", "type": "resolution", "action": "add"}], "rejected": 0},
+])
+def test_knowledge_completion_and_registration_events_are_written(tmp_path, event):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event(event)
+    assert events(recorder)[-1] == event
+
+
+def test_run_json_holds_no_question_answer_knowledge_or_completion_text(tmp_path):
+    recorder, _, _ = observed_recorder(tmp_path)
+    recorder.on_event({"type": "question", "id": "q1", "step": 1, "kind": "stuck", "text": "비밀질문글",
+                       "candidates": [{"n": 1, "label": "비밀후보", "mark": None, "bounds": None, "point": None}],
+                       "proposed": None, "basis": [], "items": [], "window_id": None})
+    recorder.on_event({"type": "answer", "id": "q1", "text": "비밀답글", "pin": None, "accepted": None,
+                       "items": [], "timed_out": False})
+    recorder.on_event({"type": "knowledge_used", "step": 1, "id": "r-1", "text": "비밀지식글"})
+    recorder.on_event({"type": "completion", "by": "knowledge", "id": "c-1", "met": True, "detail": "비밀경로"})
+    recorder.finish(RunResult("verified", 3, "done", 10))
+
+    text = (recorder.path / "run.json").read_text(encoding="utf-8")
+    for secret in ("비밀질문글", "비밀후보", "비밀답글", "비밀지식글", "비밀경로"):
+        assert secret not in text
+    assert "비밀질문글" in (recorder.path / "events.jsonl").read_text(encoding="utf-8")
+
+
+def test_policy_refusal_and_mismatch_capture_reach_the_action_result(tmp_path):
+    recorder, toolbox, _ = observed_recorder(tmp_path)
+    toolbox.call("mouse_click", {"window_id": "w-3412692", "x": 2000, "y": 100, "button": "left",
+                                 "intent": "누른다", "expect": "any", "knowledge_id": None})
+
+    action = [e for e in events(recorder) if e["type"] == "action"][-1]
+    capture = events(recorder)[-1]
+    assert action["result"]["refused_code"] == "needs_confirmation"
+    assert capture["type"] == "capture" and action["result"]["capture"] == capture["id"]
+    assert capture["reason"] == "question"
+
+
+def test_run_json_names_the_system(tmp_path):
+    desktop = DesktopClient("ad.exe", "run1", runner=FakeCli())
+    recorder = RunRecorder(tmp_path / "runs", desktop, {**META, "system": "virtualmes"}, now=lambda: NOW)
+    OPEN_RECORDERS.append(recorder)
+    assert run_json(recorder)["system"] == "virtualmes"
+    assert run_json(new_recorder(tmp_path / "other", desktop))["system"] is None
+
+
+def test_confirmed_status_and_a_warning_are_recorded(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event({"type": "warning", "message": "등록 중 오류: RuntimeError: x"})
+    recorder.finish(RunResult("confirmed", 2, "사람이 확인함", 30))
+    assert run_json(recorder)["status"] == "confirmed"
+    assert events(recorder)[-2] == {"type": "warning", "message": "등록 중 오류: RuntimeError: x"}

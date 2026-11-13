@@ -19,6 +19,8 @@ namespace VirtualMesApp
     {
         internal const string ArgsFileName = "VirtualMes.args";
         internal const int DefaultSeed = 20261112;
+        internal const string ComboAnywhere = "anywhere";
+        internal const string ComboArrow = "arrow";
 
         internal string Profile = Exposures.DefaultProfile;
         internal Dictionary<UiRegion, Exposure> Expose;
@@ -27,6 +29,9 @@ namespace VirtualMesApp
         internal string LogPath;
         internal string[] Headless;
         internal bool ParseOnly;
+
+        /// <summary>Where a filter box opens its list: anywhere on the box, or only on its arrow.</summary>
+        internal string ComboOpen = ComboAnywhere;
 
         /// <summary>
         /// Parses the command line. With no arguments at all, the first line of
@@ -71,6 +76,10 @@ namespace VirtualMesApp
                 {
                     options.Seed = Integer(Value(args, ref index, flag), flag);
                 }
+                else if (flag == "--combo-open")
+                {
+                    options.ComboOpen = ComboOpenValue(Value(args, ref index, flag));
+                }
                 else if (flag == "--log")
                 {
                     options.LogPath = Value(args, ref index, flag);
@@ -114,6 +123,7 @@ namespace VirtualMesApp
             root["seed"] = this.Seed;
             root["delay_ms"] = this.DelayMs.HasValue ? (object)this.DelayMs.Value : null;
             root["log"] = this.LogPath;
+            root["combo_open"] = this.ComboOpen;
             return new JavaScriptSerializer().Serialize(root);
         }
 
@@ -126,6 +136,15 @@ namespace VirtualMesApp
             string value = args[index];
             index++;
             return value;
+        }
+
+        private static string ComboOpenValue(string text)
+        {
+            if (text != ComboAnywhere && text != ComboArrow)
+            {
+                throw new OptionsException("--combo-open is anywhere or arrow, got: " + text);
+            }
+            return text;
         }
 
         private static int Integer(string text, string flag)

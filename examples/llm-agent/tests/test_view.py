@@ -64,7 +64,7 @@ def run_main(monkeypatch, argv):
     server = FakeServer()
     opened = []
     monkeypatch.setattr(view, "make_server", lambda *args, **kwargs: server)
-    monkeypatch.setattr(view, "build_run_manager", lambda runs_dir, exe: (None, None))
+    monkeypatch.setattr(view, "build_run_manager", lambda runs_dir, exe, **_options: (None, None))
     monkeypatch.setattr(view.webbrowser, "open", opened.append)
     monkeypatch.setattr(view, "load_dotenv", lambda path: None)
     code = view.main(argv)
@@ -252,3 +252,53 @@ def test_export_of_a_missing_run_or_an_old_log_exits_1(monkeypatch, tmp_path, ca
     assert code == 1
     assert capsys.readouterr().err.strip()
     assert not out.exists()
+
+
+def test_open_names_a_run_a_person_confirmed(tmp_path):
+    runs = tmp_path / "runs"
+    shutil.copytree(Path(__file__).parent / "fixtures" / "run_questions", runs / "20261113-101500")
+
+    assert view.open_fragment(runs, "20261113-101500") == ("#run=20261113-101500", None)
+    assert view.open_fragment(runs, "latest") == ("#run=20261113-101500", None)
+
+
+def test_the_viewer_uses_the_shared_knowledge_folder_rule(monkeypatch, tmp_path):
+    from agent import knowledge
+
+    assert view.knowledge_root is knowledge.knowledge_root
+    assert not hasattr(view, "KNOWLEDGE_DIR")
+
+
+def test_the_viewer_serves_the_knowledge_folder(monkeypatch, tmp_path, capsys):
+    seen = {}
+    server = FakeServer()
+
+    def fake_make_server(*args, **kwargs):
+        seen.update(kwargs)
+        return server
+
+    monkeypatch.delenv("AGENT_KNOWLEDGE_DIR", raising=False)
+    managers = []
+    monkeypatch.setattr(view, "make_server", fake_make_server)
+    monkeypatch.setattr(view, "build_run_manager",
+                        lambda runs_dir, exe, **options: managers.append(options) or (None, None))
+    monkeypatch.setattr(view, "load_dotenv", lambda path: None)
+
+    code = view.main(["--runs", str(FIXTURE_RUNS), "--no-browser", "--knowledge-dir", str(tmp_path / "k")])
+
+    assert code == 0
+    assert seen["knowledge_dir"] == (tmp_path / "k").resolve()
+    assert managers == [{"knowledge_dir": (tmp_path / "k").resolve()}]
+    assert f"지식 폴더: {(tmp_path / 'k').resolve()}" in capsys.readouterr().out
+
+
+def test_the_knowledge_dir_from_dotenv_is_read_after_loading_it(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.delenv("AGENT_KNOWLEDGE_DIR", raising=False)
+    monkeypatch.setattr(view, "make_server", lambda *args, **kwargs: seen.update(kwargs) or FakeServer())
+    monkeypatch.setattr(view, "build_run_manager", lambda runs_dir, exe, **_options: (None, None))
+    monkeypatch.setattr(view, "load_dotenv", lambda path: monkeypatch.setenv("AGENT_KNOWLEDGE_DIR", str(tmp_path / "dot")))
+
+    view.main(["--runs", str(FIXTURE_RUNS), "--no-browser"])
+
+    assert seen["knowledge_dir"] == (tmp_path / "dot").resolve()

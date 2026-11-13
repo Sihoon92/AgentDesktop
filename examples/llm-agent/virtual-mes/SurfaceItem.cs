@@ -21,6 +21,17 @@ namespace VirtualMesApp
         internal string Id;
         internal Rectangle Bounds;
         internal string Text = string.Empty;
+
+        /// <summary>The accessible name of an item that shows no text, such as an arrow glyph.
+        /// Only the ref exposure reveals it; the text exposure shows visible text only.</summary>
+        internal string Name;
+
+        /// <summary>
+        /// Smaller items inside this one, such as a box's arrow. The owner draws them, so they
+        /// paint nothing themselves; clicks hit them before the owner, and the ref exposure
+        /// shows them as children of the owner's element.
+        /// </summary>
+        internal SurfaceItem[] Parts;
         internal ItemKind Kind = ItemKind.Label;
         internal bool Enabled = true;
         internal bool Checked;

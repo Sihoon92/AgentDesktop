@@ -1,0 +1,12 @@
+id: r-example-001
+type: resolution
+status: active
+situation: 필터 열의 선택 칸 가운데를 눌러도 목록이 열리지 않고 입력 커서만 생긴다
+resolution: 선택 칸은 가운데가 아니라 오른쪽 끝의 화살표를 눌러 연다. 화살표가 칸 안의 버튼으로 보이면 그 버튼을, 보이지 않으면 칸의 오른쪽 끝을 누른다
+source:
+  run_id: example
+  question: 선택 칸을 눌렀는데 목록이 열리지 않습니다. 무엇을 눌러야 하나요?
+  answer: 칸 오른쪽 끝의 화살표를 눌러야 열려요
+  date: '2026-11-13'
+uses: 0
+failures: 0

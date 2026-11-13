@@ -18,6 +18,11 @@ WINDOW_OTHER_INSTANCE = "w-999"
 
 PANEL_LABEL = 'statictext "지표"'
 
+def allow(toolbox, *points):
+    """Stands in for an answered confirmation: lets one model-picked point through the policy."""
+    toolbox._policy.note_answer([], list(points))
+
+
 def make(level=3, confirm=lambda _prompt: True, cli=None):
     cli = cli or FakeCli()
     clock = iter(range(0, 10_000))
@@ -198,6 +203,7 @@ def test_press_on_another_instance_is_refused():
 
 def test_mouse_click_inside_our_focused_window_is_sent_headed():
     toolbox, cli = launched()
+    allow(toolbox, (2000, 100))
 
     toolbox.call("mouse_click", {"window_id": WINDOW_A, "x": 2000, "y": 100, "button": "left"})
 
@@ -234,6 +240,7 @@ def test_drag_needs_both_points_inside_the_window():
     assert toolbox.call("drag", outside)["ok"] is False
     assert "drag" not in cli.command_names()
 
+    allow(toolbox, (2000, 100))
     toolbox.call("drag", inside)
     assert ["drag", "--from-xy=2000,100", "--to-xy=2100,200"] in cli.commands()
 
@@ -453,7 +460,9 @@ def test_intent_does_not_change_guard_identity():
 
     point = {"window_id": WINDOW_A, "x": 2000, "y": 100, "button": "left"}
     for intent in ("첫째", "둘째", "셋째"):
+        allow(toolbox, (2000, 100))
         toolbox.call("mouse_click", {**point, "intent": intent})
+    allow(toolbox, (2000, 100))
     with pytest.raises(AgentStopped):
         toolbox.call("mouse_click", {**point, "intent": "넷째"})
 
@@ -533,3 +542,295 @@ def test_each_observation_says_which_tool_made_it():
 
     assert [source for source, _ in observer.sources] == ["observe", "action", "action", "observe", "observe"]
     assert all(wait is None for _, wait in observer.sources)
+
+
+from fake_cli import scene_window  # noqa: E402
+
+from agent.effects import EXPECTATIONS  # noqa: E402
+from agent.tool_schemas import READ_ONLY_TOOLS, SCHEMAS  # noqa: E402
+from agent.tools import REOBSERVING_TOOLS  # noqa: E402
+
+MAIN_BOUNDS = {"x": 1000, "y": 500, "width": 416, "height": 308}
+LINE_BOX = {"x": 1100, "y": 550, "width": 104, "height": 24}
+MAIN = scene_window("w-1", "메인", MAIN_BOUNDS)
+LIST_WINDOW = scene_window("w-2", "목록", {"x": 1100, "y": 574, "width": 200, "height": 200})
+
+
+def _node(role, name, bounds, **extra):
+    return {"role": role, "name": name, "bounds": bounds, **extra}
+
+
+SCENE = {
+    "windows": [MAIN],
+    "tree": {"role": "window", "name": "메인", "bounds": MAIN_BOUNDS, "children": [
+        _node("statictext", "Shop", {"x": 1010, "y": 520, "width": 60, "height": 24}),
+        _node("button", "조회", {"x": 1300, "y": 520, "width": 80, "height": 24}, ref_id="@s1:e1",
+              available_actions=["Click"]),
+        _node("statictext", "라인", LINE_BOX),
+        _node("statictext", "양품수", {"x": 1250, "y": 640, "width": 80, "height": 24}),
+        _node("statictext", "믹싱", {"x": 1010, "y": 664, "width": 80, "height": 24}),
+        _node("statictext", "바인더", {"x": 1090, "y": 664, "width": 80, "height": 24}),
+        {"role": "cell", "value": "0", "ref_id": "@s1:e2",
+         "bounds": {"x": 1250, "y": 664, "width": 80, "height": 24}},
+    ]},
+}
+
+
+def _single(node):
+    return {"windows": [MAIN], "tree": {"role": "window", "name": "메인", "bounds": MAIN_BOUNDS,
+                                         "children": [node]}}
+
+
+OFFSCREEN_MARK = _single(_node("statictext", "숨은 칸", LINE_BOX, states=["offscreen"]))
+ZERO_SIZE_MARK = _single(_node("statictext", "빈 칸", {**LINE_BOX, "width": 0}))
+OBSERVE = {"window_id": None, "root_ref": None, "surface": None, "include_bounds": False}
+
+
+class EventObserver(RecordingObserver):
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def on_event(self, event):
+        self.events.append(event)
+
+
+def toolbox_for(scene, tmp_path, image_mode="user_message", level=2):
+    cli = FakeCli(scene=scene)
+    cli.on_click = lambda x, y: cli.open_window(LIST_WINDOW) if x > 1180 else cli.focus(mark=3)
+    observer = EventObserver()
+    clock = iter(range(0, 10_000))
+    toolbox = Toolbox(
+        DesktopClient("ad.exe", "run1", runner=cli),
+        Task("goal", EXE, level, [], image_mode=image_mode),
+        confirm=lambda _prompt: True,
+        sleep=lambda _s: None,
+        clock=lambda: next(clock),
+        observer=observer,
+        captures_dir=tmp_path / "captures",
+    )
+    toolbox.call("launch_target", {})
+    toolbox.call("observe", OBSERVE)
+    return toolbox, cli, observer
+
+
+@pytest.fixture
+def scene(tmp_path):
+    return toolbox_for(SCENE, tmp_path)
+
+
+def part_call(mark, part, action="click", expect=None, knowledge_id=None):
+    arguments = {"mark": mark, "part": part, "action": action, "intent": "누른다", "knowledge_id": knowledge_id}
+    return {**arguments, "expect": expect} if expect else arguments
+
+
+def point_call(capture, x, y, action="click", expect=None):
+    arguments = {"capture": capture, "x": x, "y": y, "action": action, "intent": "누른다", "knowledge_id": None}
+    return {**arguments, "expect": expect} if expect else arguments
+
+
+def test_new_tools_are_in_the_schema_at_their_levels():
+    levels = {s["definition"]["name"]: s["level"] for s in SCHEMAS}
+    assert (levels["look"], levels["find_cells"], levels["click_part"], levels["click_point"]) == (0, 0, 2, 2)
+    assert {"look", "find_cells"} <= READ_ONLY_TOOLS
+    assert not {"click_part", "click_point"} & READ_ONLY_TOOLS
+
+
+def test_every_app_changing_tool_takes_expect_and_knowledge_id():
+    for schema in SCHEMAS:
+        definition = schema["definition"]
+        properties = definition["parameters"]["properties"]
+        has = "expect" in properties and "knowledge_id" in properties
+        assert has is (definition["name"] in REOBSERVING_TOOLS), definition["name"]
+        if has:
+            assert properties["expect"]["enum"] == list(EXPECTATIONS)
+            assert properties["knowledge_id"]["type"] == ["string", "null"]
+    assert {"click_part", "click_point"} <= REOBSERVING_TOOLS
+
+
+def test_observation_lines_carry_marks(scene):
+    toolbox, _, _ = scene
+    observation = toolbox.call("observe", OBSERVE)["observation"]
+    assert re.search(r"\[3\] statictext \"라인\"", observation)
+    assert '[2] button "조회" @s1:e1' in observation
+
+
+def test_click_part_right_end_clicks_inside_the_box_and_reports_the_new_window(scene):
+    toolbox, cli, _ = scene
+    result = toolbox.call("click_part", part_call(mark=3, part="right", expect="window_opened"))
+    call = cli.full_call("mouse-click")
+    assert "--xy=1192,562" in call and "--headed" in call
+    assert "--button=left" in call and "--count=1" in call
+    assert cli.command_names().index("focus-window") < cli.command_names().index("mouse-click")
+    assert result["ok"] and result["expect"] == "window_opened"
+    assert result["expected_met"] is True and result["effects"]["windows_opened"][0]["title"] == "목록"
+    assert "capture" not in result and toolbox.take_attachments() == []
+    assert "observation" in result
+
+
+def test_center_click_that_only_moves_focus_is_a_mismatch_with_a_capture(scene):
+    toolbox, _, observer = scene
+    result = toolbox.call("click_part", part_call(mark=3, part="center", expect="window_opened"))
+    assert result["expected_met"] is False and result["effects"]["focus"] == {"mark": 3, "name": "라인"}
+    assert result["effects"]["windows_opened"] == []
+    assert [shot.id for shot in toolbox.take_attachments()] == [result["capture"]]
+    capture = observer.events[-1]
+    assert capture["type"] == "capture" and capture["id"] == result["capture"]
+    expected_file = "captures/" + result["capture"] + ".png"
+    assert (capture["reason"], capture["mark"], capture["file"]) == ("mismatch", None, expected_file)
+
+
+def test_mismatch_with_images_off_attaches_nothing(tmp_path):
+    toolbox, _, _ = toolbox_for(SCENE, tmp_path, image_mode="off")
+    result = toolbox.call("click_part", part_call(mark=3, part="center", expect="window_opened"))
+    assert result["expected_met"] is False and "capture" not in result
+    assert toolbox.take_attachments() == []
+
+
+@pytest.mark.parametrize("action,button,count", [
+    ("double_click", "left", 2), ("right_click", "right", 1)])
+def test_double_click_and_right_click_use_count_and_button(scene, action, button, count):
+    toolbox, cli, _ = scene
+    toolbox.call("click_part", part_call(mark=3, part="center", action=action))
+    call = cli.full_call("mouse-click")
+    assert f"--count={count}" in call and f"--button={button}" in call
+
+
+@pytest.mark.parametrize("unsafe", [OFFSCREEN_MARK, ZERO_SIZE_MARK])
+def test_click_part_refuses_what_cannot_be_clicked(tmp_path, unsafe):
+    toolbox, cli, _ = toolbox_for(unsafe, tmp_path)
+    assert "refused" in toolbox.call("click_part", part_call(mark=1, part="center"))
+    assert "mouse-click" not in cli.command_names()
+
+
+def test_click_part_refuses_an_unknown_mark(scene):
+    toolbox, cli, _ = scene
+    assert "refused" in toolbox.call("click_part", part_call(mark=99, part="center"))
+    assert "mouse-click" not in cli.command_names()
+
+
+def test_click_part_is_a_physical_tool():
+    toolbox, _ = make(level=1)
+    assert "click_part" not in {tool["name"] for tool in toolbox.definitions()}
+
+
+def test_find_cells_reads_the_latest_observation(scene):
+    toolbox, _, _ = scene
+    found = toolbox.call("find_cells", {"rows": ["믹싱", "바인더"], "columns": ["양품수"]})
+    assert found["ok"] and found["reason"] is None and len(found["candidates"]) == 1
+    assert found["candidates"][0]["mark"] == 7 and found["candidates"][0]["value"] == "0"
+
+
+def test_find_cells_without_names_is_refused(scene):
+    toolbox, _, _ = scene
+    assert "refused" in toolbox.call("find_cells", {"rows": [], "columns": ["양품수"]})
+
+
+def test_look_returns_a_capture_id_and_attaches_the_image(scene):
+    toolbox, _, observer = scene
+    result = toolbox.call("look", {"mark": None})
+    assert result["ok"] and result["capture"] == "c1"
+    assert (result["width"], result["height"], result["cropped"]) == (400, 300, False)
+    assert result["drawn"] is True
+    assert len(toolbox.take_attachments()) == 1
+    assert toolbox.take_attachments() == []
+    assert observer.events[-1]["reason"] == "look" and observer.events[-1]["id"] == "c1"
+
+
+def test_look_around_a_mark_crops(scene):
+    toolbox, _, observer = scene
+    result = toolbox.call("look", {"mark": 3})
+    assert result["cropped"] is True and observer.events[-1]["mark"] == 3
+
+
+def test_look_at_an_unknown_mark_is_refused(scene):
+    toolbox, _, _ = scene
+    assert "refused" in toolbox.call("look", {"mark": 99})
+    assert toolbox.take_attachments() == []
+
+
+def test_click_point_maps_image_pixels_to_the_screen(scene):
+    toolbox, cli, _ = scene
+    toolbox.call("look", {"mark": None})
+    allow(toolbox, (1018, 520))
+    result = toolbox.call("click_point", point_call(capture="c1", x=10, y=20))
+    assert "--xy=1018,520" in cli.full_call("mouse-click") and result["ok"]
+
+
+def test_click_point_after_the_window_moved_is_stale(scene):
+    toolbox, cli, _ = scene
+    toolbox.call("look", {"mark": None})
+    cli.window_shift = 100
+    result = toolbox.call("click_point", point_call(capture="c1", x=10, y=20))
+    assert result["refused_code"] == "stale_capture"
+    assert "mouse-click" not in cli.command_names()
+
+
+def test_click_point_on_an_unknown_capture_is_stale(scene):
+    toolbox, cli, _ = scene
+    assert toolbox.call("click_point", point_call(capture="c9", x=10, y=20))["refused_code"] == "stale_capture"
+    assert "mouse-click" not in cli.command_names()
+
+
+def test_click_point_outside_the_capture_is_refused(scene):
+    toolbox, cli, _ = scene
+    toolbox.call("look", {"mark": None})
+    result = toolbox.call("click_point", point_call(capture="c1", x=400, y=20))
+    assert "refused" in result and "look" in result["refused"]
+    assert "mouse-click" not in cli.command_names()
+
+
+def test_look_with_images_off_is_refused_with_an_alternative(tmp_path):
+    toolbox, _, _ = toolbox_for(SCENE, tmp_path, image_mode="off")
+    assert "find_cells" in toolbox.call("look", {"mark": None})["refused"]
+
+
+def test_legacy_call_without_expect_has_no_expectation_fields(scene):
+    toolbox, _, _ = scene
+    result = toolbox.call("check", {"ref": "@s1:e1"})
+    assert "expected_met" not in result and "expect" not in result
+    assert result["effects"]["none"] is True
+
+
+def test_expect_on_a_ref_tool_is_judged(scene):
+    toolbox, _, _ = scene
+    result = toolbox.call("check", {"ref": "@s1:e1", "expect": "any", "knowledge_id": None})
+    assert result["expected_met"] is False
+
+
+def test_expect_and_knowledge_id_do_not_change_guard_identity(scene):
+    toolbox, _, _ = scene
+    point = {"window_id": "w-1", "x": 1050, "y": 600, "button": "left"}
+    for expect in ("any", "window_opened", "content_changed"):
+        allow(toolbox, (1050, 600))
+        toolbox.call("mouse_click", {**point, "expect": expect, "knowledge_id": None})
+    allow(toolbox, (1050, 600))
+    with pytest.raises(AgentStopped):
+        toolbox.call("mouse_click", {**point, "expect": "value_changed", "knowledge_id": None})
+
+
+def test_preview_of_click_part_gives_the_element_and_the_point(scene):
+    toolbox, cli, _ = scene
+    before = len(cli.calls)
+    target = toolbox.preview("click_part", part_call(mark=3, part="right"))
+    assert target["name"] == "라인" and target["points"] == [[1192, 562]]
+    assert target["bounds"] == LINE_BOX and target["window_id"] == "w-1"
+    assert toolbox.preview("click_part", part_call(mark=99, part="right")) is None
+    assert len(cli.calls) == before
+
+
+def test_preview_of_click_point_gives_the_window_and_the_screen_point(scene):
+    toolbox, _, _ = scene
+    toolbox.call("look", {"mark": None})
+    assert toolbox.preview("click_point", point_call(capture="c1", x=10, y=20)) == {
+        "window_id": "w-1", "points": [[1018, 520]]}
+    assert toolbox.preview("click_point", point_call(capture="c9", x=10, y=20)) is None
+
+
+def test_action_is_reported_before_its_observation(scene):
+    toolbox, _, observer = scene
+    toolbox.call("click_part", part_call(mark=3, part="right", expect="window_opened"))
+    tool, _, target, result = observer.actions[-1]
+    assert tool == "click_part" and target["points"] == [[1192, 562]]
+    assert result["expected_met"] is True and "observation" not in result
+    assert observer.sources[-1][0] == "action"

@@ -1,6 +1,7 @@
 """Runs a task file with the LLM agent, or with --baseline, the fixed no-model steps."""
 
 import argparse
+import functools
 import os
 import secrets
 import sys
@@ -13,11 +14,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from agent.approval import TerminalGate
+from agent.ask import NoAsker, TerminalAsker
 from agent.baseline import run_baseline
 from agent.desktop import DesktopClient, start_session
 from agent.llm import OpenAIResponder
+from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, system_name
 from agent.loop import RunResult, run_agent
 from agent.recorder import RunRecorder
+from agent.registration import register_after_run
 from agent.task import TaskError, load_task, task_from_args
 from agent.tools import Toolbox
 from viewer.server import make_server
@@ -26,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 ENV_FILES = [HERE / ".env", REPO / ".env"]
 RUNS_DIR = HERE / "runs"
-EXIT_CODES = {"verified": 0, "claimed": 3}
+EXIT_CODES = {"verified": 0, "confirmed": 0, "claimed": 3}
 open_browser = webbrowser.open
 BINARIES = [
     REPO / "target" / "release" / "agent-desktop.exe",
@@ -83,6 +87,8 @@ def main(argv=None):
     parser.add_argument("--baseline", action="store_true", help="Run fixed steps without the model")
     parser.add_argument("--approve", action="store_true", help="Ask on the terminal before every action")
     parser.add_argument("--view", action="store_true", help="Open the step viewer and follow this run live")
+    parser.add_argument("--system", help="Knowledge name of the target system; defaults to the exe name")
+    parser.add_argument("--knowledge-dir", help="Folder that holds the per-system knowledge")
     args = parser.parse_args(argv)
     if args.approve and args.baseline:
         return _fail("--approve는 모델 실행에서만 쓸 수 있습니다. --baseline과 함께 쓸 수 없습니다")
@@ -96,6 +102,10 @@ def main(argv=None):
         return _fail(str(error))
     if not Path(task.exe).exists():
         return _fail(f"실행 파일이 없습니다: {task.exe}")
+    try:
+        system = system_name(args.system or task.system, task.exe)
+    except KnowledgeError as error:
+        return _fail(f"시스템 이름을 쓸 수 없습니다: {error}")
     binary = find_binary()
     if not binary.exists():
         return _fail(f"agent-desktop 바이너리가 없습니다: {binary}")
@@ -110,7 +120,7 @@ def main(argv=None):
         return _fail("agent-desktop 세션을 시작하지 못했습니다")
     viewer = start_viewer(RUNS_DIR) if args.view else None
     try:
-        return _run_recorded(args, task, binary, session, viewer)
+        return _run_recorded(args, task, binary, session, viewer, system)
     finally:
         if viewer is not None:
             viewer.shutdown()
@@ -159,7 +169,7 @@ def started_by(args):
     return "run.py --view" if args.view else "run.py"
 
 
-def _run_recorded(args, task, binary, session, viewer):
+def _run_recorded(args, task, binary, session, viewer, system):
     desktop = DesktopClient(str(binary), session)
     meta = {
         "goal": task.goal,
@@ -167,6 +177,7 @@ def _run_recorded(args, task, binary, session, viewer):
         "model": "baseline" if args.baseline else task.model,
         "permission_level": task.permission_level,
         "started_by": started_by(args),
+        "system": system,
     }
     try:
         recorder = RunRecorder(RUNS_DIR, desktop, meta)
@@ -174,13 +185,19 @@ def _run_recorded(args, task, binary, session, viewer):
         return _fail(f"실행 기록 폴더를 만들지 못했습니다: {error}")
     if viewer is not None:
         show_run(viewer, recorder.run_id)
-    toolbox = Toolbox(desktop, task, confirm=confirm, observer=recorder)
+    captures = recorder.path / "captures"
     if args.baseline:
+        toolbox = Toolbox(desktop, task, confirm=confirm, observer=recorder, captures_dir=captures)
         result = run_baseline(toolbox, task)
     else:
+        store = KnowledgeStore(knowledge_root(args.knowledge_dir, task.knowledge_dir), system)
+        asker = TerminalAsker() if is_interactive() else NoAsker()
+        toolbox = Toolbox(desktop, task, confirm=confirm, observer=recorder, asker=asker, knowledge=store,
+                          captures_dir=captures)
         model = OpenAIResponder(task.model, task.reasoning_effort)
         gate = TerminalGate() if args.approve else None
-        result = run_agent(model, toolbox, task, make_logger(recorder), gate=gate)
+        register = functools.partial(register_after_run, store=store, run_id=recorder.run_id)
+        result = run_agent(model, toolbox, task, make_logger(recorder), gate=gate, register=register)
     recorder.finish(result)
     print(f"결과: {result.status} (스텝 {result.steps}, 토큰 {result.tokens}) - {result.reason}")
     print(f"기록: {recorder.path}")

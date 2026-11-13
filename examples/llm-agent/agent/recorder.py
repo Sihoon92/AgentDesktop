@@ -29,9 +29,13 @@ HEARTBEAT_S = 10
 REPLACE_ATTEMPTS = 5
 REPLACE_PAUSE_S = 0.02
 MAX_TEXT_ELEMENTS = 400
-META_FIELDS = ("goal", "exe", "model", "permission_level", "started_by")
+META_FIELDS = ("goal", "exe", "model", "permission_level", "started_by", "system")
 WINDOW_FIELDS = ("id", "title", "bounds")
-RESULT_FIELDS = ("ok", "disposition", "code", "message", "refused", "post_state")
+RESULT_FIELDS = (
+    "ok", "disposition", "code", "message", "refused", "post_state",
+    "expect", "effects", "expected_met", "knowledge_id", "refused_code", "capture",
+)
+KEPT_EVENTS = ("knowledge_loaded", "knowledge_used", "knowledge_failed", "completion", "registration", "warning")
 
 
 def _never_raises(method):
@@ -123,8 +127,29 @@ class RunRecorder:
 
     @_never_raises
     def on_event(self, event):
-        """Takes the loop's log events. Model turns, proposals and decisions are recorded; tool
-        calls are not, because on_action already recorded each one."""
+        """Takes the loop's log events and the toolbox's own events. Model turns, proposals,
+        decisions, captures, questions, answers, knowledge, completion and registration events are
+        recorded; tool calls are not, because on_action already recorded each one. A capture or a
+        question without a step gets the current one. A question is tied to the latest observation
+        and its screen boxes and points get image coordinates; so does an answer's pin."""
+        kind = event.get("type")
+        if kind == "question":
+            self._append(self._mapped_question(event))
+            return
+        if kind == "answer":
+            self._append(self._mapped_answer(event))
+            return
+        if kind in KEPT_EVENTS:
+            self._append(event)
+            return
+        if event.get("type") == "capture":
+            filled = dict(event)
+            if filled.get("step") is None:
+                filled["step"] = self._step
+            if filled.get("observation") is None:
+                filled["observation"] = self._observations or None
+            self._append(filled)
+            return
         if event.get("type") == "proposal":
             self._append({**event, "target": self._image_target(event.get("target"))})
             return
@@ -217,6 +242,29 @@ class RunRecorder:
             points_frame = frame if same_window else None
             mapped["image_points"] = [_point(point, points_frame) for point in target["points"]]
         return mapped
+
+    def _frame_geometry(self):
+        return self._last_frame["geometry"] if self._last_frame else None
+
+    def _mapped_question(self, event):
+        frame = self._frame_geometry()
+        mapped = dict(event)
+        if mapped.get("step") is None:
+            mapped["step"] = self._step
+        mapped["observation"] = self._observations or None
+        mapped["candidates"] = [
+            {**candidate, "rect": _rect(candidate.get("bounds"), frame),
+             "image_point": _point(candidate["point"], frame) if candidate.get("point") else None}
+            for candidate in event.get("candidates") or []
+        ]
+        mapped["basis"] = [{**item, "rect": _rect(item.get("bounds"), frame)} for item in event.get("basis") or []]
+        return mapped
+
+    def _mapped_answer(self, event):
+        pin = event.get("pin")
+        if not pin:
+            return event
+        return {**event, "pin": {**pin, "image_point": _point(pin["point"], self._frame_geometry())}}
 
     def _append(self, event):
         line = json.dumps(event, ensure_ascii=False, default=str) + "\n"

@@ -26,6 +26,7 @@ powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1
 | `--expose <영역>=<방식>[,...]` | 프로파일 위에 영역별로 덮어씀. 영역은 `menu`, `filters`, `grid`, `icon`, `radial`, 방식은 `ref`, `text`, `pixel`. `icon`은 `text`를 받지 않음 |
 | `--delay-ms <N>` | 조회 대기 시간을 N밀리초로 고정. 없으면 조회마다 1000~4000 |
 | `--seed <N>` | 대기 시간 순서의 시드. 기본 `20261112`. 같은 시드면 같은 순서 |
+| `--combo-open anywhere\|arrow` | 필터 칸이 목록을 여는 방식. 기본 `anywhere`(칸 어디를 눌러도 열림). `arrow`는 칸 오른쪽 끝의 화살표로만 열림(아래 "선택 칸 여는 방식") |
 | `--log <경로>` | 이벤트 기록을 이 파일에 덧붙임 |
 | `--export-headless <화면> <필터 JSON> <출력 .xlsx>` | 창 없이 그 화면의 조회 결과를 저장하고 끝남 |
 | `--parse-only` | 테스트용. 옵션을 해석한 결과를 JSON 한 줄로 출력하고 끝남 |
@@ -56,11 +57,25 @@ Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' 
 
 `grid`에는 표, 화면 이름 탭, 데이터 패널의 화면 이름, 상태 줄, 불량 상세 팝업의 표가 들어갑니다. "조회(F5)" 버튼, 날짜 입력 칸, "저장 | 열기 | 취소" 버튼, 로딩 팝업의 안내 글, 알림 창, 저장 대화상자는 표준 컨트롤이라 어느 프로파일에서도 보입니다.
 
+### 선택 칸 여는 방식
+
+`--combo-open arrow`를 주면 모든 필터 칸(Shop 세 칸, 공정, 제품, 설비, 기간)이 오른쪽 끝의 화살표로만 열립니다. 화살표 영역은 칸 오른쪽 끝에 있는, 칸 높이만 한 정사각형입니다. 칸의 나머지(몸통)를 누르면 글자 뒤에 깜빡이는 입력 커서만 그려지고 목록은 열리지 않습니다. 화면 모양은 `anywhere`와 같습니다. 화살표 모양도 같고, 커서는 그림으로만 그려져 접근성 트리에 나오지 않습니다.
+
+화살표가 접근성 트리에 보이는 방식은 `filters` 영역의 노출 방식을 따릅니다.
+
+| `filters` | 화살표 |
+| --- | --- |
+| `ref` | 칸의 자식 `button`. 이름 `열기`, `AutomationId` `<칸 id>-arrow`(예: `filter-shop-3-arrow`). 칸 자체의 Invoke는 몸통 클릭과 같아서 목록을 열지 않음 |
+| `text` | 없음. 칸의 글자와 위치만 나옴 |
+| `pixel` | 없음 |
+
+비활성 칸은 몸통도 화살표도 반응하지 않습니다. `anywhere`에서는 칸에 자식 요소가 없고 접근성 트리가 이 옵션이 생기기 전과 같습니다.
+
 메뉴 목록, 드롭다운 목록, 원형 메뉴는 본 창과 별개의 창이며 `list-windows`에 나옵니다. 창 제목은 내용을 드러내지 않습니다(`메뉴 목록`, `목록`, `메뉴`).
 
 ## 화면
 
-"생산운영"을 누르면 목록 창에 다섯 화면이 나옵니다.
+"생산운영"을 누르면 목록 창에 여섯 화면이 나옵니다.
 
 | 목록 항목 | 화면 id | 필터 | 저장 방법 |
 | --- | --- | --- | --- |
@@ -69,10 +84,12 @@ Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' 
 | 공정별 불량현황 | `defect-by-process` | 제품, 기간 | 우클릭 원형 메뉴. 숫자 셀을 누르면 불량 상세 팝업 |
 | 권취 Roller 점검일시 | `roller-check` | Shop(3번 칸만 활성), 설비, 기간 | 우클릭 원형 메뉴 |
 | 설비 가동현황 | `equipment-status` | 없음(빈 화면) | |
+| 공정별 생산집계 | `process-summary` | Shop(3칸 모두 활성), 기간 | 엑셀 아이콘, 우클릭 원형 메뉴. 숫자 셀을 누르면 생산 상세 팝업 |
 
 - **Shop 칸:** 누르면 체크박스 목록이 뜹니다. "All"은 전부 체크, "Select"는 적용하고 닫기입니다. 목록 밖을 눌러도 체크한 대로 적용되며, 그 클릭은 아래 컨트롤에 전달되지 않습니다. Esc는 적용하지 않고 닫습니다. 3번 칸의 행은 `WA0 #울산 믹싱`, `WA1 #울산 극판`, `WA2 #울산 조립`, `WA3 #울산 화성`이고 처음에는 전부 체크되어 있습니다.
 - **기간:** "전일", "전전일", "전주", "기간". "기간"을 고르면 날짜 칸 2개가 켜집니다. 날짜가 비었거나 형식이 틀리면 조회하지 않고 알림 창을 띄웁니다.
 - **조회:** "조회(F5)" 버튼이나 F5 키. 로딩 팝업이 대기 시간 동안 뜹니다.
+- **공정별 생산집계:** 헤더가 두 줄인 표입니다. 위 줄은 `SHOP`(두 줄 높이), `공정`(그룹공정·공정), `계획`(계획·실적·달성률), `생산`(작업수·양품수·양품율·수율(Loss제외)), `불량`(불량수·불량율(PPM)·LOSS수·LOSS율(PPM)·이탈수·이탈율(PPM))이고, 위 칸은 자기가 묶는 아래 칸들의 가로 범위를 덮습니다. `계획`은 위와 아래에 같은 이름으로 한 번씩 나옵니다. 행은 Shop마다 그룹공정이 `소계`이고 공정이 빈 행이 먼저 오고, 그 아래에 그룹공정(전공정 생산현황의 공정)마다 공정이 `소계`인 행이 옵니다. SHOP 이름은 그 Shop의 행들을 세로로 덮는 한 칸입니다. 값은 전공정 생산현황 행(제품 전체)의 합이라서, Shop 소계는 그 아래 행들의 합과 같습니다. 숫자 칸만 누를 수 있고, 누르면 그 행의 전공정 생산현황 행을 보여 주는 "생산 상세" 팝업이 뜹니다. 팝업은 우클릭 원형 메뉴로 저장합니다.
 - **원형 메뉴:** 표를 우클릭하면 그 자리에 뜹니다. 1단계는 위부터 시계 방향으로 export, copy, print, close이고, export를 누르면 excel(오른쪽 위), html(아래), pdf(왼쪽 위)로 바뀝니다. excel만 저장 대화상자를 엽니다.
 
 앱의 "오늘"은 2026-11-12로 고정입니다. "전일"은 언제 실행해도 2026-11-11이고, 데이터는 2026-11-01부터 2026-11-11까지 있습니다. 같은 필터면 항상 같은 행이 나옵니다. 값을 만드는 식은 `MesData.cs`에 있습니다.
@@ -83,14 +100,17 @@ Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' 
 
 | `event` | 그 밖의 필드 |
 | --- | --- |
-| `app_started` | `profile`, `expose`, `seed` |
+| `app_started` | `profile`, `expose`, `seed`, `combo_open` |
 | `menu_opened` | `category` |
 | `screen_opened` | `screen`, `title` |
 | `filter_changed` | `screen`, `filter`, `value`, `closed_by`(`item_click`, `select_button`, `outside_click`, `deactivated`, `typed`) |
+| `combo_body_clicked` | `screen`, `filter`. `--combo-open arrow`에서 칸의 몸통을 눌렀을 때 |
+| `combo_arrow_clicked` | `screen`, `filter`. `--combo-open arrow`에서 화살표를 눌렀을 때. 이어서 목록이 열림 |
 | `query_started` | `screen`, `filters`, `started_by`(`button`, `f5`), `delay_ms` |
 | `query_finished` | `screen`, `rows` |
 | `query_rejected` | `screen`, `reason`(`invalid_period`) |
-| `cell_popup_opened` | `screen`, `row`, `column` |
+| `cell_clicked` | `screen`, `row`(`[SHOP, 그룹공정, 공정]`, 빈 칸은 `""`), `column`(`[위 헤더, 아래 헤더]`). 공정별 생산집계의 숫자 칸을 눌렀을 때만 |
+| `cell_popup_opened` | `screen`, `row`, `column`. 공정별 생산집계에서는 `row`가 비지 않은 행 이름을 ` · `로 이은 글(예: `극판 · 소계`), `column`이 아래 헤더 이름 |
 | `radial_opened` | `stage`(1, 2), `source`(`panel`, `cell_popup`) |
 | `radial_closed` | `stage`, `reason`(`choice`, `outside_click`, `escape`, `deactivated`) |
 | `export_choice` | `route`(`icon`, `radial`), `choice`(`save`, `open`, `cancel`, `excel`, `pdf`, `html`, `copy`, `print`, `close`) |
@@ -98,7 +118,7 @@ Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' 
 | `export_failed` | `path`, `reason` |
 | `export_rejected` | `reason`(`no_data`) |
 
-`filter_changed`의 `filter`는 `shop-1`, `shop-2`, `shop-3`, `process`, `product`, `equipment`, `period`, `from`, `to`입니다. Shop 칸의 `value`는 코드 배열입니다. 값이 그대로면 기록하지 않습니다.
+`filter_changed`의 `filter`는 `shop-1`, `shop-2`, `shop-3`, `process`, `product`, `equipment`, `period`, `from`, `to`입니다. `combo_*_clicked`의 `filter`도 같은 이름을 씁니다(날짜 칸 제외). Shop 칸의 `value`는 코드 배열입니다. 값이 그대로면 기록하지 않습니다.
 
 ## 창 없는 내보내기
 
@@ -106,7 +126,7 @@ Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' 
 .\build\VirtualMes.exe --export-headless front-process '{\"shop\":[\"WA2\"],\"period\":\"전주\"}' C:\temp\out.xlsx
 ```
 
-화면 id는 `front-process`, `roller-check`, `defect-by-process`, `defect-detail`입니다. 필터 키는 `shop`(코드 배열), `process`, `product`, `equipment`, `period`, `from`, `to`, `row`이고, 빠진 키는 기본값(전부, `전체`, `전일`)입니다. `defect-detail`은 `row`(`믹싱`, `극판`, `조립`, `화성`)가 필요합니다. PowerShell 5.1에서는 JSON의 큰따옴표를 `\"`로 적습니다.
+화면 id는 `front-process`, `roller-check`, `defect-by-process`, `defect-detail`, `process-summary`입니다. 필터 키는 `shop`(코드 배열), `process`, `product`, `equipment`, `period`, `from`, `to`, `row`이고, 빠진 키는 기본값(전부, `전체`, `전일`)입니다. `defect-detail`은 `row`(`믹싱`, `극판`, `조립`, `화성`)가 필요합니다. `process-summary`는 `shop`과 기간만 쓰고, 첫 행에 아래 헤더 이름(첫 칸은 `SHOP`)을 적으며, 행마다 SHOP 이름을 반복해 적습니다. PowerShell 5.1에서는 JSON의 큰따옴표를 `\"`로 적습니다.
 
 저장되는 파일은 시트 하나짜리 `.xlsx`이고, 모든 셀은 화면에 보이는 글자 그대로입니다.
 

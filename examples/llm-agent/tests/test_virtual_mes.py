@@ -40,6 +40,19 @@ def test_bad_options_exit_2_with_a_reason(args):
     assert done.stderr.strip()
 
 
+def test_combo_open_defaults_to_anywhere_and_accepts_arrow():
+    assert parsed()["combo_open"] == "anywhere"
+    assert parsed("--combo-open", "arrow")["combo_open"] == "arrow"
+    assert parsed("--combo-open", "anywhere")["combo_open"] == "anywhere"
+
+
+@pytest.mark.parametrize("args", [["--combo-open", "sideways"], ["--combo-open"], ["--combo-open", "Arrow"]])
+def test_bad_combo_open_exits_2(args):
+    done = run_exe(*args, "--parse-only")
+    assert done.returncode == 2
+    assert done.stderr.strip()
+
+
 def test_args_file_is_used_only_without_arguments(tmp_path):
     copy = tmp_path / EXE.name
     copy.write_bytes(EXE.read_bytes())
@@ -114,3 +127,63 @@ def test_bad_requests_exit_2(tmp_path, screen, filters):
 def test_unwritable_path_exits_1(tmp_path):
     done = export("front-process", {}, tmp_path / "missing-folder" / "out.xlsx")
     assert done.returncode == 1 and done.stderr.strip()
+
+
+SUMMARY_HEADER = ["SHOP", "그룹공정", "공정", "계획", "실적", "달성률", "작업수", "양품수", "양품율",
+                  "수율(Loss제외)", "불량수", "불량율(PPM)", "LOSS수", "LOSS율(PPM)", "이탈수", "이탈율(PPM)"]
+SHOP_ORDER = ["믹싱", "극판", "조립", "화성"]
+GROUPS = {"믹싱": ["계량", "혼합"], "극판": ["코팅", "압연"], "조립": ["권취", "용접"], "화성": ["충전", "선별"]}
+
+
+def number(text):
+    return int(text.replace(",", ""))
+
+
+def test_process_summary_has_the_lower_header_and_subtotal_rows(tmp_path):
+    table = rows(tmp_path, "process-summary", {})
+    assert table[0] == SUMMARY_HEADER
+    shops = [row[0] for row in table[1:]]
+    assert shops == sorted(shops, key=SHOP_ORDER.index)
+    first_of_shop = next(row for row in table[1:] if row[0] == "극판")
+    assert first_of_shop[1:3] == ["소계", ""]
+    assert all(row[2] == "소계" for row in table[1:] if row[1] != "소계")
+
+
+def test_process_summary_rows_follow_the_shops_and_their_groups(tmp_path):
+    table = rows(tmp_path, "process-summary", {})
+    expected = []
+    for shop in SHOP_ORDER:
+        expected.append([shop, "소계", ""])
+        expected += [[shop, group, "소계"] for group in GROUPS[shop]]
+    assert [row[:3] for row in table[1:]] == expected
+    assert all(len(row) == len(SUMMARY_HEADER) for row in table)
+
+
+def test_shop_subtotal_is_the_sum_of_its_group_rows(tmp_path):
+    table = rows(tmp_path, "process-summary", {"period": "전주"})
+    for shop in SHOP_ORDER:
+        subtotal = next(r for r in table[1:] if r[0] == shop and r[1] == "소계")
+        groups = [r for r in table[1:] if r[0] == shop and r[1] != "소계"]
+        for column in (3, 4, 6, 7, 10, 12, 14):
+            assert number(subtotal[column]) == sum(number(r[column]) for r in groups), (shop, SUMMARY_HEADER[column])
+
+
+def test_work_count_is_the_front_process_quantity_and_good_count_subtracts_the_losses(tmp_path):
+    table = rows(tmp_path, "process-summary", {"shop": ["WA1"]})
+    front = rows(tmp_path, "front-process", {"shop": ["WA1"], "process": "코팅"})
+    coating = next(r for r in table[1:] if r[1] == "코팅")
+    assert number(coating[6]) == sum(number(r[4]) for r in front[1:])
+    assert number(coating[10]) == sum(number(r[5]) for r in front[1:])
+    assert number(coating[7]) == number(coating[6]) - number(coating[10]) - number(coating[12]) - number(coating[14])
+    assert coating[11] == f"{round(number(coating[10]) * 1_000_000 / number(coating[6])):,}"
+
+
+def test_process_summary_respects_the_shop_filter(tmp_path):
+    assert {row[0] for row in rows(tmp_path, "process-summary", {"shop": ["WA1"]})[1:]} == {"극판"}
+    assert rows(tmp_path, "process-summary", {"shop": []}) == [SUMMARY_HEADER]
+
+
+def test_process_summary_is_the_same_for_the_same_filters(tmp_path):
+    first = rows(tmp_path, "process-summary", {"period": "기간", "from": "2026-11-02", "to": "2026-11-06"})
+    again = rows(tmp_path, "process-summary", {"period": "기간", "from": "2026-11-02", "to": "2026-11-06"})
+    assert first == again != rows(tmp_path, "process-summary", {})

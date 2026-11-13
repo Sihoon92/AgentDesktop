@@ -80,6 +80,38 @@ def _quote(arg):
     return f'"{text}"' if " " in text else text
 
 
+def prepare_exe(folder, *args):
+    """Copies VirtualMes.exe into `folder` with its options and an event log in VirtualMes.args,
+    for whoever launches the copy without arguments (agent-desktop, the agent's Toolbox).
+    Returns (exe path, event log path)."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    exe = folder / EXE.name
+    exe.write_bytes(EXE.read_bytes())
+    log = folder / "events.jsonl"
+    line = " ".join(_quote(arg) for arg in (*args, "--log", log))
+    (folder / "VirtualMes.args").write_text(line, encoding="utf-8")
+    return exe, log
+
+
+def read_events(log):
+    log = Path(log)
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def wait_for_logged(log, name, count=1, timeout_s=15):
+    """Waits until the event log holds `count` events of this name and returns the last of them."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        matches = [event for event in read_events(log) if event["event"] == name]
+        if len(matches) >= count:
+            return matches[count - 1]
+        time.sleep(0.1)
+    raise AssertionError(f"event {name!r} x{count} did not appear within {timeout_s}s")
+
+
 class LiveApp:
     """Runs a private copy of VirtualMes.exe and drives it through agent-desktop.
 
@@ -96,11 +128,7 @@ class LiveApp:
         self._env = None
 
     def __enter__(self):
-        self.folder.mkdir(parents=True, exist_ok=True)
-        exe = self.folder / EXE.name
-        exe.write_bytes(EXE.read_bytes())
-        line = " ".join(_quote(arg) for arg in (*self.args, "--log", self.log))
-        (self.folder / "VirtualMes.args").write_text(line, encoding="utf-8")
+        exe, self.log = prepare_exe(self.folder, *self.args)
         self._binary = find_agent_desktop()
         self._env = {**os.environ, "AGENT_DESKTOP_HOME": str(self.folder / "state")}
         data = self.cli("launch", exe)

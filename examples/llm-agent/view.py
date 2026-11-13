@@ -16,6 +16,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from agent.knowledge import KNOWLEDGE_ENV, knowledge_root
 from agent.llm import OpenAIResponder
 from run import ENV_FILES, RUNS_DIR, find_binary
 from viewer.export import write_export
@@ -35,12 +36,12 @@ def openai_model(task):
     return OpenAIResponder(task.model, task.reasoning_effort)
 
 
-def build_run_manager(runs_dir, default_exe):
+def build_run_manager(runs_dir, default_exe, knowledge_dir=None):
     """Returns a RunManager, or None with the reason when this viewer can only replay."""
     binary = find_binary()
     if not binary.exists():
         return None, f"agent-desktop 바이너리가 없어 기록 보기만 합니다: {binary}"
-    return RunManager(runs_dir, binary, default_exe, openai_model), None
+    return RunManager(runs_dir, binary, default_exe, openai_model, knowledge_dir=knowledge_dir), None
 
 
 def open_fragment(runs_dir, value):
@@ -157,6 +158,8 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=8765, help="Loopback port (0 picks a free one)")
     parser.add_argument("--runs", type=Path, default=RUNS_DIR, help="Folder that holds the run records")
     parser.add_argument("--exe", help="Default absolute path of the app that new runs control")
+    parser.add_argument("--knowledge-dir", type=Path,
+                        help=f"Knowledge folder to show and to give viewer-started runs (default: ${KNOWLEDGE_ENV} or knowledge/)")
     parser.add_argument("--no-browser", action="store_true", help="Print the address without opening a browser")
     parser.add_argument("--open", metavar="RUN_ID", help="Open this run (or 'latest') instead of the list")
     parser.add_argument("--prune", action="store_true", help="List runs to delete; nothing is deleted without --yes")
@@ -174,10 +177,12 @@ def main(argv=None):
         return export(runs_dir, args.export[0], Path(args.export[1]))
     for path in ENV_FILES:
         load_dotenv(path)
-    run_manager, notice = build_run_manager(runs_dir, args.exe)
+    knowledge_dir = knowledge_root(args.knowledge_dir)
+    run_manager, notice = build_run_manager(runs_dir, args.exe, knowledge_dir=knowledge_dir)
     token = secrets.token_urlsafe(32)
     try:
-        server = make_server(runs_dir, token, port=args.port, run_manager=run_manager)
+        server = make_server(runs_dir, token, port=args.port, run_manager=run_manager,
+                             knowledge_dir=knowledge_dir)
     except OSError as error:
         print(f"오류: 127.0.0.1:{args.port}에서 서버를 열지 못했습니다: {error}", file=sys.stderr)
         return 2
@@ -187,6 +192,7 @@ def main(argv=None):
     url = f"http://127.0.0.1:{server.server_port}/?t={token}{fragment}"
     print(f"뷰어 주소: {url}")
     print(f"기록 폴더: {runs_dir}")
+    print(f"지식 폴더: {knowledge_dir}")
     if notice:
         print(notice)
     print("끝내려면 Ctrl+C를 누르세요.")

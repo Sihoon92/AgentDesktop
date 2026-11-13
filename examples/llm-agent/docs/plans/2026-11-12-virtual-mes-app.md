@@ -53,7 +53,7 @@ examples/llm-agent/virtual-mes/
   SurfaceUia.cs        노출 방식별 UIA 제공자
   PopupHost.cs         활성화되지 않는 팝업 창과 바깥 클릭 처리
   MainForm.cs          틀: 메뉴바, 화면 탭, 본문, 상태 줄, 메뉴 목록
-  ScreenSpec.cs        화면 5개의 정의(필터 구성, 아이콘 유무, 종류)
+  ScreenSpec.cs        화면 6개의 정의(필터 구성, 아이콘 유무, 종류)
   ScreenPanel.cs       화면 하나: 필터 열, 조회 버튼, 데이터 패널
   FilterColumn.cs      필터 열 그리기, 드롭다운·다중 선택 목록, 날짜 칸
   GridSurface.cs       조회 결과를 Surface 항목으로 배치

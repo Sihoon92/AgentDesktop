@@ -30,7 +30,8 @@ namespace VirtualMesApp
                 expose[Exposures.Name(region)] = Exposures.Name(options.Expose[region]);
             }
             this.log.Write("app_started", EventLog.Fields(
-                "profile", options.Profile, "expose", expose, "seed", options.Seed));
+                "profile", options.Profile, "expose", expose, "seed", options.Seed,
+                "combo_open", options.ComboOpen));
         }
 
         internal Options Options
@@ -41,6 +42,22 @@ namespace VirtualMesApp
         internal Exposure ExposureOf(UiRegion region)
         {
             return this.options.Expose[region];
+        }
+
+        /// <summary>True when filter boxes open their list only from the arrow at their right end.</summary>
+        internal bool CombosOpenByArrowOnly
+        {
+            get { return this.options.ComboOpen == Options.ComboArrow; }
+        }
+
+        internal void ComboBodyClicked(string filter)
+        {
+            this.log.Write("combo_body_clicked", EventLog.Fields("screen", this.Screen.Id, "filter", filter));
+        }
+
+        internal void ComboArrowClicked(string filter)
+        {
+            this.log.Write("combo_arrow_clicked", EventLog.Fields("screen", this.Screen.Id, "filter", filter));
         }
 
         internal void OpenMenu(string category)
@@ -137,6 +154,13 @@ namespace VirtualMesApp
         internal void CellPopupOpened(string row, string column)
         {
             this.log.Write("cell_popup_opened", EventLog.Fields(
+                "screen", this.Screen.Id, "row", row, "column", column));
+        }
+
+        /// <summary>Records a number cell of a grouped table by its row names and its two header names.</summary>
+        internal void CellClicked(string[] row, string[] column)
+        {
+            this.log.Write("cell_clicked", EventLog.Fields(
                 "screen", this.Screen.Id, "row", row, "column", column));
         }
 

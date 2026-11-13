@@ -283,3 +283,337 @@ def test_click_and_toggle_descriptions_point_switches_to_toggle():
 
     assert "switch" in describe["click"] and "toggle" in describe["click"]
     assert "switch" in describe["toggle"] and "checkbox" in describe["toggle"]
+
+
+import time  # noqa: E402
+
+import pytest  # noqa: E402
+from test_tools import LIST_WINDOW, SCENE  # noqa: E402
+
+from agent.approval import Decision  # noqa: E402
+from agent.ask import NO_ANSWER, Answer, NoAsker  # noqa: E402
+from agent.knowledge import KnowledgeStore  # noqa: E402
+from agent.loop import SYSTEM_PROMPT  # noqa: E402
+
+SCENE_EXE = r"C:\apps\Scene.exe"
+BASE_TOKENS = 100
+
+
+class ScriptedAsker:
+    interactive = True
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.questions = []
+
+    def ask(self, question):
+        self.questions.append(question)
+        return self.answers.pop(0)
+
+
+class RecordingGate:
+    def __init__(self, approve=True):
+        self.approve = approve
+        self.proposals = []
+
+    def review(self, proposal):
+        self.proposals.append(proposal)
+        return Decision(self.approve, "")
+
+
+def free_task(**overrides):
+    return Task("조회 결과를 엑셀로 저장해줘", SCENE_EXE, 2, [], **overrides)
+
+
+def scene_toolbox(tmp_path, asker=None, knowledge=None, task=None):
+    cli = FakeCli(scene=SCENE)
+    cli.on_click = lambda x, y: cli.open_window(LIST_WINDOW) if x > 1180 else cli.focus(mark=3)
+    toolbox = Toolbox(DesktopClient("ad.exe", "run1", runner=cli), task or free_task(),
+                      confirm=lambda _p: False, sleep=lambda _s: None, asker=asker, knowledge=knowledge,
+                      captures_dir=tmp_path / "captures", wall=lambda: time.time() - 60)
+    return toolbox
+
+
+def finish(success=True, evidence="저장함", saved_path=None, completion_id=None):
+    return [call("finish", {"success": success, "evidence": evidence, "saved_path": saved_path,
+                            "completion_id": completion_id})]
+
+
+GIVE_UP = finish(success=False, evidence="못 함")
+
+
+def store_with(tmp_path, *entries):
+    store = KnowledgeStore(tmp_path / "knowledge", "scene")
+    return store, [store.add(entry) for entry in entries]
+
+
+RESOLUTION = {"type": "resolution", "situation": "선택 칸이 가운데 클릭으로 안 열린다",
+              "resolution": "선택 칸은 오른쪽 끝을 눌러 연다"}
+FILE_COMPLETION = {"type": "completion", "task": "엑셀 저장", "checks": [{"kind": "file", "pattern": "*.xlsx"}]}
+
+
+def first_user_text(model):
+    return model.inputs[0][0]["content"]
+
+
+def user_parts(items):
+    return [part for item in items if isinstance(item, dict) and item.get("role") == "user"
+            and isinstance(item.get("content"), list) for part in item["content"]]
+
+
+def saved_file(tmp_path, name="out.xlsx"):
+    path = tmp_path / name
+    path.write_bytes(b"x")
+    return str(path)
+
+
+def stuck_question():
+    return {"kind": "stuck", "text": "무엇을 눌러야 하나요?", "proposed": None, "basis": [],
+            "candidates": [{"label": "라인 오른쪽", "mark": 3, "capture": None, "x": None, "y": None}]}
+
+
+def test_first_message_carries_the_goal_and_the_briefing(tmp_path):
+    store, (entry,) = store_with(tmp_path, RESOLUTION)
+    model = ScriptedModel([GIVE_UP])
+
+    run_agent(model, scene_toolbox(tmp_path, knowledge=store), free_task())
+
+    text = first_user_text(model)
+    assert text.startswith(free_task().goal) and entry["resolution"] in text and entry["id"] in text
+
+
+def test_without_knowledge_the_first_message_is_the_goal():
+    task, toolbox, _ = setup()
+    model = ScriptedModel([[call("finish", {"success": False, "evidence": "x"})]])
+    run_agent(model, toolbox, task)
+    assert model.inputs[0] == [{"role": "user", "content": task.goal}]
+
+
+def test_capture_reaches_the_model_as_an_image_message(tmp_path):
+    model = ScriptedModel([[call("launch_target", {})], [call("look", {"mark": None})], GIVE_UP])
+
+    run_agent(model, scene_toolbox(tmp_path), free_task())
+
+    assert any(part.get("type") == "input_image" for part in user_parts(model.inputs[-1]))
+
+
+def test_tool_output_image_mode_puts_the_image_in_the_output(tmp_path):
+    task = free_task(image_mode="tool_output")
+    model = ScriptedModel([[call("launch_target", {})], [call("look", {"mark": None})], GIVE_UP])
+
+    run_agent(model, scene_toolbox(tmp_path, task=task), task)
+
+    output = [i for i in model.inputs[-1] if isinstance(i, dict) and i.get("type") == "function_call_output"][-1]
+    assert [part["type"] for part in output["output"]] == ["input_text", "input_image"]
+
+
+def test_ask_only_turns_do_not_use_steps(tmp_path):
+    turns = [[call("launch_target", {})], [call("observe", OBSERVE_SCENE)]]
+    turns += [[call("ask", stuck_question())]] * 5 + [GIVE_UP]
+    task = free_task(max_steps=3)
+    asker = ScriptedAsker([Answer(text="1번")] * 5)
+
+    result = run_agent(ScriptedModel(turns), scene_toolbox(tmp_path, asker, task=task), task)
+
+    assert result.status == "gave_up" and result.steps == 8
+
+
+def test_turns_that_also_act_still_use_steps(tmp_path):
+    turns = [[call("launch_target", {})]] + [[call("ask", stuck_question()), call("list_windows", {})]] * 3
+    task = free_task(max_steps=2)
+
+    result = run_agent(ScriptedModel(turns), scene_toolbox(tmp_path, ScriptedAsker([Answer("1")] * 3), task=task),
+                       task)
+
+    assert result.status == "stopped" and result.reason == "Step limit reached"
+
+
+def test_question_events_carry_the_model_turn(tmp_path):
+    asker = ScriptedAsker([Answer(text="1번")])
+    turns = [[call("launch_target", {})], [call("observe", OBSERVE_SCENE)], [call("ask", stuck_question())], GIVE_UP]
+    run_agent(ScriptedModel(turns), scene_toolbox(tmp_path, asker), free_task())
+    assert asker.questions[0]["step"] == 3
+
+
+def test_finish_with_a_completion_entry_is_verified_by_the_file(tmp_path):
+    store, (entry,) = store_with(tmp_path, FILE_COMPLETION)
+    toolbox = scene_toolbox(tmp_path, ScriptedAsker([]), store)
+    model = ScriptedModel([finish(saved_path=saved_file(tmp_path), completion_id=entry["id"])])
+
+    result = run_agent(model, toolbox, free_task())
+
+    assert result.status == "verified"
+    assert toolbox.finish_note == {"goal": free_task().goal, "evidence": "저장함",
+                                   "saved_path": saved_file(tmp_path), "by": "harness"}
+
+
+def test_unmet_completion_goes_back_to_the_model(tmp_path):
+    store, (entry,) = store_with(tmp_path, FILE_COMPLETION)
+    missing = str(tmp_path / "missing.xlsx")
+    model = ScriptedModel([finish(saved_path=missing, completion_id=entry["id"]), GIVE_UP])
+
+    result = run_agent(model, scene_toolbox(tmp_path, ScriptedAsker([]), store), free_task())
+
+    assert result.status == "gave_up"
+    output = last_output(model.inputs[-1])
+    assert output["verified"] is False and "missing.xlsx" in output["unmet"]
+
+
+def test_human_confirmation_gives_confirmed(tmp_path):
+    asker = ScriptedAsker([Answer(text="", accepted=True)])
+    toolbox = scene_toolbox(tmp_path, asker)
+
+    result = run_agent(ScriptedModel([finish(saved_path=saved_file(tmp_path, "a.xlsx"))]), toolbox, free_task())
+
+    assert result.status == "confirmed"
+    assert asker.questions[0]["kind"] == "completion"
+    assert "저장함" in asker.questions[0]["text"] and "a.xlsx" in asker.questions[0]["text"]
+    assert toolbox.finish_note["by"] == "human" and toolbox.finish_note["saved_path"].endswith("a.xlsx")
+
+
+def test_human_rejection_returns_the_comment_to_the_model(tmp_path):
+    model = ScriptedModel([finish(), GIVE_UP])
+    asker = ScriptedAsker([Answer(text="파일이 비었어", accepted=False)])
+
+    result = run_agent(model, scene_toolbox(tmp_path, asker), free_task())
+
+    assert result.status == "gave_up"
+    assert last_output(model.inputs[-1]) == {"confirmed": False, "comment": "파일이 비었어"}
+
+
+def test_no_one_to_ask_stays_claimed(tmp_path):
+    toolbox = scene_toolbox(tmp_path, NoAsker())
+    assert run_agent(ScriptedModel([finish()]), toolbox, free_task()).status == "claimed"
+    assert toolbox.finish_note["by"] == "harness"
+
+
+def test_task_requirements_still_decide_first():
+    task, toolbox, _ = setup()
+    model = ScriptedModel([[call("launch_target", {})], [call("observe", OBSERVE)], settings_call,
+                           [call("finish", {"success": True, "evidence": "opened", "saved_path": None,
+                                            "completion_id": "c-unknown"})]])
+    assert run_agent(model, toolbox, task).status == "verified"
+
+
+def test_timed_out_completion_question_stops_the_run(tmp_path):
+    result = run_agent(ScriptedModel([finish()]), scene_toolbox(tmp_path, ScriptedAsker([NO_ANSWER])), free_task())
+    assert result.status == "stopped"
+
+
+def run_to(tmp_path, ending, register):
+    store, (entry,) = store_with(tmp_path, FILE_COMPLETION)
+    asker = ScriptedAsker([Answer(text="", accepted=True)])
+    turns = {
+        "verified": [finish(saved_path=saved_file(tmp_path), completion_id=entry["id"])],
+        "confirmed": [finish()],
+        "claimed": [finish()],
+        "gave_up": [GIVE_UP],
+        "stopped": [[text_reply("끝")]],
+    }[ending]
+    toolbox = scene_toolbox(tmp_path, NoAsker() if ending == "claimed" else asker, store)
+    log = []
+    result = run_agent(ScriptedModel(turns, tokens_per_turn=BASE_TOKENS), toolbox, free_task(),
+                       log=log.append, register=register)
+    assert result.status == ending
+    return result, log
+
+
+@pytest.mark.parametrize("ending,called", [
+    ("verified", 1), ("confirmed", 1), ("claimed", 0), ("gave_up", 0), ("stopped", 0)])
+def test_register_runs_only_after_a_checked_success(tmp_path, ending, called):
+    calls = []
+    run_to(tmp_path, ending, register=lambda model, toolbox, log: calls.append(1) or 50)
+    assert len(calls) == called
+
+
+def test_register_tokens_are_added_and_its_failure_does_not_change_the_result(tmp_path):
+    def raising(*_args):
+        raise RuntimeError("등록 실패")
+
+    assert run_to(tmp_path / "a", "verified", register=lambda *_: 50)[0].tokens == BASE_TOKENS + 50
+    result, log = run_to(tmp_path / "b", "verified", register=raising)
+    assert (result.status, result.tokens) == ("verified", BASE_TOKENS)
+    assert any(event["type"] == "warning" and "등록 실패" in event["message"] for event in log)
+
+
+def test_policy_refusal_comes_before_the_approval_prompt(tmp_path):
+    gate = RecordingGate(approve=True)
+    click = {"window_id": "w-1", "x": 1050, "y": 600, "button": "left", "intent": "누른다",
+             "expect": "any", "knowledge_id": None}
+    model = ScriptedModel([[call("launch_target", {})], [call("mouse_click", click)], GIVE_UP])
+
+    run_agent(model, scene_toolbox(tmp_path, ScriptedAsker([])), free_task(), gate=gate)
+
+    assert [p["tool"] for p in gate.proposals] == ["launch_target"]
+    assert last_output(model.inputs[-1])["refused_code"] == "needs_confirmation"
+
+
+def test_confirmed_action_still_goes_through_approval(tmp_path):
+    gate = RecordingGate(approve=True)
+    confirm = {"kind": "confirm", "text": "여기 맞나요?", "proposed": 1, "basis": [],
+               "candidates": [{"label": "찍은 곳", "mark": None, "capture": "c1", "x": 10, "y": 20}]}
+    click = {"capture": "c1", "x": 10, "y": 20, "action": "click", "intent": "누른다", "expect": "any",
+             "knowledge_id": None}
+    model = ScriptedModel([[call("launch_target", {})], [call("observe", OBSERVE_SCENE)],
+                           [call("look", {"mark": None})], [call("ask", confirm)],
+                           [call("click_point", click)], GIVE_UP])
+
+    run_agent(model, scene_toolbox(tmp_path, ScriptedAsker([Answer(text="맞아")])), free_task(), gate=gate)
+
+    assert [p["tool"] for p in gate.proposals] == ["launch_target", "click_point"]
+
+
+def test_system_prompt_teaches_the_new_tools():
+    for word in ("[n]", "click_part", "expect", "expected_met", "find_cells", "ask", "click_point",
+                 "knowledge_id", "saved_path", "completion_id"):
+        assert word in SYSTEM_PROMPT
+
+
+OBSERVE_SCENE = {"window_id": None, "root_ref": None, "surface": None, "include_bounds": False}
+
+
+def test_finish_schema_takes_a_saved_path_and_a_completion_id():
+    from agent.tool_schemas import SCHEMAS
+
+    finish_tool = next(s["definition"] for s in SCHEMAS if s["definition"]["name"] == "finish")
+    properties = finish_tool["parameters"]["properties"]
+    assert properties["saved_path"]["type"] == ["string", "null"]
+    assert properties["completion_id"]["type"] == ["string", "null"]
+    assert sorted(finish_tool["parameters"]["required"]) == sorted(properties)
+
+
+
+def completions(log):
+    return [event for event in log if event.get("type") == "completion"]
+
+
+def test_task_requirements_leave_a_completion_event():
+    task, toolbox, _ = setup()
+    log = []
+    model = ScriptedModel([[call("launch_target", {})], [call("finish", {"success": True, "evidence": "early"})],
+                           [call("observe", OBSERVE)], settings_call,
+                           [call("finish", {"success": True, "evidence": "opened"})]])
+
+    assert run_agent(model, toolbox, task, log=log.append).status == "verified"
+
+    unmet, met = completions(log)
+    assert (unmet["by"], unmet["id"], unmet["met"]) == ("task", None, False)
+    assert "설정 패널" in unmet["detail"]
+    assert (met["by"], met["id"], met["met"]) == ("task", None, True)
+
+
+@pytest.mark.parametrize("answer,met", [(Answer(text="좋아", accepted=True), True),
+                                        (Answer(text="파일이 비었어", accepted=False), False)])
+def test_a_person_confirming_without_a_completion_entry_leaves_a_completion_event(tmp_path, answer, met):
+    log = []
+    turns = [finish()] + ([] if met else [GIVE_UP])
+    run_agent(ScriptedModel(turns), scene_toolbox(tmp_path, ScriptedAsker([answer])), free_task(), log=log.append)
+
+    [event] = completions(log)
+    assert event == {"type": "completion", "by": "human", "id": None, "met": met, "detail": answer.text}
+
+
+def test_a_claimed_run_leaves_no_completion_event(tmp_path):
+    log = []
+    run_agent(ScriptedModel([finish()]), scene_toolbox(tmp_path, NoAsker()), free_task(), log=log.append)
+    assert completions(log) == []

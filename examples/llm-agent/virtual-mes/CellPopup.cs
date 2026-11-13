@@ -10,9 +10,9 @@ namespace VirtualMesApp
     /// </summary>
     internal sealed class CellPopup : Form
     {
-        internal CellPopup(Session session, Form owner, string row, string column, QueryResult detail)
+        internal CellPopup(Session session, Form owner, string title, string fileName, QueryResult detail)
         {
-            this.Text = "불량 상세 · " + row + " · " + column;
+            this.Text = title;
             this.AutoScaleMode = AutoScaleMode.None;
             this.Font = Ui.Font;
             this.BackColor = Color.White;
@@ -29,7 +29,7 @@ namespace VirtualMesApp
             {
                 RadialMenu.Show(
                     this, screen, session, delegate { return detail; },
-                    ExportFlow.SourceCellPopup, "불량 상세 " + row + ".xlsx");
+                    ExportFlow.SourceCellPopup, fileName);
             };
 
             Surface grid = new Surface(UiRegion.Grid, session.ExposureOf(UiRegion.Grid));

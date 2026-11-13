@@ -78,17 +78,20 @@ conda activate AgentDesktop
 python -m pytest -q                                         # 캡처한 CLI 응답 재생, 앱 조작 없음
 python run.py tasks\footprint_open_settings.yaml --baseline  # LLM 없이 고정 순서 실행
 python run.py tasks\footprint_open_settings.yaml             # LLM 호출
-python run.py --exe "<절대경로>" --goal "<지시>" [--approve]   # 작업 파일 없이 지시(결과는 claimed, 종료 코드 3)
+python run.py --exe "<절대경로>" --goal "<지시>" [--approve]   # 작업 파일 없이 지시. 터미널이면 묻고 사람이 확인(confirmed, 0), 아니면 claimed(3)
+python run.py ... --system <이름> --knowledge-dir <폴더>       # 지식의 시스템 이름(기본: exe 이름)과 지식 폴더
 python view.py --exe "<절대경로>"                              # 단계 뷰어: 기록 재생, 새 실행, 동작 전 승인
 python view.py --open latest                                # 지난 실행 바로 열기(run.py가 돌지 않아도 됨)
 python view.py --prune --older-than 30d [--yes]              # 오래된 기록 정리, --yes 없으면 출력만
 python view.py --export <run_id|latest> <out.html>           # 실행 하나를 서버 없이 열리는 HTML로
 ```
 
-**가상 MES 앱:** `examples/llm-agent/virtual-mes/`는 CUA 개발용 연습 앱입니다(`virtual-mes/README.md`). `powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1`로 빌드합니다. `tests\test_virtual_mes.py`는 창을 띄우지 않습니다. `tests\test_virtual_mes_live.py`는 `VIRTUAL_MES_LIVE=1`일 때만 돌고 실제 창을 띄우며 커서를 움직이므로, 돌리기 전에 사용자에게 확인받습니다.
+**가상 MES 앱:** `examples/llm-agent/virtual-mes/`는 CUA 개발용 연습 앱입니다(`virtual-mes/README.md`). `powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1`로 빌드합니다. `tests\test_virtual_mes.py`는 창을 띄우지 않습니다. `tests\test_virtual_mes_live.py`와 `tests\test_scenes_live.py`는 `VIRTUAL_MES_LIVE=1`일 때만 돌고 실제 창을 띄우며 커서를 움직이므로, 돌리기 전에 사용자에게 확인받습니다.
 
 실행마다 `runs\<id>\`에 스크린샷과 요소 박스가 기록되고(`agent/recorder.py`), 뷰어(`viewer/`)가 표준 라이브러리 서버로 127.0.0.1에서 토큰을 받아 보여 줍니다.
 
-`run.py`가 작업 파일과 CLI 바이너리를 찾아 `agent/loop.py`의 루프를 돌립니다. 모델은 `agent/tools.py`의 도구로만 앱을 조작하고, 쓸 수 있는 도구는 작업 파일의 `permission_level`로 제한되며, `agent/guard.py`가 반복 동작을 막습니다. 성공 여부는 모델이 아니라 하니스(`agent/verify.py`)가 작업 파일의 `success` 조건으로 판단합니다. 바이너리는 `AGENT_DESKTOP_BIN`, `target/release`, `target/debug` 순으로 찾습니다.
+`run.py`가 작업 파일과 CLI 바이너리를 찾아 `agent/loop.py`의 루프를 돌립니다. 모델은 `agent/tools.py`의 도구로만 앱을 조작하고, 쓸 수 있는 도구는 작업 파일의 `permission_level`로 제한되며, `agent/guard.py`가 반복 동작을 막습니다. 성공 여부는 모델이 아니라 하니스(`agent/verify.py`)가 작업 파일의 `success` 조건으로 판단합니다. 조건이 없으면 지식의 완료 조건(`agent/completion.py`)이나 사람의 확인으로 판정합니다. 바이너리는 `AGENT_DESKTOP_BIN`, `target/release`, `target/debug` 순으로 찾습니다.
+
+**묻기와 배우기:** 좌표를 직접 고른 클릭, 표에서 후보가 여럿인 셀, 기대와 다른 결과가 이어진 뒤에는 하니스(`agent/policy.py`)가 사람에게 묻게 합니다. 승인한 답은 `knowledge\<시스템>\`에 YAML로 쌓이고(`agent/knowledge.py`, Git 제외) 다음 실행의 모델에게 주어집니다. 앱마다 다른 것은 이 지식 파일에만 둡니다. `agent/`와 `viewer/`의 코드에 앱 이름이나 화면의 글을 넣으면 `tests\test_application_agnostic.py`가 실패합니다. 설계는 `examples/llm-agent/docs/specs/2026-11-13-observe-ask-learn-design.md`에 있습니다.
 
 **사내 배포:** 내부 OpenAI 호환 LLM을 `OPENAI_BASE_URL`로 쓸 계획입니다. 이 예제는 Chat Completions가 아니라 **Responses API**를 호출하며(`agent/llm.py`), 내부 API도 이를 지원한다고 사용자가 확인했습니다. `scripts/jev/`는 외부 결정 API로 화면 내용을 보내고 OpenAI 형식도 아니므로 사내에서 쓰지 않습니다.

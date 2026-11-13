@@ -21,6 +21,9 @@ namespace VirtualMesApp
         private volatile SurfaceItem[] items = new SurfaceItem[0];
         private SurfaceRootProvider provider;
         private SurfaceItem pressed;
+        private Rectangle caret = Rectangle.Empty;
+        private bool caretShown;
+        private Timer caretTimer;
 
         internal Action<Point> BackgroundRightClick;
 
@@ -60,7 +63,47 @@ namespace VirtualMesApp
             list.CopyTo(copy, 0);
             this.items = copy;
             this.pressed = null;
+            this.HideCaret();
             this.Invalidate();
+        }
+
+        /// <summary>
+        /// Shows a blinking text caret, as a click on an editable box does. It is drawn only:
+        /// the accessibility tree never sees it, so the blink does not read as a change.
+        /// </summary>
+        internal void ShowCaret(Rectangle line)
+        {
+            this.caret = line;
+            this.caretShown = true;
+            if (this.caretTimer == null)
+            {
+                int blink = SystemInformation.CaretBlinkTime;
+                this.caretTimer = new Timer();
+                this.caretTimer.Interval = blink > 0 ? blink : 530;
+                this.caretTimer.Tick += delegate
+                {
+                    this.caretShown = !this.caretShown;
+                    this.Invalidate(this.caret);
+                };
+            }
+            this.caretTimer.Stop();
+            this.caretTimer.Start();
+            this.Invalidate(this.caret);
+        }
+
+        internal void HideCaret()
+        {
+            if (this.caret.IsEmpty)
+            {
+                return;
+            }
+            if (this.caretTimer != null)
+            {
+                this.caretTimer.Stop();
+            }
+            this.Invalidate(this.caret);
+            this.caret = Rectangle.Empty;
+            this.caretShown = false;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -75,6 +118,13 @@ namespace VirtualMesApp
                 else
                 {
                     this.PaintDefault(e.Graphics, item);
+                }
+            }
+            if (this.caretShown && !this.caret.IsEmpty)
+            {
+                using (SolidBrush brush = new SolidBrush(this.ForeColor))
+                {
+                    e.Graphics.FillRectangle(brush, this.caret);
                 }
             }
         }
@@ -186,9 +236,20 @@ namespace VirtualMesApp
             SurfaceItem[] current = this.items;
             for (int index = current.Length - 1; index >= 0; index--)
             {
-                if (current[index].Hit(point))
+                SurfaceItem item = current[index];
+                if (item.Parts != null)
                 {
-                    return current[index];
+                    for (int part = item.Parts.Length - 1; part >= 0; part--)
+                    {
+                        if (item.Parts[part].Hit(point))
+                        {
+                            return item.Parts[part];
+                        }
+                    }
+                }
+                if (item.Hit(point))
+                {
+                    return item;
                 }
             }
             return null;
@@ -196,6 +257,7 @@ namespace VirtualMesApp
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
+            this.HideCaret();
             this.pressed = this.Find(e.Location);
             base.OnMouseDown(e);
         }
@@ -245,6 +307,11 @@ namespace VirtualMesApp
         protected override void OnHandleDestroyed(EventArgs e)
         {
             this.provider = null;
+            if (this.caretTimer != null)
+            {
+                this.caretTimer.Dispose();
+                this.caretTimer = null;
+            }
             base.OnHandleDestroyed(e);
         }
     }

@@ -8,6 +8,7 @@ namespace VirtualMesApp
         internal const string KindList = "list";
         internal const string KindMatrix = "matrix";
         internal const string KindEmpty = "empty";
+        internal const string KindGrouped = "grouped";
 
         internal const string FilterShop = "shop";
         internal const string FilterProcess = "process";
@@ -73,7 +74,11 @@ namespace VirtualMesApp
 
             ScreenSpec equipment = new ScreenSpec(EquipmentStatus, "설비 가동현황", ScreenSpec.KindEmpty);
 
-            return new[] { front, rear, defect, roller, equipment };
+            ScreenSpec summary = new ScreenSpec(MesData.ProcessSummary, "공정별 생산집계", ScreenSpec.KindGrouped);
+            summary.HasIcon = true;
+            summary.Filters = new[] { ScreenSpec.FilterShop, ScreenSpec.FilterPeriod };
+
+            return new[] { front, rear, defect, roller, equipment, summary };
         }
     }
 }

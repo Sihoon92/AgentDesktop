@@ -1,8 +1,8 @@
 """Bundles one recorded run and the viewer page into a single HTML file that opens without a server.
 
-The page is viewer/static/index.html with style.css inlined as <style> and app.js inlined as a
-<script> at the end of the body (it ran deferred from the head before; at the end the page is
-already parsed). The record goes in <script id="run-export" type="application/json">: run.json,
+The page is viewer/static/index.html with style.css inlined as <style> and every deferred viewer
+script (chat.js, app.js) inlined as a <script> at the end of the body, in the order the page names
+them (they ran deferred from the head before; at the end the page is already parsed). The record goes in <script id="run-export" type="application/json">: run.json,
 the events, and every frame as a data URI. Nothing in the file points back at the viewer
 server: no static or API path, no token, no address, nothing from other runs.
 """
@@ -16,6 +16,7 @@ from pathlib import Path
 EXPORT_FORMAT = 1
 STYLE_TAG = '<link rel="stylesheet" href="/static/style.css">'
 SCRIPT_TAG = '<script src="/static/app.js" defer></script>'
+VIEWER_SCRIPT = re.compile(r'<script src="/static/([A-Za-z0-9_-]+\.js)" defer></script>')
 BODY_END = "</body>"
 HEAD_END = "</head>"
 FRAME_NAME = re.compile(r"\d{4}\.png")
@@ -31,17 +32,23 @@ def build_export(run_dir, static_dir, now):
     for tag in (STYLE_TAG, SCRIPT_TAG, HEAD_END, BODY_END):
         if page.count(tag) != 1:
             raise ValueError(f"index.html에 {tag}가 정확히 한 번 있어야 내보낼 수 있습니다")
-    page = page.replace(STYLE_TAG, "").replace(SCRIPT_TAG, "")
+    names = VIEWER_SCRIPT.findall(page)
+    page = VIEWER_SCRIPT.sub("", page.replace(STYLE_TAG, ""))
     if SERVER_REFERENCE.search(page):
         raise ValueError("index.html에 서버 경로를 가리키는 src·href가 남아 있어 내보낼 수 없습니다")
     style = _raw_text((static_dir / "style.css").read_text(encoding="utf-8"), "style")
-    script = _raw_text((static_dir / "app.js").read_text(encoding="utf-8"), "script")
+    scripts = [_raw_text(_static_text(static_dir, name), "script") for name in names]
     page = page.replace(HEAD_END, f"<style>\n{style}\n</style>\n{HEAD_END}")
-    tail = (
-        f'<script id="run-export" type="application/json">{_json_text(record)}</script>\n'
-        f"<script>\n{script}\n</script>\n{BODY_END}"
-    )
+    code = "".join(f"<script>\n{script}\n</script>\n" for script in scripts)
+    tail = f'<script id="run-export" type="application/json">{_json_text(record)}</script>\n{code}{BODY_END}'
     return page.replace(BODY_END, tail)
+
+
+def _static_text(static_dir, name):
+    try:
+        return (static_dir / name).read_text(encoding="utf-8")
+    except OSError as error:
+        raise ValueError(f"index.html이 가리키는 {name}을(를) 읽을 수 없어 내보낼 수 없습니다: {error}") from error
 
 
 def write_export(run_dir, static_dir, out_path, now):

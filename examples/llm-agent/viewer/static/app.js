@@ -5,6 +5,7 @@ const TOKEN_KEY = "agent-viewer-token";
 const STATUS_LABELS = {
   running: "실행 중",
   verified: "검증됨",
+  confirmed: "사람이 확인함",
   claimed: "주장만 함",
   gave_up: "포기",
   stopped: "중단",
@@ -17,12 +18,13 @@ const STARTED_BY_LABELS = { "run.py": "run.py", "run.py --view": "run.py --view"
 const KEEP_FILTER = "keep";
 const KNOWN_EXPORT = 1;
 const EXPORT_WARNING = "이 파일에는 앱 화면과 UI 텍스트가 들어 있습니다. 공유하기 전에 내용을 확인하세요.";
-const FILTER_STATUSES = ["verified", "claimed", "gave_up", "stopped", "running", "interrupted", "unreadable", "legacy"];
+const FILTER_STATUSES = ["verified", "confirmed", "claimed", "gave_up", "stopped", "running", "interrupted", "unreadable", "legacy"];
 const SEARCH_DELAY_MS = 250;
 const SUMMARY_EVERY_IDLE_POLLS = 5;
 const CHANGE_LINES = 30;
 const VERDICT_METHODS = {
   verified: "하니스가 확인",
+  confirmed: "사람이 결과를 확인",
   claimed: "모델 주장만, 미검증",
   gave_up: "포기",
   stopped: "중단",
@@ -58,6 +60,14 @@ const state = {
   idlePolls: 0,
   status: null,
   drafts: new Map(),
+  pin: null,
+  sentAnswers: new Set(),
+  answerDrafts: new Map(),
+  registrationDrafts: new Map(),
+  composerKey: null,
+  chatShown: null,
+  jumpedQuestion: null,
+  baseTitle: "",
 };
 const POLL_MS = 1000;
 const LEVEL_LABELS = ["0 · 커서 안 씀", "1 · 값 입력·키", "2 · 마우스·타이핑", "3 · 전체"];
@@ -140,13 +150,22 @@ function buildEntries(events) {
   const observations = new Map();
   const beforeIds = new Set();
   const tokensByStep = new Map();
+  const knowledgeUsed = new Map();
+  const knowledgeFailed = new Map();
+  const byStep = (map, event) => {
+    if (!map.has(event.step)) map.set(event.step, []);
+    map.get(event.step).push(event);
+  };
   for (const event of events) {
     if (event.type === "observation") observations.set(event.id, event);
     if (event.type === "action") beforeIds.add(event.before);
     if (event.type === "model") tokensByStep.set(event.step, event.tokens);
+    if (event.type === "knowledge_used") byStep(knowledgeUsed, event);
+    if (event.type === "knowledge_failed") byStep(knowledgeFailed, event);
   }
   const entries = [];
   const proposals = new Map();
+  const questions = new Map();
   let awaitingAfter = null;
   let awaitingNext = null;
   let lastObservation = null;
@@ -162,6 +181,14 @@ function buildEntries(events) {
         entry.decision = event;
         approved = event.approved ? entry : null;
       }
+    } else if (event.type === "question") {
+      const observation = observations.get(event.observation) || lastObservation;
+      const entry = { kind: "question", question: event, answer: null, observation };
+      questions.set(event.id, entry);
+      entries.push(entry);
+    } else if (event.type === "answer") {
+      const entry = questions.get(event.id);
+      if (entry) entry.answer = event;
     } else if (event.type === "observation") {
       lastObservation = event;
       if (awaitingNext) {
@@ -173,11 +200,14 @@ function buildEntries(events) {
       } else if (awaitingAfter && showsActionResult(event)) {
         awaitingAfter.after = event;
         awaitingAfter = null;
-      } else if (!beforeIds.has(event.id)) {
+      } else if (!beforeIds.has(event.id) && event.source !== "question") {
         entries.push({ kind: "observation", observation: event });
       }
     } else if (event.type === "action") {
-      awaitingAfter = { kind: "action", action: event, before: observations.get(event.before) || null, after: null, next: null };
+      awaitingAfter = {
+        kind: "action", action: event, before: observations.get(event.before) || null, after: null, next: null,
+        knowledgeUsed: knowledgeUsed.get(event.step) || [], knowledgeFailed: knowledgeFailed.get(event.step) || [],
+      };
       awaitingNext = awaitingAfter;
       if (approved && approved.proposal.tool === event.tool) {
         awaitingAfter.approval = approved.decision;
@@ -580,10 +610,17 @@ async function fetchRunSummary(runId) {
 }
 
 async function selectRun(runId, kind = "run") {
-  if (runId !== state.runId || kind !== state.runKind) releaseFrames();
+  if (runId !== state.runId || kind !== state.runKind) {
+    releaseFrames();
+    state.pin = null;
+    state.chatShown = null;
+    state.composerKey = null;
+  }
   state.runId = runId;
   state.runKind = kind;
-  history.replaceState(null, "", `${location.pathname}#${kind === "legacy" ? "legacy" : "run"}=${encodeURIComponent(runId)}`);
+  if (!document.body.classList.contains("knowledge-mode")) {
+    history.replaceState(null, "", `${location.pathname}#${kind === "legacy" ? "legacy" : "run"}=${encodeURIComponent(runId)}`);
+  }
   renderRunList();
   if (kind === "legacy") return openLegacy(runId);
   let page;
@@ -606,8 +643,8 @@ async function selectRun(runId, kind = "run") {
   state.finished = state.events.some((event) => event.type === "finish");
   rebuildEntries();
   state.view = "before";
-  if (isLive()) followLatest();
-  else select(0);
+  if (!isLive()) select(0);
+  else if (!followPendingQuestion()) followLatest();
 }
 
 async function openLegacy(runId) {
@@ -678,10 +715,12 @@ async function pollLive() {
       state.events = state.events.concat(fresh);
       state.finished = state.events.some((event) => event.type === "finish");
       rebuildEntries();
+      if (followPendingQuestion()) return;
       if (atEnd) followLatest(); else render();
     }
     if (state.finished) {
       await refreshSelectedRun();
+      if (runId === state.runId) renderRunSummary();
       await fetchRuns();
       await loadStatus();
     }
@@ -713,11 +752,14 @@ function render() {
   renderToggles();
   renderDetails();
   renderStage();
+  renderChat();
+  updateTitle();
 }
 
 function timelineLabel(entry) {
   if (entry.kind === "action") return entry.action.tool;
   if (entry.kind === "proposal") return `제안 ${entry.proposal.tool}${proposalState(entry).suffix}`;
+  if (entry.kind === "question") return questionTimelineLabel(entry);
   if (entry.kind === "finish") return STATUS_LABELS[entry.finish.status] || entry.finish.status;
   if (entry.kind === "wait") return waitLabel(entry.observation.wait);
   if (entry.kind === "legacy") return entry.step.tool;
@@ -725,7 +767,7 @@ function timelineLabel(entry) {
 }
 
 const WAIT_LABEL_CHARS = 18;
-const SOURCE_LABELS = { observe: "observe 관찰", action: "동작 뒤 화면", launch: "실행 직후", wait_for_text: "wait_for_text 대기" };
+const SOURCE_LABELS = { observe: "observe 관찰", action: "동작 뒤 화면", launch: "실행 직후", wait_for_text: "wait_for_text 대기", question: "질문 직전 화면" };
 
 function waitLabel(wait) {
   if (!wait) return "대기";
@@ -745,6 +787,8 @@ function renderTimeline() {
     const bad = (entry.kind === "finish" && entry.finish.status !== "verified")
       || (entry.kind === "proposal" && entry.decision && !entry.decision.approved)
       || (entry.kind === "wait" && !(entry.observation.wait && entry.observation.wait.found))
+      || (entry.kind === "action" && entry.action.expected_met === false)
+      || (entry.kind === "question" && questionState(entry).bad)
       || (entry.kind === "legacy" && entry.step.ok === false) ? " bad" : "";
     const current = index === state.index;
     const button = el("button", { attrs: { type: "button", ...(current ? { "aria-current": "step" } : {}) } }, [
@@ -805,6 +849,7 @@ function renderDetails() {
   }
   if (entry.kind === "action") info.replaceChildren(...actionDetails(entry));
   else if (entry.kind === "proposal") info.replaceChildren(...proposalDetails(entry));
+  else if (entry.kind === "question") info.replaceChildren(...questionDetails(entry));
   else if (entry.kind === "finish") info.replaceChildren(...finishDetails(entry.finish));
   else if (entry.kind === "wait") info.replaceChildren(...waitDetails(entry.observation));
   else if (entry.kind === "legacy") info.replaceChildren(...legacyDetails(entry.step));
@@ -832,9 +877,11 @@ function actionDetails(entry) {
       ["전달", disposition],
       ["오류", error, "bad-text"],
       ["거부", result.refused, "bad-text"],
+      ...expectationRows(action),
       ["모델 토큰", state.tokensByStep.get(action.step)],
       ["보는 화면", state.view === "after" ? "동작 후" : "동작 전"],
     ]),
+    ...knowledgeNotes(entry),
     el("h3", { text: "인자" }),
     el("pre", { text: JSON.stringify(args, null, 2) }),
   ];
@@ -1013,6 +1060,9 @@ function stageNotices(entry, observation) {
   const notices = runNotices(state.run).concat(observationWarnings(observation));
   const pending = pendingProposal();
   if (pending && pending !== entry) notices.unshift("동작 승인을 기다리고 있습니다. 타임라인의 노란 '대기' 단계에서 승인하거나 거부하세요.");
+  const question = pendingQuestion();
+  if (question && !canAnswerHere()) notices.unshift("에이전트가 질문하고 답을 기다립니다. 이 실행은 터미널에서 답합니다.");
+  else if (question && question !== entry) notices.unshift("에이전트가 질문하고 답을 기다립니다. 타임라인의 질문 단계를 보면서 오른쪽 대화 칸에서 답하세요.");
   return notices;
 }
 
@@ -1090,6 +1140,10 @@ const SHAPE_STYLES = {
   gone: { className: "gone", halo: 4, tone: "" },
   target: { className: "target", halo: 6, tone: "" },
   proposal: { className: "proposal", halo: 6, tone: "proposal" },
+  qbasis: { className: "q-basis", halo: 0, tone: "" },
+  qcandidate: { className: "q-candidate", halo: 5, tone: "q-candidate" },
+  qtarget: { className: "q-target", halo: 6, tone: "q-target" },
+  pin: { className: "pin", halo: 0, tone: "pin" },
 };
 const overlayItems = new WeakMap();
 
@@ -1120,6 +1174,7 @@ function overlayPlan(entry, observation, options) {
   };
   if (entry && entry.kind === "action") mark(entry.action.target, "target", `${options.index + 1} ${entry.action.tool}`, options.view === "after");
   if (entry && entry.kind === "proposal") mark(entry.proposal.target, "proposal", `${options.index + 1} 제안 ${entry.proposal.tool}`, false);
+  shapes.push(...questionShapes(entry, observation));
   return shapes;
 }
 
@@ -1134,13 +1189,16 @@ function drawOverlay(entry, observation, width, height) {
   const layer = document.createDocumentFragment();
   for (const shape of plan) {
     if (shape.rect) appendRect(layer, shape);
+    else if (shape.cross) appendCross(layer, shape);
     else appendPoints(layer, shape);
   }
   overlay.append(layer);
+  $("stage").classList.toggle("pinnable", pinnable());
   for (const shape of plan) {
     if (!shape.label) continue;
-    const [x, y] = shape.rect ? [shape.rect.x, shape.rect.y] : shape.points[0];
-    addLabel(shape.label, x, y, width, height, SHAPE_STYLES[shape.layer].tone);
+    const [x, y] = shape.rect ? [shape.rect.x, shape.rect.y] : shape.cross || shape.points[0];
+    const placement = shape.layer === "pin" ? "left" : shape.cross ? "beside" : shape.layer.startsWith("q") ? "inside" : "above";
+    addLabel(shape.label, x, y, width, height, SHAPE_STYLES[shape.layer].tone, placement);
   }
 }
 
@@ -1182,8 +1240,9 @@ function onOverlayOut(event) {
   if (overlayItems.has(event.target)) hideTooltip();
 }
 
-function addLabel(text, x, y, width, height, tone) {
+function addLabel(text, x, y, width, height, tone, placement = "above") {
   const label = el("span", { className: tone ? `label ${tone}` : "label", text });
+  label.dataset.placement = placement;
   label.dataset.x = String(x / width);
   label.dataset.y = String(y / height);
   $("labels").append(label);
@@ -1201,9 +1260,13 @@ function positionLabels() {
     const anchorY = Number(label.dataset.y) * stageHeight;
     const width = label.offsetWidth;
     const height = label.offsetHeight;
-    const left = Math.max(0, Math.min(anchorX - 2, stageWidth - width));
+    const placement = label.dataset.placement;
+    const shiftX = placement === "beside" ? 10 : placement === "left" ? -width - 10 : placement === "inside" ? 1 : -2;
+    const left = Math.max(0, Math.min(anchorX + shiftX, stageWidth - width));
     const above = anchorY - height - gap;
-    const top = above >= 0 ? above : Math.min(anchorY + gap, Math.max(0, stageHeight - height));
+    let top = above >= 0 ? above : Math.min(anchorY + gap, Math.max(0, stageHeight - height));
+    if (placement === "inside") top = Math.max(0, Math.min(anchorY + 1, stageHeight - height));
+    if (placement === "beside" || placement === "left") top = Math.max(0, Math.min(anchorY - height / 2, stageHeight - height));
     label.style.left = `${left}px`;
     label.style.top = `${top}px`;
   }
@@ -1218,6 +1281,11 @@ async function loadStatus() {
     return;
   }
   renderStartForm();
+  if (state.runId) {
+    renderChat();
+    renderToggles();
+    if (!$("stage").hidden) $("stage").classList.toggle("pinnable", pinnable());
+  }
 }
 
 function renderStartForm() {
@@ -1250,6 +1318,8 @@ async function submitRun(event) {
   const payload = { goal, level: Number($("level").value), approve: $("approve").checked };
   const exe = $("exe").value.trim();
   if (exe) payload.exe = exe;
+  const system = $("system").value.trim();
+  if (system) payload.system = system;
   $("start-run").disabled = true;
   setStartMessage("시작하는 중…");
   let response;
@@ -1292,7 +1362,7 @@ function fillLevels() {
 function showTooltip(item, event) {
   const tooltip = $("tooltip");
   const dl = el("dl");
-  const kind = elementKind(item) === "text" ? "텍스트 (ref 없음)" : "컨트롤";
+  const kind = item.kind === "question" ? "질문 표시" : elementKind(item) === "text" ? "텍스트 (ref 없음)" : "컨트롤";
   for (const [term, value] of [["종류", kind], ["역할", item.role], ["이름", item.name], ["설명", item.description], ["ref", item.ref]]) {
     if (!value) continue;
     dl.append(el("dt", { text: term }), el("dd", { text: value }));
@@ -1337,6 +1407,7 @@ function toggleTexts() {
 
 function onKey(event) {
   if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (document.body.classList.contains("knowledge-mode")) return;
   const tag = (event.target.tagName || "").toLowerCase();
   if (["input", "textarea", "select"].includes(tag) || event.target.isContentEditable) return;
   if (event.key === "ArrowLeft") select(state.index - 1);
@@ -1441,6 +1512,7 @@ function startExport(data) {
   state.next = state.events.length;
   state.finished = true;
   document.title = `${state.run.goal || state.run.run_id} · 내보낸 실행`;
+  state.baseTitle = document.title;
   rebuildEntries();
   state.view = "before";
   select(0);
@@ -1459,6 +1531,8 @@ function start() {
   $("overlay").addEventListener("pointerover", onOverlayOver);
   $("overlay").addEventListener("pointermove", onOverlayMove);
   $("overlay").addEventListener("pointerout", onOverlayOut);
+  $("stage").addEventListener("click", onStageClick);
+  state.baseTitle = document.title;
   $("refresh-runs").addEventListener("click", () => { loadRuns(); loadStatus(); });
   $("start-form").addEventListener("submit", submitRun);
   document.addEventListener("keydown", onKey);
@@ -1472,6 +1546,7 @@ function start() {
     showBanner(["접속 토큰이 없습니다. view.py가 터미널에 출력한 주소로 여세요."]);
     return;
   }
+  initKnowledge();
   loadStatus();
   loadRuns();
   setInterval(pollLive, POLL_MS);

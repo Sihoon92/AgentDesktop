@@ -1,9 +1,15 @@
 """A stand-in for the agent-desktop binary that replays envelopes captured from the real one."""
 
 import base64
+import copy
 import json
 import subprocess
 from pathlib import Path
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GLOBAL_VALUE_FLAGS = {"--session", "--trace"}
@@ -42,8 +48,40 @@ def strip_globals(argv):
     return words
 
 
+def scene_window(window_id, title, bounds, **extra):
+    """A list-windows row of the launched process for FakeCli(scene=...)."""
+    launched = _load("launch")["data"]
+    return {"accessible": True, "app_name": "Scene.exe", "bounds": dict(bounds), "id": window_id,
+            "is_focused": True, "minimized": False, "pid": launched["pid"],
+            "process_instance": launched["process_instance"], "title": title, "visible": True, **extra}
+
+
+def _is_element(node, is_window_root):
+    has_text = any(node.get(key) for key in ("name", "description", "value"))
+    return bool(node.get("ref_id") or (has_text and not is_window_root))
+
+
+def _marked_nodes(tree):
+    """The tree's nodes in the order agent.observe.render_marked numbers them."""
+    found = []
+
+    def walk(node, is_root):
+        if _is_element(node, is_root and node.get("role") == "window"):
+            found.append(node)
+        for child in node.get("children", []):
+            walk(child, False)
+
+    walk(tree, True)
+    return found
+
+
 class FakeCli:
-    def __init__(self, panel_open=False):
+    def __init__(self, panel_open=False, scene=None):
+        """scene, when given, replaces the captured FootprintChart replies with
+        {"tree": tree, "windows": [rows]}: snapshots return that tree, list-windows those rows,
+        screenshots a real PNG of each window's visible size, and mouse-click calls on_click(x, y)."""
+        self.scene = copy.deepcopy(scene) if scene is not None else None
+        self.on_click = None
         self.calls = []
         self.panel_open = panel_open
         self.focused = True
@@ -81,11 +119,25 @@ class FakeCli:
         name = words[0]
         if name == "launch":
             self.process_alive = True
-            return _load("launch")
+            launched = _load("launch")
+            if self.scene is not None:
+                launched["data"]["window"] = dict(self.scene["windows"][0])
+            return launched
         if name == "list-windows":
             return self._windows()
         if name == "screenshot":
             return self._screenshot(words)
+        if self.scene is not None and name == "snapshot":
+            self.snapshots += 1
+            return {"version": "2.6", "ok": True, "command": "snapshot",
+                    "data": {"snapshot_id": f"s{self.snapshots}", "complete": True,
+                             "tree": copy.deepcopy(self.scene["tree"])}}
+        if self.scene is not None and name == "mouse-click":
+            xy = next(word for word in words if word.startswith("--xy="))[len("--xy="):]
+            x, y = (int(value) for value in xy.split(","))
+            if self.on_click is not None:
+                self.on_click(x, y)
+            return _load("toggle")
         if name == "snapshot":
             self.snapshots += 1
             if self.snapshots == self.open_panel_on_snapshot:
@@ -103,11 +155,33 @@ class FakeCli:
             return self.action_results[name]
         return _load("toggle")
 
+    def open_window(self, row):
+        """Scene mode: a new window of the process appears."""
+        self.scene["windows"].append(dict(row))
+
+    def focus(self, mark):
+        """Scene mode: the element numbered `mark` takes focus, as a caret placed in it would."""
+        for node in _marked_nodes(self.scene["tree"]):
+            node["states"] = [s for s in node.get("states", []) if s != "focused"]
+        node = _marked_nodes(self.scene["tree"])[mark - 1]
+        node["states"] = node.get("states", []) + ["focused"]
+
+    def _scene_screenshot(self, words):
+        window_id = words[words.index("--window-id") + 1]
+        row = next(r for r in self.scene["windows"] if r["id"] == window_id)
+        width, height = int(row["bounds"]["width"]) - 16, int(row["bounds"]["height"]) - 8
+        path = Path(words[-1])
+        Image.new("RGB", (width, height), (240, 240, 240)).save(path)
+        data = {"path": str(path), "width": width, "height": height, "scale_factor": 1.0}
+        return {"version": "2.6", "ok": True, "command": "screenshot", "data": data}
+
     def _screenshot(self, words):
         if self.move_window_on_screenshot:
             self.window_shift += 100
         if self.screenshot_result is not None:
             return self.screenshot_result
+        if self.scene is not None:
+            return self._scene_screenshot(words)
         path = Path(words[-1])
         path.write_bytes(ONE_PIXEL_PNG)
         width, height = MEASURED_SCREENSHOT_SIZE
@@ -116,6 +190,8 @@ class FakeCli:
 
     def _windows(self):
         envelope = _load("windows")
+        if self.scene is not None:
+            envelope["data"] = copy.deepcopy(self.scene["windows"])
         rows = envelope["data"] if self.process_alive else []
         for row in rows:
             row["process_instance"] = self.instance

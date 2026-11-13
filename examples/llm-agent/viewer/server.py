@@ -15,6 +15,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from agent.frames import frame_origin
+from agent.knowledge import KnowledgeError, KnowledgeStore, list_systems
 from viewer import history
 from viewer.history import BadQuery, RunIndex, is_run_id, parse_query
 from viewer.run_manager import InvalidRun, RunBusy, RunStartFailed
@@ -30,14 +32,18 @@ CONTENT_TYPES = {
 }
 MAX_BODY_BYTES = 64 * 1024
 MAX_COMMENT_CHARS = 2000
+MAX_ANSWER_ITEMS = 50
+KNOWLEDGE_NAME = re.compile(r"[A-Za-z0-9가-힣._-]{1,64}")
+ITEM_DECISIONS = ("approve", "edit", "reject")
 PAGE_POLICY = "default-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
 
 class ViewerServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port, runs_dir, token, run_manager, history=None):
+    def __init__(self, port, runs_dir, token, run_manager, history=None, knowledge_dir=None):
         self.runs_dir = Path(runs_dir)
+        self.knowledge_dir = Path(knowledge_dir) if knowledge_dir is not None else None
         self.token = token
         self.run_manager = run_manager
         self.history = history or RunIndex(self.runs_dir)
@@ -52,10 +58,10 @@ def is_static_name(name):
     return STATIC_NAME.fullmatch(name) is not None
 
 
-def make_server(runs_dir, token, port=0, run_manager=None, history=None):
+def make_server(runs_dir, token, port=0, run_manager=None, history=None, knowledge_dir=None):
     """Returns a server bound to 127.0.0.1; call serve_forever() to start it.
     `history` replaces the RunIndex, so tests can fix the clock and the process lookup."""
-    return ViewerServer(port, runs_dir, token, run_manager, history)
+    return ViewerServer(port, runs_dir, token, run_manager, history, knowledge_dir)
 
 
 def read_events(events_path, since):
@@ -76,6 +82,52 @@ def read_events(events_path, since):
         except ValueError:
             continue
     return events, max(len(lines), since)
+
+
+class BadAnswer(ValueError):
+    """The answer body cannot be used; the message says why, in Korean, for the viewer."""
+
+
+def pin_to_screen(events_path, pin):
+    """Turns a pin on a recorded frame ({"observation", "x", "y"} in image pixels) into
+    screen pixels, using that observation's window bounds and image size."""
+    if not isinstance(pin, dict):
+        raise BadAnswer("pin은 observation, x, y를 가진 객체여야 합니다")
+    observation_id, x, y = pin.get("observation"), pin.get("x"), pin.get("y")
+    if not all(type(value) is int for value in (observation_id, x, y)):
+        raise BadAnswer("pin의 observation, x, y는 정수여야 합니다")
+    events, _ = read_events(events_path, 0)
+    observation = next((event for event in events
+                        if event.get("type") == "observation" and event.get("id") == observation_id), None)
+    if observation is None:
+        raise BadAnswer("찍은 위치의 관찰을 찾을 수 없습니다. 화면을 새로 보고 다시 찍어 주세요")
+    image = observation.get("image") or {}
+    bounds = (observation.get("window") or {}).get("bounds") or {}
+    width, height = image.get("width"), image.get("height")
+    numbers = [width, height] + [bounds.get(key) for key in ("x", "y", "width", "height")]
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in numbers):
+        raise BadAnswer("찍은 관찰에 캡처나 창 위치가 없어 위치를 바꿀 수 없습니다")
+    if not (0 <= x < width and 0 <= y < height):
+        raise BadAnswer("찍은 위치가 캡처 밖입니다. 다시 찍어 주세요")
+    origin = frame_origin(bounds, width, height)
+    return (round(origin[0] + x), round(origin[1] + y))
+
+
+def answer_items(items):
+    """Checks the registration decisions and returns them as a tuple of plain dicts."""
+    if not isinstance(items, list) or len(items) > MAX_ANSWER_ITEMS:
+        raise BadAnswer(f"items는 {MAX_ANSWER_ITEMS}개 이하의 목록이어야 합니다")
+    checked = []
+    for item in items:
+        if not isinstance(item, dict) or type(item.get("n")) is not int or item.get("decision") not in ITEM_DECISIONS:
+            raise BadAnswer("items의 항목마다 정수 n과 approve, edit, reject 중 하나인 decision이 필요합니다")
+        decided = {"n": item["n"], "decision": item["decision"]}
+        if item["decision"] == "edit":
+            if not isinstance(item.get("entry"), dict):
+                raise BadAnswer("고쳐서 승인하는 항목에는 고친 내용(entry)이 필요합니다")
+            decided["entry"] = item["entry"]
+        checked.append(decided)
+    return tuple(checked)
 
 
 class ViewerHandler(BaseHTTPRequestHandler):
@@ -100,6 +152,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_json(200, self._status())
         if segments == ["api", "runs"]:
             return self._send_run_list(query)
+        if segments == ["api", "knowledge"]:
+            return self._send_systems()
+        if len(segments) == 3 and segments[:2] == ["api", "knowledge"]:
+            return self._send_knowledge(segments[2])
         if len(segments) == 3 and segments[:2] == ["api", "runs"]:
             return self._send_run(segments[2])
         if len(segments) == 3 and segments[:2] == ["api", "legacy"]:
@@ -119,6 +175,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._start_run()
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "decision":
             return self._decide(segments[2])
+        if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "answer":
+            return self._answer(segments[2])
+        if len(segments) == 4 and segments[:2] == ["api", "knowledge"]:
+            return self._update_knowledge(segments[2], segments[3])
+        if len(segments) == 5 and segments[:2] == ["api", "knowledge"] and segments[4] == "delete":
+            return self._delete_knowledge(segments[2], segments[3])
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "keep":
             return self._set_keep(segments[2])
         self._send_json(404, {"error": "없는 경로입니다"})
@@ -177,11 +239,99 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_json(409, {"error": "답할 수 있는 제안이 아닙니다. 이미 답했거나 시간이 지났거나 실행이 끝났습니다"})
         self._send_json(200, {"accepted": True})
 
+    def _answer(self, run_id):
+        manager = self.server.run_manager
+        if manager is None:
+            return self._send_json(503, {"error": "이 뷰어는 실행을 관리하지 않아 답할 수 없습니다"})
+        if not is_run_id(run_id):
+            return self._send_json(404, {"error": "없는 실행입니다"})
+        payload, problem = self._read_json()
+        if problem:
+            return self._send_json(*problem)
+        question_id = payload.get("question_id")
+        text = payload.get("text")
+        accepted = payload.get("accepted")
+        if not isinstance(question_id, str) or not 0 < len(question_id) <= 64:
+            return self._send_json(400, {"error": "question_id가 필요합니다"})
+        if not isinstance(text, str) or len(text) > MAX_COMMENT_CHARS:
+            return self._send_json(400, {"error": f"답은 {MAX_COMMENT_CHARS}자 이하의 글이어야 합니다"})
+        if accepted is not None and type(accepted) is not bool:
+            return self._send_json(400, {"error": "accepted는 true, false 또는 null이어야 합니다"})
+        try:
+            items = answer_items(payload.get("items", []))
+            pin = payload.get("pin")
+            screen_pin = None if pin is None else pin_to_screen(self.server.runs_dir / run_id / "events.jsonl", pin)
+        except BadAnswer as error:
+            return self._send_json(400, {"error": str(error)})
+        if not manager.answer(run_id, question_id, text.strip(), accepted, screen_pin, items):
+            return self._send_json(409, {"error": "답할 수 있는 질문이 아닙니다. 이미 답했거나 시간이 지났거나 실행이 끝났습니다"})
+        self._send_json(200, {"accepted": True})
+
+    def _knowledge_store(self, system):
+        """Returns the store of a listed system, or None after sending 503 or 404. Only names
+        that list_systems reports are served, so no request can reach outside the folder."""
+        root = self.server.knowledge_dir
+        if root is None:
+            self._send_json(503, {"error": "이 뷰어는 지식 폴더를 모릅니다"})
+            return None
+        if KNOWLEDGE_NAME.fullmatch(system) is None or system not in list_systems(root):
+            self._send_json(404, {"error": "없는 시스템입니다"})
+            return None
+        return KnowledgeStore(root, system)
+
+    def _known_entry(self, store, entry_id):
+        if KNOWLEDGE_NAME.fullmatch(entry_id) is None or store.get(entry_id) is None:
+            self._send_json(404, {"error": "없는 지식 항목입니다"})
+            return False
+        return True
+
+    def _send_systems(self):
+        root = self.server.knowledge_dir
+        if root is None:
+            return self._send_json(503, {"error": "이 뷰어는 지식 폴더를 모릅니다"})
+        self._send_json(200, {"systems": list_systems(root)})
+
+    def _send_knowledge(self, system):
+        store = self._knowledge_store(system)
+        if store is None:
+            return
+        entries = store.entries(include_disabled=True)
+        self._send_json(200, {"entries": entries, "warnings": store.warnings})
+
+    def _update_knowledge(self, system, entry_id):
+        store = self._knowledge_store(system)
+        if store is None or not self._known_entry(store, entry_id):
+            return
+        payload, problem = self._read_json()
+        if problem:
+            return self._send_json(*problem)
+        changes = payload.get("changes")
+        if not isinstance(changes, dict):
+            return self._send_json(400, {"error": "changes는 고칠 키와 값을 담은 객체여야 합니다"})
+        try:
+            entry = store.update(entry_id, changes)
+        except KnowledgeError as error:
+            return self._send_json(400, {"error": f"고칠 수 없습니다: {error}"})
+        self._send_json(200, {"entry": entry})
+
+    def _delete_knowledge(self, system, entry_id):
+        store = self._knowledge_store(system)
+        if store is None or not self._known_entry(store, entry_id):
+            return
+        try:
+            deleted = store.delete(entry_id)
+        except (KnowledgeError, OSError) as error:
+            return self._send_json(409, {"error": f"지우지 못했습니다: {error}"})
+        if not deleted:
+            return self._send_json(404, {"error": "없는 지식 항목입니다"})
+        self._send_json(200, {"deleted": True})
+
     def _status(self):
         manager = self.server.run_manager
         if manager is None:
-            return {"can_start": False, "active": None, "default_exe": None}
-        return {"can_start": True, "active": manager.active(), "default_exe": manager.default_exe}
+            return {"can_start": False, "active": None, "default_exe": None, "can_answer": False}
+        return {"can_start": True, "active": manager.active(), "default_exe": manager.default_exe,
+                "can_answer": manager.can_answer()}
 
     def _start_run(self):
         manager = self.server.run_manager
@@ -192,7 +342,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_json(*problem)
         try:
             run_id = manager.start(
-                payload.get("goal"), payload.get("exe") or None, payload.get("level", 3), payload.get("approve", False)
+                payload.get("goal"), payload.get("exe") or None, payload.get("level", 3), payload.get("approve", False),
+                system=payload.get("system"),
             )
         except InvalidRun as error:
             return self._send_json(400, {"error": str(error)})
@@ -294,7 +445,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
         self._send(200, CONTENT_TYPES.get(path.suffix, "application/octet-stream"), body)
 
     def _send_json(self, status, payload):
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         self._send(status, "application/json; charset=utf-8", body)
 
     def _send(self, status, content_type, body):

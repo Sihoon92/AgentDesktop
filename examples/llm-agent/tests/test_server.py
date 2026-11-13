@@ -1,17 +1,20 @@
 import http.client
 import json
+import shutil
 import struct
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 from test_loop import OBSERVE, ScriptedModel, call
 from test_run_manager import GatedModel, WatchedGate, launch_then_finish, make_manager
 
 from agent.approval import Decision
+from agent.knowledge import KnowledgeStore
 from viewer import history as history_module
 from viewer import server as server_module
 from viewer.server import make_server
@@ -308,7 +311,7 @@ def test_page_lets_frames_load_as_blob_urls_but_no_inline_script(server):
 
 
 def finishing_model():
-    return ScriptedModel([[call("finish", {"success": True, "evidence": "done"})]])
+    return ScriptedModel([[call("finish", {"success": False, "evidence": "done"})]])
 
 
 def runs_created(tmp_path):
@@ -390,7 +393,8 @@ def test_status_reports_the_active_run_and_default_exe(tmp_path):
         model.release.set()
         manager.join(timeout=5)
 
-    assert json.loads(idle) == {"can_start": True, "active": None, "default_exe": str(exe)}
+    assert json.loads(idle) == {"can_start": True, "active": None, "default_exe": str(exe),
+                                 "can_answer": False}
     assert json.loads(busy)["active"] == started["run_id"]
 
 
@@ -400,7 +404,7 @@ def test_status_without_a_run_manager_says_runs_cannot_start(server):
     status, _, body = request(instance, "/api/status")
 
     assert status == 200
-    assert json.loads(body) == {"can_start": False, "active": None, "default_exe": None}
+    assert json.loads(body) == {"can_start": False, "active": None, "default_exe": None, "can_answer": False}
 
 
 def test_favicon_request_is_answered_without_a_404(server):
@@ -430,7 +434,7 @@ class PausingModel:
             self.paused.set()
             if not self.release.wait(timeout=5):
                 raise TimeoutError("test never released the model")
-            output = [call("finish", {"success": True, "evidence": "done"})]
+            output = [call("finish", {"success": False, "evidence": "done"})]
         return SimpleNamespace(output=output, usage=SimpleNamespace(total_tokens=10))
 
 
@@ -1169,3 +1173,511 @@ def test_keep_filter_accepts_only_1(server, value):
 
     assert status == 400
     assert json.loads(body)["error"]
+
+
+ANSWER_RUN = "20261113-101500"
+PIN_OBSERVATION = {
+    "type": "observation", "id": 3,
+    "window": {"id": "w-1", "title": "가상 MES", "bounds": {"x": 1000, "y": 0, "width": 516, "height": 808}},
+    "frame": "0003.png", "image": {"width": 500, "height": 300}, "elements": [],
+}
+NO_IMAGE_OBSERVATION = {
+    "type": "observation", "id": 4,
+    "window": {"id": "w-1", "title": "가상 MES", "bounds": {"x": 1000, "y": 0, "width": 516, "height": 808}},
+    "frame": None, "image": None, "elements": [],
+}
+
+
+class AnsweringManager:
+    """Stands in for RunManager: records answers and accepts each question id once."""
+
+    default_exe = None
+
+    def __init__(self, open_questions=("q1",)):
+        self.open = set(open_questions)
+        self.answers = []
+
+    def active(self):
+        return ANSWER_RUN
+
+    def can_answer(self):
+        return True
+
+    def answer(self, run_id, question_id, text, accepted=None, pin=None, items=()):
+        if run_id != ANSWER_RUN or question_id not in self.open:
+            return False
+        self.open.discard(question_id)
+        self.answers.append({"text": text, "accepted": accepted, "pin": pin, "items": items})
+        return True
+
+
+@pytest.fixture
+def answering(tmp_path):
+    runs_dir = tmp_path / "runs"
+    write_run(runs_dir, ANSWER_RUN, "2026-11-13T10:15:00Z", [PIN_OBSERVATION, NO_IMAGE_OBSERVATION])
+    manager = AnsweringManager()
+    with serving(runs_dir, manager) as instance:
+        yield instance, manager
+
+
+def answer_path(run_id=ANSWER_RUN):
+    return f"/api/runs/{run_id}/answer"
+
+
+def test_answer_is_handed_to_the_manager(answering):
+    instance, manager = answering
+
+    status, body = post_json(instance, answer_path(), {"question_id": "q1", "text": " 2번 "})
+
+    assert (status, body) == (200, {"accepted": True})
+    assert manager.answers == [{"text": "2번", "accepted": None, "pin": None, "items": ()}]
+
+
+def test_pin_is_converted_from_image_to_screen_pixels(answering):
+    instance, manager = answering
+
+    status, _ = post_json(instance, answer_path(),
+                          {"question_id": "q1", "text": "여기", "pin": {"observation": 3, "x": 10, "y": 20}})
+
+    assert status == 200
+    assert manager.answers[0]["pin"] == (1018, 520)
+
+
+@pytest.mark.parametrize("pin", [
+    {"observation": 99, "x": 1, "y": 1},
+    {"observation": 3, "x": 5000, "y": 1},
+    {"observation": 3, "x": 1, "y": 300},
+    {"observation": 3, "x": -1, "y": 1},
+    {"observation": 4, "x": 1, "y": 1},
+    {"observation": 3, "x": 1.5, "y": 1},
+    {"observation": 3, "x": True, "y": 1},
+    {"observation": "3", "x": 1, "y": 1},
+    {"x": 1, "y": 1},
+    [3, 1, 1],
+])
+def test_pin_that_cannot_be_converted_is_400(answering, pin):
+    instance, manager = answering
+
+    status, body = post_json(instance, answer_path(), {"question_id": "q1", "text": "여기", "pin": pin})
+
+    assert status == 400 and body["error"]
+    assert manager.answers == []
+
+
+def test_completion_and_registration_fields_reach_the_manager(answering):
+    instance, manager = answering
+    items = [{"n": 1, "decision": "approve"}, {"n": 2, "decision": "edit", "entry": {"resolution": "고침"}},
+             {"n": 3, "decision": "reject"}]
+
+    status, _ = post_json(instance, answer_path(), {"question_id": "q1", "text": "", "accepted": True, "items": items})
+
+    assert status == 200
+    assert manager.answers == [{"text": "", "accepted": True, "pin": None, "items": tuple(items)}]
+
+
+def test_second_answer_is_409(answering):
+    instance, manager = answering
+
+    first, _ = post_json(instance, answer_path(), {"question_id": "q1", "text": "a"})
+    second, body = post_json(instance, answer_path(), {"question_id": "q1", "text": "b"})
+
+    assert (first, second) == (200, 409) and body["error"]
+    assert [answer["text"] for answer in manager.answers] == ["a"]
+
+
+def test_answer_for_an_unknown_question_or_another_run_is_409(answering):
+    instance, _ = answering
+
+    unknown, _ = post_json(instance, answer_path(), {"question_id": "q9", "text": "a"})
+    other_run, _ = post_json(instance, answer_path("20261113-000000"), {"question_id": "q1", "text": "a"})
+
+    assert (unknown, other_run) == (409, 409)
+
+
+@pytest.mark.parametrize("body", [
+    {},
+    {"question_id": "q1"},
+    {"question_id": "q1", "text": 3},
+    {"question_id": "q1", "text": "x" * 2001},
+    {"question_id": "q1", "text": "", "accepted": "yes"},
+    {"question_id": "", "text": "a"},
+    {"question_id": "q" * 65, "text": "a"},
+    {"question_id": 1, "text": "a"},
+    {"question_id": "q1", "text": "", "items": "approve"},
+    {"question_id": "q1", "text": "", "items": [{"n": 1, "decision": "maybe"}]},
+    {"question_id": "q1", "text": "", "items": [{"n": "1", "decision": "approve"}]},
+    {"question_id": "q1", "text": "", "items": [{"n": 1, "decision": "edit"}]},
+    {"question_id": "q1", "text": "", "items": [{"n": 1, "decision": "edit", "entry": "고침"}]},
+    {"question_id": "q1", "text": "", "items": ["approve"]},
+])
+def test_bad_answer_bodies_are_400(answering, body):
+    instance, manager = answering
+
+    status, _ = post_json(instance, answer_path(), body)
+
+    assert status == 400
+    assert manager.answers == []
+
+
+def test_answer_with_a_bad_run_id_is_404(answering):
+    instance, _ = answering
+
+    status, _ = post_json(instance, "/api/runs/..%2Fx/answer", {"question_id": "q1", "text": "a"})
+
+    assert status == 404
+
+
+def test_answer_without_a_manager_is_503(server):
+    instance, _ = server
+
+    status, _ = post_json(instance, answer_path(), {"question_id": "q1", "text": "a"})
+
+    assert status == 503
+
+
+def test_answer_needs_the_token(answering):
+    instance, manager = answering
+
+    status, _ = post_json(instance, answer_path(), {"question_id": "q1", "text": "a"}, {"X-Agent-Token": "nope"})
+
+    assert status == 403
+    assert manager.answers == []
+
+
+def test_answer_reaches_the_waiting_question_of_a_real_run(tmp_path):
+    from test_run_manager import WatchedAskGate, ask_in_background
+
+    from agent.ask import Answer
+
+    WatchedAskGate.made = []
+    model = GatedModel()
+    manager, _ = make_manager(tmp_path, model, ask_gate_factory=WatchedAskGate)
+    with serving(tmp_path / "runs", manager) as instance:
+        _, started = post_json(instance, "/api/runs", {"goal": "목록을 열어줘"})
+        assert model.started.wait(timeout=5)
+        asker, answers = ask_in_background(WatchedAskGate.made[0], {"id": "q1", "kind": "stuck", "text": "?"})
+        status, body = post_json(instance, answer_path(started["run_id"]), {"question_id": "q1", "text": "2번"})
+        again, _ = post_json(instance, answer_path(started["run_id"]), {"question_id": "q1", "text": "3번"})
+        asker.join(timeout=5)
+        model.release.set()
+        manager.join(timeout=5)
+
+    assert (status, body, again) == (200, {"accepted": True}, 409)
+    assert answers == [Answer(text="2번")]
+
+
+def test_status_reports_can_answer(tmp_path, server):
+    viewing_only, _ = server
+    _, _, without_manager = request(viewing_only, "/api/status")
+    model = GatedModel()
+    manager, _ = make_manager(tmp_path, model)
+    with serving(tmp_path / "runs", manager) as instance:
+        _, _, idle = request(instance, "/api/status")
+        post_json(instance, "/api/runs", {"goal": "g"})
+        assert model.started.wait(timeout=5)
+        _, _, busy = request(instance, "/api/status")
+        model.release.set()
+        manager.join(timeout=5)
+
+    assert json.loads(without_manager)["can_answer"] is False
+    assert json.loads(idle)["can_answer"] is False
+    assert json.loads(busy)["can_answer"] is True
+
+
+QUESTIONS_FIXTURE = Path(__file__).parent / "fixtures" / "run_questions"
+QUESTIONS_RUN = "20261113-101500"
+
+
+@pytest.fixture
+def questions_server(tmp_path):
+    runs_dir = tmp_path / "runs"
+    shutil.copytree(QUESTIONS_FIXTURE, runs_dir / QUESTIONS_RUN)
+    with serving(runs_dir) as instance:
+        yield instance
+
+
+def fixture_events():
+    lines = (QUESTIONS_FIXTURE / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def test_question_events_are_served_as_recorded(questions_server):
+    status, _, body = request(questions_server, f"/api/runs/{QUESTIONS_RUN}/events?since=0")
+
+    assert status == 200
+    assert json.loads(body)["events"] == fixture_events()
+
+
+def test_question_fixture_has_every_new_event_in_the_recorded_shape():
+    events = fixture_events()
+    kinds = {event["type"] for event in events}
+    assert {"question", "answer", "capture", "knowledge_loaded", "knowledge_used", "completion", "registration",
+            "finish"} <= kinds
+    observations = {event["id"]: event for event in events if event["type"] == "observation"}
+    questions = {event["id"]: event for event in events if event["type"] == "question"}
+    answers = {event["id"]: event for event in events if event["type"] == "answer"}
+    assert set(answers) == set(questions)
+    assert {question["kind"] for question in questions.values()} == {"confirm", "stuck", "completion", "registration"}
+    for question in questions.values():
+        observation = observations[question["observation"]]
+        assert (QUESTIONS_FIXTURE / "frames" / observation["frame"]).is_file()
+        for box in question["candidates"] + question["basis"]:
+            assert box["rect"] or box["image_point"]
+    confirm = questions["q1"]
+    assert len(confirm["candidates"]) == 3 and confirm["proposed"] == 1 and len(confirm["basis"]) == 2
+    assert answers["q2"]["pin"]["image_point"] and questions["q2"]["candidates"][1]["rect"] is None
+    assert any(event["type"] == "action" and event.get("expected_met") is False for event in events)
+    assert events[-1] == {**events[-1], "type": "finish", "status": "confirmed"}
+
+
+def test_confirmed_runs_are_listed_and_filtered(questions_server):
+    _, _, everything = request(questions_server, "/api/runs")
+    status, _, confirmed = request(questions_server, "/api/runs?status=confirmed")
+    _, _, verified = request(questions_server, "/api/runs?status=verified")
+
+    assert json.loads(everything)["runs"][0]["status"] == "confirmed"
+    assert status == 200
+    assert [run["run_id"] for run in json.loads(confirmed)["runs"]] == [QUESTIONS_RUN]
+    assert json.loads(verified)["runs"] == []
+
+
+def test_chat_script_is_served_and_loaded_before_the_app(server):
+    instance, _ = server
+
+    status, content_type, body = request(instance, "/static/chat.js", {"X-Agent-Token": None})
+    _, _, page = request(instance, "/", {"X-Agent-Token": None})
+
+    assert status == 200 and content_type.startswith("text/javascript") and body
+    html = page.decode("utf-8")
+    assert html.index('src="/static/chat.js"') < html.index('src="/static/knowledge.js"') < html.index('src="/static/app.js"')
+    assert server_module.is_static_name("chat.js") and server_module.is_static_name("knowledge.js")
+    assert request(instance, "/static/knowledge.js", {"X-Agent-Token": None})[0] == 200
+
+
+KNOWLEDGE_DAY = date(2026, 11, 13)
+RESOLUTION = {"type": "resolution", "situation": "선택 칸의 가운데를 눌러도 목록이 열리지 않는다",
+              "resolution": "선택 칸은 오른쪽 끝의 화살표를 눌러 연다"}
+COMPLETION = {"type": "completion", "task": "조회 결과를 엑셀로 저장하는 작업", "checks": [{"kind": "file", "pattern": "*.xlsx"}]}
+
+
+@contextmanager
+def serving_knowledge(runs_dir, knowledge_dir):
+    instance = make_server(runs_dir, TOKEN, port=0, knowledge_dir=knowledge_dir)
+    thread = threading.Thread(target=instance.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+    try:
+        yield instance
+    finally:
+        instance.shutdown()
+        instance.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def server_with_knowledge(tmp_path):
+    root = tmp_path / "knowledge"
+    store = KnowledgeStore(root, "mes")
+    store.add(RESOLUTION, today=KNOWLEDGE_DAY)
+    store.add(COMPLETION, today=KNOWLEDGE_DAY)
+    stopped = store.add({**RESOLUTION, "resolution": "멈춘 항목", "status": "disabled"}, today=KNOWLEDGE_DAY)
+    (root / "mes" / "r-20261113-009.yaml").write_text("id: [broken", encoding="utf-8")
+    KnowledgeStore(root, "다른시스템").add(RESOLUTION, today=KNOWLEDGE_DAY)
+    (root / "bad name").mkdir()
+    (root / "notes.txt").write_text("not a system", encoding="utf-8")
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    with serving_knowledge(runs_dir, root) as instance:
+        yield instance, store, stopped["id"]
+
+
+def get_json(instance, path, headers=None):
+    status, _, body = request(instance, path, headers)
+    return status, json.loads(body or b"{}")
+
+
+def test_lists_systems_and_entries(server_with_knowledge):
+    instance, _, stopped = server_with_knowledge
+
+    systems_status, systems = get_json(instance, "/api/knowledge")
+    entries_status, listing = get_json(instance, "/api/knowledge/mes")
+
+    assert (systems_status, entries_status) == (200, 200)
+    assert systems == {"systems": ["mes", "다른시스템"]}
+    ids = [entry["id"] for entry in listing["entries"]]
+    assert ids == ["c-20261113-001", "r-20261113-001", stopped]
+    assert next(entry for entry in listing["entries"] if entry["id"] == stopped)["status"] == "disabled"
+    assert len(listing["warnings"]) == 1 and listing["warnings"][0].startswith("r-20261113-009.yaml")
+
+
+def test_korean_system_name_is_served(server_with_knowledge):
+    instance, _, _ = server_with_knowledge
+
+    status, listing = get_json(instance, "/api/knowledge/" + quote("다른시스템"))
+
+    assert status == 200 and [entry["type"] for entry in listing["entries"]] == ["resolution"]
+
+
+def test_update_changes_the_file_and_returns_the_entry(server_with_knowledge):
+    instance, store, _ = server_with_knowledge
+
+    status, body = post_json(instance, "/api/knowledge/mes/r-20261113-001", {"changes": {"status": "disabled"}})
+
+    assert status == 200
+    assert body["entry"]["status"] == "disabled" and body["entry"]["id"] == "r-20261113-001"
+    assert store.get("r-20261113-001")["status"] == "disabled"
+
+
+def test_update_rewrites_the_text(server_with_knowledge):
+    instance, store, _ = server_with_knowledge
+
+    status, body = post_json(instance, "/api/knowledge/mes/r-20261113-001",
+                             {"changes": {"resolution": "칸 안의 화살표 버튼을 누른다"}})
+
+    assert status == 200 and body["entry"]["resolution"] == "칸 안의 화살표 버튼을 누른다"
+    assert store.get("r-20261113-001")["resolution"] == "칸 안의 화살표 버튼을 누른다"
+    assert store.get("r-20261113-001")["situation"] == RESOLUTION["situation"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"x": 120},
+    {"resolution": "화면 (120, 40) 위치를 누른다"},
+    {"resolution": "x=120 지점"},
+])
+def test_update_with_a_coordinate_field_is_400(server_with_knowledge, changes):
+    instance, store, _ = server_with_knowledge
+
+    status, body = post_json(instance, "/api/knowledge/mes/r-20261113-001", {"changes": changes})
+
+    assert status == 400 and body["error"]
+    assert store.get("r-20261113-001")["resolution"] == RESOLUTION["resolution"]
+    assert "x" not in store.get("r-20261113-001")
+
+
+@pytest.mark.parametrize("payload", [
+    {},
+    {"changes": "disabled"},
+    {"changes": {"status": "paused"}},
+    {"changes": {"id": "r-20261113-002"}},
+    {"changes": {"type": "completion"}},
+    {"changes": {"resolution": ""}},
+    {"changes": {"uses": -1}},
+])
+def test_bad_updates_are_400_and_change_nothing(server_with_knowledge, payload):
+    instance, store, _ = server_with_knowledge
+    before = store.get("r-20261113-001")
+
+    status, body = post_json(instance, "/api/knowledge/mes/r-20261113-001", payload)
+
+    assert status == 400 and body["error"]
+    assert store.get("r-20261113-001") == before
+
+
+def test_update_of_a_missing_entry_is_404(server_with_knowledge):
+    instance, store, _ = server_with_knowledge
+
+    status, _ = post_json(instance, "/api/knowledge/mes/r-20261113-404", {"changes": {"status": "disabled"}})
+
+    assert status == 404
+    assert not (store.folder / "r-20261113-404.yaml").exists()
+
+
+def test_delete_removes_the_file(server_with_knowledge):
+    instance, store, _ = server_with_knowledge
+
+    status, body = post_json(instance, "/api/knowledge/mes/c-20261113-001/delete", {})
+    again, _ = post_json(instance, "/api/knowledge/mes/c-20261113-001/delete", {})
+
+    assert (status, body) == (200, {"deleted": True})
+    assert again == 404
+    assert store.get("c-20261113-001") is None
+    assert not (store.folder / "c-20261113-001.yaml").exists()
+
+
+@pytest.mark.parametrize("path", [
+    "/api/knowledge/..",
+    "/api/knowledge/.",
+    "/api/knowledge/mes/..%2Fx",
+    "/api/knowledge/a%20b",
+    "/api/knowledge/bad%20name",
+    "/api/knowledge/notes.txt",
+    "/api/knowledge/nope",
+    "/api/knowledge/..%2Fruns",
+    "/api/knowledge/mes/r-20261113-001/extra",
+])
+def test_odd_names_are_404(server_with_knowledge, path):
+    instance, _, _ = server_with_knowledge
+
+    assert request(instance, path)[0] == 404
+
+
+@pytest.mark.parametrize("path", [
+    "/api/knowledge/mes/..%2F..%2Frun.py",
+    "/api/knowledge/mes/r-1%2F..%2F..%2Fx",
+    "/api/knowledge/..%2Fmes/r-20261113-001",
+    "/api/knowledge/nope/r-20261113-001",
+    "/api/knowledge/mes/" + "r-" + "a" * 70,
+    "/api/knowledge/mes/notes",
+    "/api/knowledge/mes/r-20261113-001%0A",
+])
+def test_odd_names_in_writes_are_404_and_touch_nothing(server_with_knowledge, path):
+    instance, store, _ = server_with_knowledge
+    before = sorted(path.name for path in store.folder.parent.rglob("*"))
+
+    update, _ = post_json(instance, path, {"changes": {"status": "disabled"}})
+    delete, _ = post_json(instance, path + "/delete", {})
+
+    assert (update, delete) == (404, 404)
+    assert sorted(path.name for path in store.folder.parent.rglob("*")) == before
+
+
+def test_knowledge_routes_without_a_dir_are_503(server):
+    instance, _ = server
+
+    assert request(instance, "/api/knowledge")[0] == 503
+    assert request(instance, "/api/knowledge/mes")[0] == 503
+    assert post_json(instance, "/api/knowledge/mes/r-20261113-001", {"changes": {}})[0] == 503
+    assert post_json(instance, "/api/knowledge/mes/r-20261113-001/delete", {})[0] == 503
+
+
+def test_knowledge_routes_need_the_token(server_with_knowledge):
+    instance, store, _ = server_with_knowledge
+    wrong = {"X-Agent-Token": "nope"}
+
+    assert request(instance, "/api/knowledge", wrong)[0] == 403
+    assert request(instance, "/api/knowledge/mes", wrong)[0] == 403
+    assert post_json(instance, "/api/knowledge/mes/r-20261113-001", {"changes": {"status": "disabled"}}, wrong)[0] == 403
+    assert post_json(instance, "/api/knowledge/mes/r-20261113-001/delete", {}, wrong)[0] == 403
+    assert store.get("r-20261113-001")["status"] == "active"
+
+
+def test_a_missing_knowledge_folder_lists_no_systems(tmp_path):
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    with serving_knowledge(runs_dir, tmp_path / "not-yet") as instance:
+        status, body = get_json(instance, "/api/knowledge")
+        missing, _ = get_json(instance, "/api/knowledge/mes")
+
+    assert (status, body, missing) == (200, {"systems": []}, 404)
+
+
+
+
+def test_post_runs_passes_the_system_and_rejects_an_odd_one(tmp_path):
+    seen = []
+    manager, _ = make_manager(tmp_path, finishing_model())
+    original = manager.start
+
+    def watched(goal, exe=None, level=3, approve=False, system=None):
+        seen.append(system)
+        return original(goal, exe, level, approve, system=system)
+
+    manager.start = watched
+    with serving(tmp_path / "runs", manager) as instance:
+        created, body = post_json(instance, "/api/runs", {"goal": "g", "system": "mes"})
+        manager.join(timeout=5)
+        odd, error = post_json(instance, "/api/runs", {"goal": "g", "system": "../x"})
+
+    assert created == 201 and seen[0] == "mes"
+    assert json.loads((tmp_path / "runs" / body["run_id"] / "run.json").read_text(encoding="utf-8"))["system"] == "mes"
+    assert odd == 400 and "시스템 이름" in error["error"]
+    assert len(runs_created(tmp_path)) == 1

@@ -196,7 +196,7 @@ namespace VirtualMesApp
                         Rectangle bounds = new Rectangle(left + index * (each + gap), top, each, Ui.Px(24));
                         SurfaceItem item = this.Box("filter-" + box.Key, Summary(box), bounds);
                         item.Enabled = box.Enabled;
-                        item.Click = delegate { this.OpenMulti(box); };
+                        this.WireOpening(item, box.Key, delegate { this.OpenMulti(box); });
                         items.Add(item);
                     }
                 }
@@ -205,7 +205,7 @@ namespace VirtualMesApp
                     string key = filter;
                     Rectangle bounds = new Rectangle(left, top, width, Ui.Px(24));
                     SurfaceItem item = this.Box("filter-" + filter, this.Value(filter), bounds);
-                    item.Click = delegate { this.OpenSingle(key); };
+                    this.WireOpening(item, key, delegate { this.OpenSingle(key); });
                     items.Add(item);
                 }
                 top += Ui.Px(24);
@@ -227,6 +227,48 @@ namespace VirtualMesApp
                 top += Ui.Px(10);
             }
             this.surface.SetItems(items);
+        }
+
+        /// <summary>
+        /// Makes the box open its list. By default a click anywhere on it opens the list. When
+        /// boxes open by the arrow only, a click on the body puts a text caret in the box and
+        /// opens nothing, and only the arrow square at the right end opens the list. The arrow
+        /// is a part of the box: a child button in the ref exposure, absent from the others.
+        /// </summary>
+        private void WireOpening(SurfaceItem item, string filter, Action open)
+        {
+            if (!this.session.CombosOpenByArrowOnly)
+            {
+                item.Click = open;
+                return;
+            }
+            Rectangle body = item.Bounds;
+            string text = item.Text;
+            item.Click = delegate
+            {
+                this.session.ComboBodyClicked(filter);
+                this.surface.ShowCaret(CaretLine(body, text));
+            };
+            SurfaceItem arrow = new SurfaceItem();
+            arrow.Id = item.Id + "-arrow";
+            arrow.Kind = ItemKind.Button;
+            arrow.Name = "열기";
+            arrow.Enabled = item.Enabled;
+            arrow.Bounds = new Rectangle(body.Right - body.Height, body.Top, body.Height, body.Height);
+            arrow.Click = delegate
+            {
+                this.session.ComboArrowClicked(filter);
+                open();
+            };
+            item.Parts = new[] { arrow };
+        }
+
+        /// <summary>A one-pixel-wide caret just after the box's text, kept clear of the arrow.</summary>
+        private static Rectangle CaretLine(Rectangle body, string text)
+        {
+            Size measured = TextRenderer.MeasureText(text, Ui.Font, Size.Empty, TextFormatFlags.NoPadding);
+            int x = Math.Min(body.Left + Ui.Px(6) + measured.Width + Ui.Px(1), body.Right - body.Height - Ui.Px(2));
+            return new Rectangle(x, body.Top + Ui.Px(4), Math.Max(1, Ui.Px(1)), body.Height - Ui.Px(8));
         }
 
         private static string LabelText(string filter)

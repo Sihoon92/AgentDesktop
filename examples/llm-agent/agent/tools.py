@@ -1,10 +1,19 @@
-"""The tools the model may call, confined to one process of the target app."""
+"""The tools the model may call, confined to one process of the target app.
+
+Toolbox keeps the target process, windows, observations and ref/point actions here. Mark and
+capture tools with the before/after comparison live in agent/screen_tools.py; asking, the
+question policy and learned knowledge live in agent/asking.py. Both are mixins of Toolbox.
+"""
 
 import time
 from dataclasses import dataclass
 
+from agent.asking import AskingTools
+from agent.effects import EXPECTATIONS
 from agent.guard import ActionGuard, signature
-from agent.observe import render_tree
+from agent.observe import render_marked
+from agent.results import refused as _refused
+from agent.screen_tools import ScreenTools
 from agent.tool_schemas import READ_ONLY_TOOLS, SCHEMAS
 from agent.verify import first_unmet
 
@@ -42,8 +51,10 @@ POINT_TOOLS = {
     "drag": (("from_x", "from_y"), ("to_x", "to_y")),
 }
 WINDOW_TOOLS = frozenset({"press", "restore_window"})
-REOBSERVING_TOOLS = frozenset(REF_ACTIONS) | frozenset(POINT_TOOLS) | WINDOW_TOOLS
-NON_IDENTITY_ARGUMENTS = frozenset({"window_id", "intent"})
+MARK_TOOLS = frozenset({"click_part", "click_point"})
+REOBSERVING_TOOLS = frozenset(REF_ACTIONS) | frozenset(POINT_TOOLS) | WINDOW_TOOLS | MARK_TOOLS
+NON_IDENTITY_ARGUMENTS = frozenset({"window_id", "intent", "expect", "knowledge_id"})
+FULL_SURFACES = (None, "window")
 
 
 class _NoObserver:
@@ -52,14 +63,6 @@ class _NoObserver:
 
     def on_action(self, tool, arguments, target, result):
         pass
-
-
-def _refused(reason):
-    return {
-        "ok": False,
-        "refused": reason,
-        "disposition": {"delivery": "not_delivered", "retry": "safe"},
-    }
 
 
 def _summary(envelope):
@@ -81,12 +84,16 @@ def _summary(envelope):
     return {key: value for key, value in summary.items() if value is not None}
 
 
-class Toolbox:
-    def __init__(self, desktop, task, confirm, sleep=time.sleep, clock=time.monotonic, observer=None):
+class Toolbox(AskingTools, ScreenTools):
+    def __init__(self, desktop, task, confirm, sleep=time.sleep, clock=time.monotonic, observer=None,
+                 asker=None, knowledge=None, captures_dir=None, wall=time.time):
         """observer gets on_observation(window, envelope, text, source=..., wait=...) for each tree
         the agent reads, and on_action(tool, arguments, target, result) for each other tool call,
-        before the re-read. source names what made the observation ("observe", "action" or
-        "wait_for_text"); wait is set only for wait_for_text, which reports one observation per call."""
+        before the re-read is reported. source names what made the observation ("observe", "action",
+        "question" or "wait_for_text"); wait is set only for wait_for_text, which reports one
+        observation per call. An observer with on_event(event) also gets the capture, question,
+        answer, knowledge and completion events. Captures go to captures_dir, or a temporary folder
+        when it is None. asker answers questions; knowledge is the system's KnowledgeStore."""
         self._desktop = desktop
         self._observer = observer or _NoObserver()
         self._task = task
@@ -100,6 +107,8 @@ class Toolbox:
         self._refs = {}
         self._last_read = None
         self._levels = {s["definition"]["name"]: s["level"] for s in SCHEMAS}
+        self._init_screen(captures_dir)
+        self._init_asking(asker, knowledge, wall, task)
 
     def definitions(self):
         return [s["definition"] for s in SCHEMAS if s["level"] <= self._task.permission_level]
@@ -107,19 +116,56 @@ class Toolbox:
     def call(self, name, arguments):
         if name in READ_ONLY_TOOLS:
             return self._dispatch(name, arguments)
+        expect = arguments.get("expect")
+        if expect is not None and expect not in EXPECTATIONS:
+            return _refused("expect must be one of " + ", ".join(EXPECTATIONS))
         target = self.preview(name, arguments)
+        acting = name in REOBSERVING_TOOLS
+        runnable = acting and self._may_run(name)
+        if runnable:
+            refusal = self._gate(name, arguments, consume=True)
+            if refusal is not None:
+                return self._refuse_for_question(name, arguments, target, refusal)
+        before = self._before_state(name, arguments) if runnable else None
         result = self._dispatch(name, arguments)
+        if not acting or "refused" in result:
+            self._observer.on_action(name, arguments, target, result)
+            return result
+        self._cite_knowledge(arguments)
+        self.forget_last_read()
+        after = self._observe_current(source=None)
+        result = {**result, **self._judged(expect, before, after)}
+        if arguments.get("knowledge_id") is not None:
+            result["knowledge_id"] = arguments["knowledge_id"]
+        self._after_action(name, arguments, target, result)
+        taken = self._capture_current("mismatch") if result.get("expected_met") is False else None
+        if taken is not None:
+            result["capture"] = taken[0].id
         self._observer.on_action(name, arguments, target, result)
-        if name in REOBSERVING_TOOLS and "refused" not in result:
-            return {**result, **self._observe_current(source="action")}
-        return result
+        if self._last_read is not None:
+            self._observer.on_observation(*self._last_read, source="action")
+        if taken is not None:
+            self._emit(taken[1])
+        return {**result, **after}
+
+    def _refuse_for_question(self, name, arguments, target, refusal):
+        """Returns a policy refusal, with a capture of the window so the model can frame a question."""
+        taken = self._capture_current("question") if refusal["refused_code"] != "unknown_knowledge" else None
+        if taken is not None:
+            refusal = {**refusal, "capture": taken[0].id}
+        self._observer.on_action(name, arguments, target, refusal)
+        if taken is not None:
+            self._emit(taken[1])
+        return refusal
 
     def preview(self, name, arguments):
         """Returns what the call would act on, without running anything.
 
         A ref tool gives the ref with its role, name, description and bounds from the latest
         observation; a point tool gives the window and the screen points; a window tool gives the
-        window with no points. Anything else, or a ref not in the latest observation, gives None.
+        window with no points; click_part gives the mark's element and its point; click_point the
+        capture's window and the screen point. Anything else, or an unknown ref, mark or capture,
+        gives None.
         """
         if name in REF_ACTIONS:
             element = self._refs.get(arguments.get("ref"))
@@ -129,6 +175,10 @@ class Toolbox:
             return {"window_id": arguments.get("window_id"), "points": points}
         if name in WINDOW_TOOLS:
             return {"window_id": arguments.get("window_id"), "points": []}
+        if name == "click_part":
+            return self._part_preview(arguments)
+        if name == "click_point":
+            return self._point_preview(arguments)
         return None
 
     def _dispatch(self, name, arguments):
@@ -142,15 +192,22 @@ class Toolbox:
             return self._ref_action(name, arguments)
         return getattr(self, f"_tool_{name}")(arguments)
 
+    def _may_run(self, name):
+        return self._pid is not None and self._levels.get(name, 99) <= self._task.permission_level
+
     def verify(self):
-        """Reads every window of the target and reports whether one meets all requirements."""
+        """Reads every window of the target and reports whether one meets the task's requirements."""
+        return self.verify_elements(self._task.require)
+
+    def verify_elements(self, require):
+        """Reads every window of the target and reports whether one meets all of `require`."""
         unmet = "no window of the target process is open"
         for window in self._rows() if self._pid is not None else []:
             envelope = self._snapshot(window["id"])
             if not envelope.get("ok") or not envelope["data"].get("complete"):
                 unmet = f"could not fully read window {window['id']}"
                 continue
-            unmet = first_unmet(self._task.require, envelope["data"]["tree"])
+            unmet = first_unmet(require, envelope["data"]["tree"])
             if unmet is None:
                 return {"met": True, "window_id": window["id"]}
         return {"met": False, "unmet": unmet}
@@ -162,7 +219,8 @@ class Toolbox:
             envelope = self._snapshot(window["id"])
             if envelope.get("ok"):
                 self._current_window = window["id"]
-                text, self._refs = render_tree(envelope["data"]["tree"])
+                text, self._refs, self._marks = render_marked(envelope["data"]["tree"])
+                self._marks_view = (window["id"], True)
                 self._last_read = (window, envelope, text)
                 if source is not None:
                     self._observer.on_observation(window, envelope, text, source=source)
@@ -220,8 +278,9 @@ class Toolbox:
         if not envelope.get("ok"):
             return {"observation_error": _summary(envelope)}
         data = envelope["data"]
-        text, refs = render_tree(data["tree"], include_bounds)
+        text, refs, self._marks = render_marked(data["tree"], include_bounds)
         self._refs = {**self._refs, **refs} if root_ref else refs
+        self._marks_view = (window_id, not root_ref and surface in FULL_SURFACES)
         self._current_window = window_id
         self._last_read = (window, envelope, text)
         if source is not None:
@@ -264,7 +323,9 @@ class Toolbox:
             identity.append(arguments[spec.positional])
         return self._act(name, element, identity, args, headed=spec.headed)
 
-    def _physical(self, tool, arguments, points, args):
+    def _physical(self, tool, arguments, points, args, element=None, identity=None):
+        """Clicks or drags at screen points of an owned window after giving it focus. The guard
+        identifies the action by `element` and `identity`, or by the window and the arguments."""
         window_id = arguments["window_id"]
         row = self._owned_window(window_id)
         if row is None:
@@ -276,8 +337,10 @@ class Toolbox:
         row = self._owned_window(window_id)
         if row is None or not row.get("is_focused"):
             return _refused(f"Window {window_id} could not take focus, so the point may hit another app")
-        identity = sorted((k, v) for k, v in arguments.items() if k not in NON_IDENTITY_ARGUMENTS)
-        element = {"role": "window", "name": window_id}
+        if identity is None:
+            identity = sorted((k, v) for k, v in arguments.items() if k not in NON_IDENTITY_ARGUMENTS)
+        if element is None:
+            element = {"role": "window", "name": window_id}
         self._current_window = window_id
         return self._act(tool, element, identity, args, headed=True)
 

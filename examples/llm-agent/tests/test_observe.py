@@ -1,6 +1,6 @@
 import json
 
-from agent.observe import render_tree, visible_elements
+from agent.observe import render_marked, render_tree, visible_elements
 
 
 def test_unnamed_wrapper_groups_disappear_and_children_move_up():
@@ -128,3 +128,52 @@ def test_a_subtree_root_that_is_not_a_window_is_an_element():
     tree = {"role": "list", "name": "지표 목록", "children": [{"role": "statictext", "name": "CVD"}]}
 
     assert [e["name"] for e in visible_elements(tree)] == ["지표 목록", "CVD"]
+
+
+B = {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0}
+
+
+def test_marks_number_controls_and_text_in_tree_order():
+    tree = {"role": "window", "name": "W", "children": [
+        {"role": "statictext", "name": "라인", "bounds": B},
+        {"role": "button", "name": "조회", "ref_id": "@s1:e1", "bounds": B},
+        {"role": "group", "children": [{"role": "statictext", "name": "소계", "bounds": B}]}]}
+
+    text, refs, marks = render_marked(tree)
+
+    assert [marks[n]["name"] for n in sorted(marks)] == ["라인", "조회", "소계"]
+    assert marks[1]["kind"] == "text" and marks[2]["ref"] == "@s1:e1"
+    assert marks[3]["mark"] == 3 and marks[3]["bounds"] == B
+    assert text.splitlines()[0] == 'window "W"'
+    assert '[2] button "조회" @s1:e1' in text
+    assert "@s1:e1" in refs
+
+
+def test_marked_lines_keep_indentation_and_unmarked_lines():
+    tree = {"role": "window", "name": "W", "children": [
+        {"role": "group", "subtree_truncated": True, "children": [
+            {"role": "statictext", "name": "가", "bounds": B}]}]}
+
+    text, _, marks = render_marked(tree)
+
+    assert text == 'window "W"\n  group truncated\n    [1] statictext "가"'
+    assert list(marks) == [1]
+
+
+def test_marks_are_the_visible_elements_with_a_number():
+    tree = {"role": "list", "name": "목록", "children": [
+        {"role": "statictext", "name": "CVD"}, {"role": "image"},
+        {"role": "button", "name": "닫기", "ref_id": "@s1:e3"}]}
+
+    _, _, marks = render_marked(tree)
+
+    expected = [dict(element, mark=n) for n, element in enumerate(visible_elements(tree), 1)]
+    assert [marks[n] for n in sorted(marks)] == expected
+
+
+def test_render_tree_output_is_unchanged_by_marks():
+    tree = {"role": "window", "name": "W", "children": [
+        {"role": "statictext", "name": "라인", "bounds": B}]}
+
+    assert "[1]" not in render_tree(tree)[0]
+    assert render_marked(tree, include_bounds=True)[0].endswith('[1] statictext "라인" bounds=0,0,10,10')

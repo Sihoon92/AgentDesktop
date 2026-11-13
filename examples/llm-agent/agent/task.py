@@ -5,6 +5,8 @@ from pathlib import PureWindowsPath
 
 import yaml
 
+from agent.images import IMAGE_MODES
+
 
 class TaskError(Exception):
     """The task file is invalid."""
@@ -21,18 +23,33 @@ class Task:
     model: str = "gpt-6.1-terra"
     reasoning_effort: str = "low"
     baseline_target: dict | None = None
+    system: str | None = None
+    knowledge_dir: str | None = None
+    image_mode: str = "user_message"
+    ask_timeout_s: int = 1800
+    mismatch_limit: int = 2
+
+
+ARGS_MAX_STEPS = 40
+OPTIONAL_KEYS = ("max_steps", "token_budget", "model", "reasoning_effort", "baseline_target",
+                 "system", "knowledge_dir", "image_mode", "ask_timeout_s", "mismatch_limit")
 
 
 def task_from_args(goal, exe, permission_level=3):
-    """A one-off instruction with no success conditions; the harness cannot verify it."""
+    """A one-off instruction with no success conditions; the harness cannot verify it alone.
+
+    It gets more steps than a task file's default, because observing, looking at captures and
+    asking add turns that a scripted task does not need."""
     if not PureWindowsPath(exe).is_absolute():
         raise TaskError("exe must be an absolute path")
-    return Task(goal, exe, permission_level, [])
+    return Task(goal, exe, permission_level, [], max_steps=ARGS_MAX_STEPS)
 
 
 def load_task(path):
+    """Reads a task file. success is optional: without it the run is judged by learned
+    completion entries or by a person."""
     raw = yaml.safe_load(open(path, encoding="utf-8").read()) or {}
-    for key in ("goal", "exe", "permission_level", "success"):
+    for key in ("goal", "exe", "permission_level"):
         if key not in raw:
             raise TaskError(f"Task is missing '{key}'")
     level = raw["permission_level"]
@@ -40,12 +57,23 @@ def load_task(path):
         raise TaskError("permission_level must be an integer from 0 to 3")
     if not PureWindowsPath(raw["exe"]).is_absolute():
         raise TaskError("exe must be an absolute path")
-    require = (raw["success"] or {}).get("require")
-    if not require:
-        raise TaskError("success.require must list at least one element")
-    optional = {
-        key: raw[key]
-        for key in ("max_steps", "token_budget", "model", "reasoning_effort", "baseline_target")
-        if key in raw
-    }
+    require = []
+    if "success" in raw:
+        require = (raw["success"] or {}).get("require")
+        if not require:
+            raise TaskError("success.require must list at least one element")
+    optional = {key: raw[key] for key in OPTIONAL_KEYS if key in raw}
+    _check_optional(optional)
     return Task(raw["goal"], raw["exe"], level, require, **optional)
+
+
+def _check_optional(optional):
+    if optional.get("image_mode", "user_message") not in IMAGE_MODES:
+        raise TaskError(f"image_mode must be one of {', '.join(IMAGE_MODES)}")
+    for key in ("ask_timeout_s", "mismatch_limit"):
+        value = optional.get(key, 1)
+        if type(value) is not int or value < 1:
+            raise TaskError(f"{key} must be a whole number of at least 1")
+    for key in ("system", "knowledge_dir"):
+        if key in optional and not isinstance(optional[key], str):
+            raise TaskError(f"{key} must be text")

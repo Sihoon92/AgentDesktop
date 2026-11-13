@@ -108,12 +108,14 @@ def test_real_viewer_page_keeps_no_server_reference_outside_its_code(tmp_path):
     html = build_export(copy_sample(tmp_path), REAL_STATIC, NOW)
 
     page = parsed(html)
-    [app] = [text for attrs, text in page.scripts if not attrs]
-    skeleton = html.replace(app, "")
+    code = [text for attrs, text in page.scripts if not attrs]
+    skeleton = html
+    for text in code:
+        skeleton = skeleton.replace(text, "")
     for text in SERVER_STRINGS:
         assert text not in skeleton, text
     assert not re.search(r"""(src|href)\s*=\s*["']?/""", skeleton)
-    assert app.strip().endswith("start();")
+    assert code[-1].strip().endswith("start();")
     [(_, css)] = page.styles
     assert css.strip() == (REAL_STATIC / "style.css").read_text(encoding="utf-8").strip()
 
@@ -218,3 +220,64 @@ def test_write_export_returns_bytes_and_never_overwrites(tmp_path):
     with pytest.raises(FileExistsError):
         write_export(run_dir, static, out, NOW)
     assert out.read_bytes() == before
+
+
+QUESTIONS = HERE / "fixtures" / "run_questions"
+
+
+def copy_questions(tmp_path):
+    target = tmp_path / "runs" / "20261113-101500"
+    shutil.copytree(QUESTIONS, target)
+    return target
+
+
+def test_export_carries_questions_and_answers(tmp_path):
+    html = build_export(copy_questions(tmp_path), REAL_STATIC, NOW)
+
+    events = payload(html)["events"]
+    assert events == sample_events(QUESTIONS)
+    assert [event["id"] for event in events if event["type"] == "question"] == ["q1", "q2", "q3", "q4"]
+    assert "맞아" in html and "칸 오른쪽 끝 화살표를 눌러" in html
+    assert payload(html)["run"]["status"] == "confirmed"
+
+
+def test_export_inlines_every_viewer_script_in_page_order_after_the_record(tmp_path):
+    html = build_export(copy_questions(tmp_path), REAL_STATIC, NOW)
+
+    code = [text for attrs, text in parsed(html).scripts if not attrs]
+    names = ["chat.js", "knowledge.js", "app.js"]
+    assert [text.strip() for text in code] == [(REAL_STATIC / name).read_text(encoding="utf-8").strip() for name in names]
+    record = html.index('<script id="run-export" type="application/json">')
+    assert record < html.index("function renderChat") < html.index("function start()")
+
+
+def test_export_has_no_answer_form(tmp_path):
+    html = build_export(copy_questions(tmp_path), REAL_STATIC, NOW)
+
+    skeleton = html
+    for text in [text for attrs, text in parsed(html).scripts]:
+        skeleton = skeleton.replace(text, "")
+    assert "<textarea" not in skeleton
+    assert '<div id="chat-composer" class="chat-composer"></div>' in skeleton
+    assert "/answer" not in skeleton
+
+
+def test_a_script_named_in_the_page_but_missing_is_refused(tmp_path):
+    index = STUB_INDEX.replace('<script src="/static/app.js" defer></script>',
+                               '<script src="/static/extra.js" defer></script>\n  <script src="/static/app.js" defer></script>')
+
+    with pytest.raises(ValueError, match="extra.js"):
+        build_export(copy_sample(tmp_path), stub_static(tmp_path, index=index), NOW)
+
+
+def test_extra_scripts_are_inlined_before_the_app(tmp_path):
+    index = STUB_INDEX.replace('<script src="/static/app.js" defer></script>',
+                               '<script src="/static/extra.js" defer></script>\n  <script src="/static/app.js" defer></script>')
+    static = stub_static(tmp_path, index=index)
+    (static / "extra.js").write_text('console.log("extra");', encoding="utf-8")
+
+    html = build_export(copy_sample(tmp_path), static, NOW)
+
+    code = [text.strip() for attrs, text in parsed(html).scripts if not attrs]
+    assert code == ['console.log("extra");', 'console.log("export");']
+    assert "/static/" not in html
