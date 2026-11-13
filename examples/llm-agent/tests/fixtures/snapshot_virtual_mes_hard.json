@@ -1,0 +1,155 @@
+{
+ "version": "2.6",
+ "ok": true,
+ "command": "snapshot",
+ "data": {
+  "app": "VirtualMes.exe",
+  "complete": true,
+  "ref_count": 3,
+  "snapshot_id": "sfixture0",
+  "tree": {
+   "role": "window",
+   "name": "MES (가상)",
+   "bounds": {
+    "x": 0.0,
+    "y": 0.0,
+    "width": 916.0,
+    "height": 560.0
+   },
+   "children": [
+    {
+     "role": "pane",
+     "bounds": {
+      "x": 0.0,
+      "y": 0.0,
+      "width": 900.0,
+      "height": 520.0
+     },
+     "children": [
+      {
+       "role": "group",
+       "bounds": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 400.0,
+        "height": 30.0
+       },
+       "children": [
+        {
+         "role": "statictext",
+         "name": "생산운영",
+         "bounds": {
+          "x": 0.0,
+          "y": 2.0,
+          "width": 62.0,
+          "height": 24.0
+         }
+        },
+        {
+         "role": "statictext",
+         "name": "품질관리",
+         "bounds": {
+          "x": 66.0,
+          "y": 2.0,
+          "width": 62.0,
+          "height": 24.0
+         }
+        }
+       ]
+      },
+      {
+       "role": "group",
+       "bounds": {
+        "x": 0.0,
+        "y": 40.0,
+        "width": 900.0,
+        "height": 30.0
+       }
+      },
+      {
+       "role": "group",
+       "bounds": {
+        "x": 0.0,
+        "y": 80.0,
+        "width": 900.0,
+        "height": 30.0
+       },
+       "children": [
+        {
+         "role": "button",
+         "name": "조회(F5)",
+         "ref_id": "@sfixture0:e1",
+         "bounds": {
+          "x": 700.0,
+          "y": 82.0,
+          "width": 80.0,
+          "height": 26.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "query"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "edit",
+         "ref_id": "@sfixture0:e2",
+         "bounds": {
+          "x": 400.0,
+          "y": 82.0,
+          "width": 120.0,
+          "height": 26.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "date-from"
+         },
+         "available_actions": [
+          "SetValue"
+         ]
+        },
+        {
+         "role": "edit",
+         "ref_id": "@sfixture0:e3",
+         "bounds": {
+          "x": 540.0,
+          "y": 82.0,
+          "width": 120.0,
+          "height": 26.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "date-to"
+         },
+         "available_actions": [
+          "SetValue"
+         ]
+        }
+       ]
+      },
+      {
+       "role": "group",
+       "bounds": {
+        "x": 860.0,
+        "y": 90.0,
+        "width": 24.0,
+        "height": 24.0
+       }
+      },
+      {
+       "role": "group",
+       "bounds": {
+        "x": 0.0,
+        "y": 120.0,
+        "width": 900.0,
+        "height": 400.0
+       }
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

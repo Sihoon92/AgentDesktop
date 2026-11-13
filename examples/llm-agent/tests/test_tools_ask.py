@@ -17,7 +17,7 @@ from test_tools import (
     point_call,
 )
 
-from agent.ask import NO_ANSWER, Answer, NoAsker
+from agent.ask import NO_ANSWER, Answer, AskGate, NoAsker
 from agent.desktop import DesktopClient
 from agent.guard import AgentStopped
 from agent.knowledge import KnowledgeStore
@@ -135,6 +135,60 @@ def test_ask_passes_candidates_with_bounds_and_returns_the_answer(tmp_path):
     assert asked["candidates"][0] == {"n": 1, "label": "후보 3", "mark": 3, "bounds": LINE_BOX, "point": None}
     assert asked["proposed"] == 1 and asked["basis"][0]["mark"] == 1
     assert asked["basis"][0]["bounds"] == {"x": 1010, "y": 520, "width": 60, "height": 24}
+
+
+def test_a_recorded_question_can_always_be_answered_through_the_gate(tmp_path):
+    gate = AskGate(timeout_s=5)
+    toolbox, _, observer = toolbox_with(tmp_path, gate)
+    replies = []
+    record = observer.on_event
+
+    def answer_on_sight(event):
+        record(event)
+        if event.get("type") == "question":
+            replies.append(gate.answer(event["id"], Answer(text="1번")))
+
+    observer.on_event = answer_on_sight
+
+    result = toolbox.call("ask", question(marks=[3, 4]))
+
+    assert replies == [True]
+    assert result == {"ok": True, "answer": "1번", "pin": None}
+    kinds = [event["type"] for event in observer.events if event["type"] in ("question", "answer")]
+    assert kinds == ["question", "answer"]
+
+
+class SilentGateAsker:
+    """Takes on_waiting but never calls it, as a gate that times out at once might."""
+
+    interactive = True
+
+    def ask(self, question, on_waiting=None):
+        return Answer(text="그냥")
+
+
+def test_the_question_is_recorded_once_even_if_the_asker_never_calls_back(tmp_path):
+    toolbox, _, observer = toolbox_with(tmp_path, SilentGateAsker())
+
+    toolbox.call("ask", question(marks=[3]))
+
+    kinds = [event["type"] for event in observer.events if event["type"] in ("question", "answer")]
+    assert kinds == ["question", "answer"]
+
+
+def test_an_asker_without_on_waiting_sees_its_question_already_recorded(tmp_path):
+    seen = []
+
+    class LookingAsker(ScriptedAsker):
+        def ask(self, question):
+            seen.append([event["type"] for event in observer.events].count("question"))
+            return super().ask(question)
+
+    toolbox, _, observer = toolbox_with(tmp_path, LookingAsker([Answer(text="2번")]))
+
+    toolbox.call("ask", question(marks=[3]))
+
+    assert seen == [1]
 
 
 def test_question_shows_the_screen_without_renumbering_the_model_marks(tmp_path):

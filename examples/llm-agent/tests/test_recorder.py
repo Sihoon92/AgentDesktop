@@ -69,8 +69,16 @@ def events(recorder):
     return [json.loads(line) for line in lines]
 
 
-def run_json(recorder):
-    return json.loads((recorder.path / "run.json").read_text(encoding="utf-8"))
+def run_json(recorder, attempts=50):
+    """Reads run.json like any reader of a live run: on Windows, opening it at the moment the
+    heartbeat thread replaces it is refused with PermissionError, so a refused read is retried."""
+    path = recorder.path / "run.json"
+    for _ in range(attempts - 1):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            time.sleep(0.01)
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def settings_element(observation):
@@ -291,6 +299,41 @@ def test_text_elements_stop_at_400_and_say_so(tmp_path):
     assert texts[-1]["name"] == "라벨 399"
     assert observation["elements"][-1]["ref"] == "@s9:e1"
     assert observation["text_truncated"] is True
+
+
+def test_observation_carries_the_kinds_of_the_whole_tree_even_when_text_is_cut(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    envelope = labels_tree(405, {"x": 2000.0, "y": 160.0, "width": 40.0, "height": 24.0})
+    envelope["data"]["complete"] = False
+
+    recorder.on_observation(window_row(), envelope, "t")
+
+    observation = events(recorder)[0]
+    assert observation["text_truncated"] is True
+    assert observation["kinds"] == {"named_ref": 1, "unnamed_ref": 0, "unnamed_ref_with_id": 0, "text": 405,
+                                    "blank": 0, "nodes": 407, "depth": 2}
+    assert observation["complete"] is False
+
+
+def test_observation_complete_is_null_when_the_snapshot_does_not_say(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_observation(window_row(), labels_tree(1), "t")
+
+    observation = events(recorder)[0]
+    assert observation["complete"] is None and observation["kinds"]["named_ref"] == 1
+
+
+def test_observed_snapshots_record_kinds_and_complete(tmp_path):
+    recorder, toolbox, _ = recorded(tmp_path)
+    toolbox.call("launch_target", {"intent": "앱을 연다"})
+
+    toolbox.call("observe", OBSERVE)
+
+    observation = events(recorder)[1]
+    controls = [e for e in observation["elements"] if e["kind"] == "control"]
+    assert observation["complete"] is True
+    assert observation["kinds"]["named_ref"] + observation["kinds"]["unnamed_ref"] == len(controls) == 42
 
 
 def test_wait_for_text_records_one_observation_with_one_screenshot(tmp_path):
@@ -638,6 +681,14 @@ def test_run_json_names_the_system(tmp_path):
     OPEN_RECORDERS.append(recorder)
     assert run_json(recorder)["system"] == "virtualmes"
     assert run_json(new_recorder(tmp_path / "other", desktop))["system"] is None
+
+
+def test_run_json_keeps_the_step_limit_or_null(tmp_path):
+    desktop = DesktopClient("ad.exe", "run1", runner=FakeCli())
+    recorder = RunRecorder(tmp_path / "runs", desktop, {**META, "max_steps": 40}, now=lambda: NOW)
+    OPEN_RECORDERS.append(recorder)
+    assert run_json(recorder)["max_steps"] == 40
+    assert run_json(new_recorder(tmp_path / "other", desktop))["max_steps"] is None
 
 
 def test_confirmed_status_and_a_warning_are_recorded(tmp_path):

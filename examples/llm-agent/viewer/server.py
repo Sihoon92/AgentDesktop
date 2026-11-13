@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from agent.frames import frame_origin
 from agent.knowledge import KnowledgeError, KnowledgeStore, list_systems
+from agent.summary import summary_of
 from viewer import history
 from viewer.history import BadQuery, RunIndex, is_run_id, parse_query
 from viewer.run_manager import InvalidRun, RunBusy, RunStartFailed
@@ -56,6 +57,14 @@ def is_frame_name(name):
 
 def is_static_name(name):
     return STATIC_NAME.fullmatch(name) is not None
+
+
+def summary_lines(history, run_dir):
+    """The run summary of one run folder, built from its records. A run whose run.json still says
+    running but whose process is gone is summarized as interrupted, as the run list shows it."""
+    shown = history.run(Path(run_dir).name)
+    status = "interrupted" if shown is not None and shown.get("status") == "interrupted" else None
+    return summary_of(run_dir, status=status)
 
 
 def make_server(runs_dir, token, port=0, run_manager=None, history=None, knowledge_dir=None):
@@ -162,6 +171,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_legacy(segments[2])
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "events":
             return self._send_events(segments[2], query)
+        if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "summary":
+            return self._send_summary(segments[2])
         if len(segments) == 5 and segments[:2] == ["api", "runs"] and segments[3] == "frames":
             return self._send_frame(segments[2], segments[4])
         self._send_json(404, {"error": "없는 경로입니다"})
@@ -329,9 +340,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def _status(self):
         manager = self.server.run_manager
         if manager is None:
-            return {"can_start": False, "active": None, "default_exe": None, "can_answer": False}
+            return {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
+                    "default_system": None}
         return {"can_start": True, "active": manager.active(), "default_exe": manager.default_exe,
-                "can_answer": manager.can_answer()}
+                "can_answer": manager.can_answer(), "default_system": manager.default_system}
 
     def _start_run(self):
         manager = self.server.run_manager
@@ -425,6 +437,16 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_json(400, {"error": "since는 0 이상의 정수여야 합니다"})
         events, cursor = read_events(run_dir / "events.jsonl", int(since_text))
         self._send_json(200, {"events": events, "next": cursor})
+
+    def _send_summary(self, run_id):
+        run_dir = self._run_dir(run_id)
+        if run_dir is None:
+            return self._send_json(404, {"error": "없는 실행입니다"})
+        try:
+            lines = summary_lines(self.server.history, run_dir)
+        except OSError:
+            return self._send_json(500, {"error": "요약을 만들지 못했습니다"})
+        self._send_json(200, {"lines": lines})
 
     def _send_frame(self, run_id, name):
         run_dir = self._run_dir(run_id)

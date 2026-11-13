@@ -1,0 +1,395 @@
+{
+ "version": "2.6",
+ "ok": true,
+ "command": "snapshot",
+ "data": {
+  "app": "VirtualMes.exe",
+  "complete": true,
+  "ref_count": 16,
+  "snapshot_id": "sfixture0",
+  "tree": {
+   "role": "window",
+   "name": "MES (가상)",
+   "bounds": {
+    "x": 0.0,
+    "y": 0.0,
+    "width": 916.0,
+    "height": 560.0
+   },
+   "children": [
+    {
+     "role": "pane",
+     "bounds": {
+      "x": 0.0,
+      "y": 0.0,
+      "width": 900.0,
+      "height": 520.0
+     },
+     "children": [
+      {
+       "role": "group",
+       "bounds": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 400.0,
+        "height": 30.0
+       },
+       "children": [
+        {
+         "role": "button",
+         "name": "생산운영",
+         "ref_id": "@sfixture0:e1",
+         "bounds": {
+          "x": 0.0,
+          "y": 2.0,
+          "width": 62.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "menu-production"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
+         "name": "품질관리",
+         "ref_id": "@sfixture0:e2",
+         "bounds": {
+          "x": 66.0,
+          "y": 2.0,
+          "width": 62.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "menu-quality"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        }
+       ]
+      },
+      {
+       "role": "group",
+       "bounds": {
+        "x": 0.0,
+        "y": 40.0,
+        "width": 900.0,
+        "height": 30.0
+       },
+       "children": [
+        {
+         "role": "button",
+         "name": "WA2 #울산 조립",
+         "ref_id": "@sfixture0:e3",
+         "bounds": {
+          "x": 0.0,
+          "y": 42.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-shop-1"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
+         "name": "전체",
+         "ref_id": "@sfixture0:e4",
+         "bounds": {
+          "x": 150.0,
+          "y": 42.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-shop-2"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
+         "name": "전체",
+         "ref_id": "@sfixture0:e5",
+         "bounds": {
+          "x": 300.0,
+          "y": 42.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-shop-3"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
+         "name": "전체",
+         "ref_id": "@sfixture0:e6",
+         "bounds": {
+          "x": 450.0,
+          "y": 42.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-process"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
+         "name": "전체",
+         "ref_id": "@sfixture0:e7",
+         "bounds": {
+          "x": 600.0,
+          "y": 42.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-product"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
+         "name": "전일",
+         "ref_id": "@sfixture0:e8",
+         "bounds": {
+          "x": 750.0,
+          "y": 42.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-period"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        }
+       ]
+      },
+      {
+       "role": "group",
+       "bounds": {
+        "x": 0.0,
+        "y": 80.0,
+        "width": 900.0,
+        "height": 30.0
+       },
+       "children": [
+        {
+         "role": "button",
+         "name": "조회(F5)",
+         "ref_id": "@sfixture0:e9",
+         "bounds": {
+          "x": 700.0,
+          "y": 82.0,
+          "width": 80.0,
+          "height": 26.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "query"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "edit",
+         "ref_id": "@sfixture0:e10",
+         "bounds": {
+          "x": 400.0,
+          "y": 82.0,
+          "width": 120.0,
+          "height": 26.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "date-from"
+         },
+         "available_actions": [
+          "SetValue"
+         ]
+        },
+        {
+         "role": "edit",
+         "ref_id": "@sfixture0:e11",
+         "bounds": {
+          "x": 540.0,
+          "y": 82.0,
+          "width": 120.0,
+          "height": 26.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "date-to"
+         },
+         "available_actions": [
+          "SetValue"
+         ]
+        }
+       ]
+      },
+      {
+       "role": "group",
+       "bounds": {
+        "x": 860.0,
+        "y": 90.0,
+        "width": 24.0,
+        "height": 24.0
+       },
+       "children": [
+        {
+         "role": "button",
+         "name": "엑셀",
+         "ref_id": "@sfixture0:e12",
+         "bounds": {
+          "x": 860.0,
+          "y": 92.0,
+          "width": 0.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "icon-excel"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        }
+       ]
+      },
+      {
+       "role": "group",
+       "bounds": {
+        "x": 0.0,
+        "y": 120.0,
+        "width": 900.0,
+        "height": 400.0
+       },
+       "children": [
+        {
+         "role": "statictext",
+         "name": "공정",
+         "bounds": {
+          "x": 0.0,
+          "y": 122.0,
+          "width": 146.0,
+          "height": 24.0
+         }
+        },
+        {
+         "role": "statictext",
+         "name": "양품수",
+         "bounds": {
+          "x": 150.0,
+          "y": 122.0,
+          "width": 146.0,
+          "height": 24.0
+         }
+        },
+        {
+         "role": "cell",
+         "name": "극판",
+         "ref_id": "@sfixture0:e13",
+         "bounds": {
+          "x": 300.0,
+          "y": 122.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "cell-1-0"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "cell",
+         "name": "206",
+         "ref_id": "@sfixture0:e14",
+         "bounds": {
+          "x": 450.0,
+          "y": 122.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "cell-1-1"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "cell",
+         "name": "조립",
+         "ref_id": "@sfixture0:e15",
+         "bounds": {
+          "x": 600.0,
+          "y": 122.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "cell-2-0"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "cell",
+         "name": "311",
+         "ref_id": "@sfixture0:e16",
+         "bounds": {
+          "x": 750.0,
+          "y": 122.0,
+          "width": 146.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "cell-2-1"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

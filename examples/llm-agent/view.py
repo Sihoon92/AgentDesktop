@@ -1,8 +1,9 @@
 """Opens the local step viewer to look at past runs; it can also start new runs from the browser.
 
-`python view.py --open latest` (or a run id) opens one run directly. Two options work without
-the viewer: `--prune` lists old runs to delete (and deletes them with --yes), and
-`--export <run_id|latest> <out.html>` writes one run as a file that opens without a server.
+`python view.py --open latest` (or a run id) opens one run directly. Three options work without
+the viewer: `--prune` lists old runs to delete (and deletes them with --yes),
+`--export <run_id|latest> <out.html>` writes one run as a file that opens without a server, and
+`--summary <run_id|latest>` prints a run's summary, which holds no screen content.
 """
 
 import argparse
@@ -18,12 +19,13 @@ from dotenv import load_dotenv
 
 from agent.knowledge import KNOWLEDGE_ENV, knowledge_root
 from agent.llm import OpenAIResponder
+from agent.settings import SettingsError, load_settings, settings_path
 from run import ENV_FILES, RUNS_DIR, find_binary
 from viewer.export import write_export
 from viewer.history import RunIndex, is_run_id
 from viewer.retention import delete_plan, format_plan, plan_prune
 from viewer.run_manager import RunManager, RunStartFailed
-from viewer.server import STATIC_DIR, make_server
+from viewer.server import STATIC_DIR, make_server, summary_lines
 
 DAYS = re.compile(r"([0-9]+)d")
 COUNT = re.compile(r"[0-9]+")
@@ -36,12 +38,14 @@ def openai_model(task):
     return OpenAIResponder(task.model, task.reasoning_effort)
 
 
-def build_run_manager(runs_dir, default_exe, knowledge_dir=None):
-    """Returns a RunManager, or None with the reason when this viewer can only replay."""
+def build_run_manager(runs_dir, default_exe, knowledge_dir=None, task_defaults=None):
+    """Returns a RunManager, or None with the reason when this viewer can only replay.
+    task_defaults (the settings file) give new runs their model and the other task keys."""
     binary = find_binary()
     if not binary.exists():
         return None, f"agent-desktop 바이너리가 없어 기록 보기만 합니다: {binary}"
-    return RunManager(runs_dir, binary, default_exe, openai_model, knowledge_dir=knowledge_dir), None
+    return RunManager(runs_dir, binary, default_exe, openai_model, knowledge_dir=knowledge_dir,
+                      task_defaults=task_defaults), None
 
 
 def open_fragment(runs_dir, value):
@@ -124,6 +128,31 @@ def export(runs_dir, value, out_path):
     return 0
 
 
+def show_summary(runs_dir, value):
+    """Prints the summary of one run (or the newest), rebuilt from its records. Returns the exit code."""
+    index = RunIndex(runs_dir)
+    run_id = value
+    if value == "latest":
+        latest = index.latest()
+        if latest is None:
+            print("오류: 요약할 실행이 없습니다", file=sys.stderr)
+            return 1
+        if latest["kind"] == "legacy":
+            print(f"오류: 가장 최근 기록 {latest['run_id']}은(는) 옛 로그라 요약할 수 없습니다", file=sys.stderr)
+            return 1
+        run_id = latest["run_id"]
+    if not is_run_id(run_id) or not (runs_dir / run_id).is_dir():
+        print(f"오류: 실행 {value!r}을(를) 찾지 못했습니다", file=sys.stderr)
+        return 1
+    try:
+        lines = summary_lines(index, runs_dir / run_id)
+    except OSError as error:
+        print(f"오류: 요약을 만들지 못했습니다({type(error).__name__})", file=sys.stderr)
+        return 1
+    print("\n".join(lines))
+    return 0
+
+
 def _export_source(runs_dir, value):
     """(path to export, None), or (None, why not)."""
     if value == "latest":
@@ -143,6 +172,8 @@ def _export_source(runs_dir, value):
 
 
 def _check_modes(parser, args):
+    if args.summary and (args.prune or args.export or args.open):
+        parser.error("--summary는 --prune·--export·--open과 함께 쓸 수 없습니다")
     if args.prune and args.export:
         parser.error("--prune과 --export는 함께 쓸 수 없습니다")
     if (args.prune or args.export) and args.open:
@@ -157,9 +188,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765, help="Loopback port (0 picks a free one)")
     parser.add_argument("--runs", type=Path, default=RUNS_DIR, help="Folder that holds the run records")
-    parser.add_argument("--exe", help="Default absolute path of the app that new runs control")
+    parser.add_argument("--exe", help="Default absolute path of the app that new runs control (default: exe in the settings file)")
     parser.add_argument("--knowledge-dir", type=Path,
-                        help=f"Knowledge folder to show and to give viewer-started runs (default: ${KNOWLEDGE_ENV} or knowledge/)")
+                        help=f"Knowledge folder to show and to give viewer-started runs (default: the settings file's knowledge_dir, ${KNOWLEDGE_ENV} or knowledge/)")
     parser.add_argument("--no-browser", action="store_true", help="Print the address without opening a browser")
     parser.add_argument("--open", metavar="RUN_ID", help="Open this run (or 'latest') instead of the list")
     parser.add_argument("--prune", action="store_true", help="List runs to delete; nothing is deleted without --yes")
@@ -168,6 +199,8 @@ def main(argv=None):
     parser.add_argument("--yes", action="store_true", help="With --prune: delete for good (no recycle bin)")
     parser.add_argument("--export", nargs=2, metavar=("RUN_ID", "OUT_HTML"),
                         help="Write this run (or 'latest') as one HTML file that opens without a server")
+    parser.add_argument("--summary", metavar="RUN_ID",
+                        help="Print this run's (or 'latest') summary of counts and codes, with no screen content")
     args = parser.parse_args(argv)
     _check_modes(parser, args)
     runs_dir = args.runs.resolve()
@@ -175,10 +208,18 @@ def main(argv=None):
         return prune(runs_dir, args.older_than, args.keep, args.yes)
     if args.export:
         return export(runs_dir, args.export[0], Path(args.export[1]))
+    if args.summary:
+        return show_summary(runs_dir, args.summary)
     for path in ENV_FILES:
         load_dotenv(path)
-    knowledge_dir = knowledge_root(args.knowledge_dir)
-    run_manager, notice = build_run_manager(runs_dir, args.exe, knowledge_dir=knowledge_dir)
+    try:
+        settings = load_settings()
+    except SettingsError as error:
+        print(f"오류: {error}", file=sys.stderr)
+        return 2
+    knowledge_dir = knowledge_root(args.knowledge_dir, settings.get("knowledge_dir"))
+    run_manager, notice = build_run_manager(runs_dir, args.exe or settings.get("exe"), knowledge_dir=knowledge_dir,
+                                            task_defaults=settings)
     token = secrets.token_urlsafe(32)
     try:
         server = make_server(runs_dir, token, port=args.port, run_manager=run_manager,
@@ -193,6 +234,8 @@ def main(argv=None):
     print(f"뷰어 주소: {url}")
     print(f"기록 폴더: {runs_dir}")
     print(f"지식 폴더: {knowledge_dir}")
+    if settings:
+        print(f"설정 파일: {settings_path()} ({', '.join(settings)})")
     if notice:
         print(notice)
     print("끝내려면 Ctrl+C를 누르세요.")

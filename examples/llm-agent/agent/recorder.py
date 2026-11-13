@@ -23,13 +23,14 @@ from pathlib import Path
 from agent.frames import frame_origin, to_image_rect
 from agent.observe import visible_elements
 from agent.process_identity import process_started_at
+from agent.survey import kinds
 
 RUN_FORMAT = 2
 HEARTBEAT_S = 10
 REPLACE_ATTEMPTS = 5
 REPLACE_PAUSE_S = 0.02
 MAX_TEXT_ELEMENTS = 400
-META_FIELDS = ("goal", "exe", "model", "permission_level", "started_by", "system")
+META_FIELDS = ("goal", "exe", "model", "permission_level", "started_by", "system", "max_steps", "code")
 WINDOW_FIELDS = ("id", "title", "bounds")
 RESULT_FIELDS = (
     "ok", "disposition", "code", "message", "refused", "post_state",
@@ -107,7 +108,10 @@ class RunRecorder:
         }
         frame = self._capture(window, event)
         self._last_frame = {"id": event["id"], "window_id": window.get("id"), "geometry": frame}
-        event["elements"], event["text_truncated"] = _elements(envelope["data"]["tree"], frame)
+        tree = envelope["data"]["tree"]
+        event["elements"], event["text_truncated"] = _elements(tree, frame)
+        event["kinds"] = kinds(tree)
+        event["complete"] = envelope["data"].get("complete")
         self._append(event)
 
     @_never_raises

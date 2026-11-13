@@ -91,3 +91,48 @@ def test_bad_new_keys_are_rejected(tmp_path, line):
 
 def test_task_from_args_allows_forty_steps():
     assert task_from_args("열어", r"C:\\a\\b.exe").max_steps == 40
+
+
+SETTINGS = {"model": "house-model", "reasoning_effort": "high", "image_mode": "off",
+            "knowledge_dir": r"D:\kn", "system": "tool", "exe": r"C:\other\Other.exe"}
+
+
+def test_task_from_args_takes_settings_in_place_of_code_defaults():
+    task = task_from_args("열어", r"C:\a\b.exe", defaults=SETTINGS)
+
+    assert (task.model, task.reasoning_effort, task.image_mode) == ("house-model", "high", "off")
+    assert (task.knowledge_dir, task.system) == (r"D:\kn", "tool")
+    assert task.exe == r"C:\a\b.exe"
+
+
+def test_without_settings_the_code_defaults_stay():
+    assert task_from_args("열어", r"C:\a\b.exe", defaults={}) == task_from_args("열어", r"C:\a\b.exe")
+    assert task_from_args("열어", r"C:\a\b.exe").model == "gpt-6.1-terra"
+
+
+def test_task_file_keys_beat_settings(tmp_path):
+    task = load_task(write(tmp_path, NO_SUCCESS + "model: file-model\n"), defaults=SETTINGS)
+
+    assert (task.model, task.system, task.image_mode) == ("file-model", "mes", "tool_output")
+    assert task.knowledge_dir == r"D:\\knowledge"
+    assert task.reasoning_effort == "high"
+    assert task.exe == r"C:\\apps\\Mes.exe"
+
+
+def test_settings_fill_what_the_task_file_leaves_out(tmp_path):
+    task = load_task(write(tmp_path, VALID), defaults=SETTINGS)
+
+    assert (task.model, task.reasoning_effort, task.image_mode) == ("house-model", "high", "off")
+    assert (task.knowledge_dir, task.system) == (r"D:\kn", "tool")
+    assert task.exe == r"C:\apps\Tool.exe"
+
+
+def test_defaults_are_checked_like_task_keys():
+    with pytest.raises(TaskError):
+        task_from_args("열어", r"C:\a\b.exe", defaults={"image_mode": "inline"})
+
+
+@pytest.mark.parametrize("line", ["model: 5", "reasoning_effort: [low]"])
+def test_model_and_effort_must_be_text(tmp_path, line):
+    with pytest.raises(TaskError):
+        load_task(write(tmp_path, VALID + line + "\n"))

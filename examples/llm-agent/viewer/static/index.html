@@ -102,6 +102,15 @@
 
     <aside class="details" aria-label="단계 정보와 대화">
       <div class="details-scroll">
+        <section id="summary-box" class="summary-box" aria-label="실행 요약" hidden>
+          <div class="summary-head">
+            <button type="button" id="toggle-summary" class="ghost" aria-expanded="false" aria-controls="summary-text">실행 요약 보기</button>
+            <button type="button" id="copy-summary" class="ghost">요약 복사</button>
+            <span id="copy-status" class="copy-status" role="status"></span>
+            <span class="summary-note">화면의 글 없이 수와 코드만 담았습니다. 그대로 전해도 됩니다.</span>
+          </div>
+          <pre id="summary-text" class="summary-text" hidden></pre>
+        </section>
         <div id="step-info"></div>
         <details id="observation-box" class="observation" hidden>
           <summary>모델이 받은 관찰 텍스트</summary>

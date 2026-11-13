@@ -1,10 +1,22 @@
 import json
+from types import SimpleNamespace
 
+import pytest
 import run
 import yaml
 
+from agent import settings
 from agent.ask import NoAsker, TerminalAsker
+from agent.llm import OpenAIResponder
 from agent.registration import register_after_run
+from agent.task import Task
+
+
+@pytest.fixture(autouse=True)
+def no_settings_file(monkeypatch, tmp_path):
+    """A settings.local.yaml on this machine must not change what these tests see."""
+    monkeypatch.delenv(settings.SETTINGS_ENV, raising=False)
+    monkeypatch.setattr(settings, "DEFAULT_PATH", tmp_path / "absent-settings.yaml")
 
 
 def write_task(tmp_path, exe):
@@ -540,7 +552,261 @@ def test_run_json_names_the_system(monkeypatch, tmp_path):
     assert meta["system"] == "mes"
 
 
+def settings_file(monkeypatch, tmp_path, text):
+    path = tmp_path / "settings.local.yaml"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(settings, "DEFAULT_PATH", path)
+    return path
+
+
+class FakeClient:
+    """Stands in for the OpenAI client and records every Responses API call."""
+
+    def __init__(self):
+        self.calls = []
+        self.responses = self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(output=[], usage=SimpleNamespace(total_tokens=1))
+
+
+def calling_agent(monkeypatch):
+    """Replaces the OpenAI client with a FakeClient and the loop with one model call."""
+    client = FakeClient()
+    monkeypatch.setattr(run, "OpenAIResponder",
+                        lambda model, effort: OpenAIResponder(model, effort, client=client))
+
+    def agent(model, _toolbox, _task, _log, gate=None, register=None):
+        model.respond("instructions", [], [])
+        return run.RunResult("claimed", 1, "done")
+
+    monkeypatch.setattr(run, "run_agent", agent)
+    return client
+
+
+def test_goal_run_calls_the_model_named_in_the_settings_file(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    settings_file(monkeypatch, tmp_path, "model: house-model-7\nreasoning_effort: medium\n")
+    client = calling_agent(monkeypatch)
+
+    run.main(["--exe", str(make_exe(tmp_path)), "--goal", "g"])
+
+    assert [(call["model"], call["reasoning"]) for call in client.calls] == [("house-model-7", {"effort": "medium"})]
+    [(meta, _)] = recorded_runs(tmp_path)
+    assert meta["model"] == "house-model-7"
+
+
+def test_goal_run_without_a_settings_file_keeps_the_code_default(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    client = calling_agent(monkeypatch)
+
+    run.main(["--exe", str(make_exe(tmp_path)), "--goal", "g"])
+
+    assert [call["model"] for call in client.calls] == [Task.model]
+
+
+def test_settings_file_named_by_the_environment_variable_is_used(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    other = tmp_path / "elsewhere.yaml"
+    other.write_text("model: env-model\n", encoding="utf-8")
+    monkeypatch.setenv(settings.SETTINGS_ENV, str(other))
+    client = calling_agent(monkeypatch)
+
+    run.main(["--exe", str(make_exe(tmp_path)), "--goal", "g"])
+
+    assert [call["model"] for call in client.calls] == ["env-model"]
+
+
+def test_task_file_model_beats_the_settings_file(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    settings_file(monkeypatch, tmp_path, "model: settings-model\n")
+    task = write_task(tmp_path, make_exe(tmp_path))
+    task.write_text(task.read_text(encoding="utf-8") + "model: task-model\n", encoding="utf-8")
+    client = calling_agent(monkeypatch)
+
+    run.main([str(task)])
+
+    assert [call["model"] for call in client.calls] == ["task-model"]
+
+
+def test_goal_run_uses_the_settings_exe_when_exe_is_not_given(monkeypatch, tmp_path):
+    exe = mes_exe(tmp_path)
+    settings_file(monkeypatch, tmp_path, f"exe: '{exe}'\n")
+
+    code, toolbox, _ = wired(monkeypatch, tmp_path, "--goal", "x")
+
+    assert code == 3
+    assert toolbox._task.exe == str(exe)
+    assert toolbox.knowledge.system == "virtualmes"
+
+
+def test_exe_argument_beats_the_settings_exe(monkeypatch, tmp_path):
+    settings_file(monkeypatch, tmp_path, f"exe: '{tmp_path / 'Other.exe'}'\n")
+    exe = mes_exe(tmp_path)
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, "--exe", exe, "--goal", "x")
+
+    assert toolbox._task.exe == str(exe)
+
+
+def test_settings_exe_without_goal_is_exit_2(monkeypatch, tmp_path, capsys):
+    calls = isolate(monkeypatch, tmp_path)
+    settings_file(monkeypatch, tmp_path, f"exe: '{mes_exe(tmp_path)}'\n")
+
+    assert run.main([]) == 2
+    assert calls == []
+    assert "--goal" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("text, words", [
+    ("modle: m\n", "모르는 키"),
+    ("image_mode: inline\n", "image_mode"),
+    ("exe: App.exe\n", "절대 경로"),
+])
+def test_bad_settings_file_is_exit_2_in_korean_before_anything_starts(monkeypatch, tmp_path, capsys, text, words):
+    calls = isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    path = settings_file(monkeypatch, tmp_path, text)
+
+    code = run.main(["--exe", str(make_exe(tmp_path)), "--goal", "g"])
+
+    err = capsys.readouterr().err
+    assert code == 2 and calls == []
+    assert err.startswith("오류: ") and words in err and str(path) in err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_settings_system_and_image_mode_reach_the_run(monkeypatch, tmp_path):
+    settings_file(monkeypatch, tmp_path, "system: 공정\nimage_mode: 'off'\n")
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x")
+
+    assert toolbox.knowledge.system == "공정"
+    assert toolbox._task.image_mode == "off"
+
+
+def test_system_argument_beats_the_settings_system(monkeypatch, tmp_path):
+    settings_file(monkeypatch, tmp_path, "system: 공정\n")
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x", "--system", "mes")
+
+    assert toolbox.knowledge.system == "mes"
+
+
+def test_settings_knowledge_dir_comes_before_the_environment(monkeypatch, tmp_path):
+    settings_file(monkeypatch, tmp_path, "knowledge_dir: from-settings\n")
+
+    store = wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x")[1].knowledge
+
+    assert store.folder == tmp_path / "from-settings" / "virtualmes"
+
+
+def test_knowledge_dir_argument_and_task_file_beat_the_settings(monkeypatch, tmp_path):
+    settings_file(monkeypatch, tmp_path, "knowledge_dir: from-settings\n")
+    exe = mes_exe(tmp_path)
+    task = write_task(tmp_path, exe)
+    task.write_text(task.read_text(encoding="utf-8") + f"knowledge_dir: {tmp_path / 'from-task'}\n",
+                    encoding="utf-8")
+
+    by_argument = wired(monkeypatch, tmp_path, "--exe", exe, "--goal", "x", "--knowledge-dir", tmp_path / "arg")
+    by_task = wired(monkeypatch, tmp_path, task)
+
+    assert by_argument[1].knowledge.folder == tmp_path / "arg" / "virtualmes"
+    assert by_task[1].knowledge.folder == tmp_path / "from-task" / "virtualmes"
+
+
+def test_the_settings_file_and_its_keys_are_named_but_not_its_values(monkeypatch, tmp_path, capsys):
+    path = settings_file(monkeypatch, tmp_path, "model: secret-model-name\nsystem: 공정\n")
+
+    wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x")
+
+    out = capsys.readouterr().out
+    assert f"설정 파일: {path} (model, system)" in out
+    assert "secret-model-name" not in out
+
+
 def test_a_bad_system_name_stops_before_touching_the_app(monkeypatch, tmp_path, capsys):
     code, toolbox, _ = wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x", "--system", "a/b")
     assert code == 2 and toolbox is None
     assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())
+
+
+def test_run_meta_carries_the_task_step_limit(monkeypatch, tmp_path):
+    seen = []
+
+    class WatchedRecorder(run.RunRecorder):
+        def __init__(self, runs_dir, desktop, meta, *args, **kwargs):
+            seen.append(dict(meta))
+            super().__init__(runs_dir, desktop, meta, *args, **kwargs)
+
+    monkeypatch.setattr(run, "RunRecorder", WatchedRecorder)
+    task = write_task(tmp_path, mes_exe(tmp_path))
+    task.write_text(task.read_text(encoding="utf-8") + "max_steps: 9\n", encoding="utf-8")
+
+    wired(monkeypatch, tmp_path, task)
+    wired(monkeypatch, tmp_path, task, "--baseline")
+    wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x")
+
+    assert [meta["max_steps"] for meta in seen] == [9, 9, 40]
+    assert sorted(meta["max_steps"] for meta, _ in recorded_runs(tmp_path)) == [9, 9, 40]
+
+
+def test_task_file_run_takes_the_settings_model_when_the_file_has_none(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    settings_file(monkeypatch, tmp_path, "model: settings-model\n")
+    client = calling_agent(monkeypatch)
+
+    run.main([str(write_task(tmp_path, make_exe(tmp_path)))])
+
+    assert [call["model"] for call in client.calls] == ["settings-model"]
+
+
+def test_the_run_ends_with_its_summary_after_the_usual_lines_and_leaves_summary_txt(monkeypatch, tmp_path, capsys):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setattr(run, "current_code", lambda: "abc1234")
+    monkeypatch.setattr(run, "run_agent", agent_returning("claimed"))
+
+    code = run.main(["--exe", str(make_exe(tmp_path)), "--goal", "화면을 연다"])
+
+    [folder] = (tmp_path / "runs").iterdir()
+    out = capsys.readouterr().out.splitlines()
+    trace = next(i for i, line in enumerate(out) if line.startswith("trace: "))
+    written = (folder / "summary.txt").read_text(encoding="utf-8").splitlines()
+    assert code == 3
+    assert out[trace + 1:] == written
+    assert written[:3] == ["요약 (화면 내용 없음)", "  코드: abc1234", "  판정: claimed · 스텝 1/40 · 토큰 7"]
+    assert "화면을 연다" not in "\n".join(written)
+
+
+def test_run_json_keeps_the_code_version_the_run_was_made_with(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setattr(run, "current_code", lambda: "abc1234+수정")
+    monkeypatch.setattr(run, "run_baseline", lambda *a, **k: run.RunResult("verified", 4, "yes"))
+
+    run.main([str(write_task(tmp_path, make_exe(tmp_path))), "--baseline"])
+
+    [(meta, _)] = recorded_runs(tmp_path)
+    assert meta["code"] == "abc1234+수정"
+
+
+@pytest.mark.parametrize("failure", ["make", "write"])
+def test_a_summary_that_fails_only_warns_and_keeps_the_exit_code(monkeypatch, tmp_path, capsys, failure):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setattr(run, "current_code", lambda: "abc1234")
+    monkeypatch.setattr(run, "run_baseline", lambda *a, **k: run.RunResult("verified", 4, "yes"))
+    answer = (None, "RuntimeError") if failure == "make" else (["요약 (화면 내용 없음)"], "PermissionError")
+    monkeypatch.setattr(run, "write_summary", lambda _path: answer)
+
+    code = run.main([str(write_task(tmp_path, make_exe(tmp_path))), "--baseline"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert answer[1] in captured.err and "요약" in captured.err
+    assert ("요약 (화면 내용 없음)" in captured.out) == (failure == "write")

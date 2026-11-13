@@ -22,6 +22,8 @@ from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, syst
 from agent.loop import RunResult, run_agent
 from agent.recorder import RunRecorder
 from agent.registration import register_after_run
+from agent.settings import SettingsError, load_settings, settings_path
+from agent.summary import current_code, write_summary
 from agent.task import TaskError, load_task, task_from_args
 from agent.tools import Toolbox
 from viewer.server import make_server
@@ -97,9 +99,12 @@ def main(argv=None):
     for path in ENV_FILES:
         load_dotenv(path)
     try:
-        task = _resolve_task(args)
-    except (TaskError, OSError) as error:
+        settings = load_settings()
+        task = _resolve_task(args, settings)
+    except (SettingsError, TaskError, OSError) as error:
         return _fail(str(error))
+    if settings:
+        print(f"설정 파일: {settings_path()} ({', '.join(settings)})")
     if not Path(task.exe).exists():
         return _fail(f"실행 파일이 없습니다: {task.exe}")
     try:
@@ -176,8 +181,10 @@ def _run_recorded(args, task, binary, session, viewer, system):
         "exe": task.exe,
         "model": "baseline" if args.baseline else task.model,
         "permission_level": task.permission_level,
+        "max_steps": task.max_steps,
         "started_by": started_by(args),
         "system": system,
+        "code": current_code(),
     }
     try:
         recorder = RunRecorder(RUNS_DIR, desktop, meta)
@@ -203,24 +210,39 @@ def _run_recorded(args, task, binary, session, viewer, system):
     print(f"기록: {recorder.path}")
     print(f"나중에 보기: python view.py --open {recorder.run_id}")
     print(f"trace: {binary} --session {session} trace export")
+    print_summary(recorder.path)
     if viewer is not None:
         hold_viewer()
     return EXIT_CODES.get(result.status, 1)
 
 
-def _resolve_task(args):
+def print_summary(run_dir):
+    """Prints the run's summary and leaves it as summary.txt; a failure only warns."""
+    lines, problem = write_summary(run_dir)
+    if lines:
+        print("\n".join(lines))
+    if problem:
+        print(f"경고: 요약을 {'남기지' if lines else '만들지'} 못했습니다({problem})", file=sys.stderr)
+
+
+def _resolve_task(args, settings):
+    """The task from the command line, the task file and the settings, in that order of weight.
+    The settings' exe stands in for --exe only when there is no task file."""
     if args.task is not None:
         if args.exe:
             raise TaskError("작업 파일과 --exe는 함께 쓸 수 없습니다. 작업 파일의 exe를 고쳐 주세요")
-        task = load_task(args.task)
+        task = load_task(args.task, defaults=settings)
         return replace(task, goal=args.goal) if args.goal else task
-    if not args.exe:
+    exe = args.exe or settings.get("exe")
+    if not exe:
         raise TaskError("작업 파일이나 --exe를 지정해 주세요")
     if not args.goal:
-        raise TaskError("--exe에는 --goal로 지시를 함께 주세요")
+        if args.exe:
+            raise TaskError("--exe에는 --goal로 지시를 함께 주세요")
+        raise TaskError("작업 파일이 없으면 --goal로 지시를 주세요(실행 파일은 설정 파일의 exe를 씁니다)")
     if args.baseline:
         raise TaskError("--baseline은 성공 조건이 있는 작업 파일에서만 쓸 수 있습니다")
-    return task_from_args(args.goal, args.exe, args.level)
+    return task_from_args(args.goal, exe, args.level, defaults=settings)
 
 
 if __name__ == "__main__":

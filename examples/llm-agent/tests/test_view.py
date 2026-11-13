@@ -2,10 +2,22 @@ import json
 import os
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import view
+from agent import settings
+from agent.llm import OpenAIResponder
+from agent.loop import RunResult
+from viewer import run_manager as run_manager_module
+
+
+@pytest.fixture(autouse=True)
+def no_settings_file(monkeypatch, tmp_path):
+    """A settings.local.yaml on this machine must not change what these tests see."""
+    monkeypatch.delenv(settings.SETTINGS_ENV, raising=False)
+    monkeypatch.setattr(settings, "DEFAULT_PATH", tmp_path / "absent-settings.yaml")
 
 FIXTURE_RUNS = Path(__file__).parent / "fixtures" / "run_sample"
 
@@ -288,7 +300,7 @@ def test_the_viewer_serves_the_knowledge_folder(monkeypatch, tmp_path, capsys):
 
     assert code == 0
     assert seen["knowledge_dir"] == (tmp_path / "k").resolve()
-    assert managers == [{"knowledge_dir": (tmp_path / "k").resolve()}]
+    assert managers == [{"knowledge_dir": (tmp_path / "k").resolve(), "task_defaults": {}}]
     assert f"지식 폴더: {(tmp_path / 'k').resolve()}" in capsys.readouterr().out
 
 
@@ -302,3 +314,203 @@ def test_the_knowledge_dir_from_dotenv_is_read_after_loading_it(monkeypatch, tmp
     view.main(["--runs", str(FIXTURE_RUNS), "--no-browser"])
 
     assert seen["knowledge_dir"] == (tmp_path / "dot").resolve()
+
+
+def settings_file(monkeypatch, tmp_path, text):
+    path = tmp_path / "settings.local.yaml"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(settings, "DEFAULT_PATH", path)
+    return path
+
+
+def served(monkeypatch, argv):
+    """Runs view.main with the server and the run manager replaced; returns (code, server kwargs, manager calls)."""
+    seen, managers = {}, []
+    monkeypatch.delenv("AGENT_KNOWLEDGE_DIR", raising=False)
+    monkeypatch.setattr(view, "make_server", lambda *args, **kwargs: seen.update(kwargs) or FakeServer())
+    monkeypatch.setattr(view, "build_run_manager",
+                        lambda runs_dir, exe, **options: managers.append({"exe": exe, **options}) or (None, None))
+    monkeypatch.setattr(view, "load_dotenv", lambda path: None)
+    code = view.main(["--runs", str(FIXTURE_RUNS), "--no-browser", *argv])
+    return code, seen, managers
+
+
+def test_the_viewer_gives_new_runs_the_settings(monkeypatch, tmp_path, capsys):
+    path = settings_file(monkeypatch, tmp_path, "model: house-model\nexe: 'C:\\apps\\Tool.exe'\n"
+                                                "knowledge_dir: kn\n")
+
+    code, seen, managers = served(monkeypatch, [])
+
+    assert code == 0
+    assert managers == [{"exe": "C:\\apps\\Tool.exe", "knowledge_dir": (tmp_path / "kn").resolve(),
+                         "task_defaults": {"model": "house-model", "exe": "C:\\apps\\Tool.exe",
+                                           "knowledge_dir": str((tmp_path / "kn").resolve())}}]
+    assert seen["knowledge_dir"] == (tmp_path / "kn").resolve()
+    out = capsys.readouterr().out
+    assert f"설정 파일: {path} (model, knowledge_dir, exe)" in out
+    assert "house-model" not in out
+
+
+def test_viewer_arguments_beat_the_settings(monkeypatch, tmp_path):
+    settings_file(monkeypatch, tmp_path, "exe: 'C:\\apps\\Tool.exe'\nknowledge_dir: kn\n")
+
+    _, seen, managers = served(monkeypatch, ["--exe", "D:\\other\\Other.exe", "--knowledge-dir", str(tmp_path / "arg")])
+
+    assert managers[0]["exe"] == "D:\\other\\Other.exe"
+    assert managers[0]["knowledge_dir"] == seen["knowledge_dir"] == (tmp_path / "arg").resolve()
+
+
+def test_settings_knowledge_dir_comes_before_the_environment_in_the_viewer(monkeypatch, tmp_path):
+    settings_file(monkeypatch, tmp_path, "knowledge_dir: kn\n")
+    monkeypatch.setattr(view, "make_server", lambda *args, **kwargs: seen.update(kwargs) or FakeServer())
+    monkeypatch.setattr(view, "build_run_manager", lambda runs_dir, exe, **_options: (None, None))
+    monkeypatch.setattr(view, "load_dotenv", lambda path: monkeypatch.setenv("AGENT_KNOWLEDGE_DIR", str(tmp_path / "env")))
+    seen = {}
+
+    view.main(["--runs", str(FIXTURE_RUNS), "--no-browser"])
+
+    assert seen["knowledge_dir"] == (tmp_path / "kn").resolve()
+
+
+def test_without_a_settings_file_the_viewer_is_unchanged(monkeypatch, capsys):
+    _, _, managers = served(monkeypatch, [])
+
+    assert managers == [{"exe": None, "knowledge_dir": view.knowledge_root(None), "task_defaults": {}}]
+    assert "설정 파일" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("text, words", [("model: m\nbase_url: x\n", "모르는 키"), ("image_mode: big\n", "image_mode"),
+                                         ("exe: Tool.exe\n", "절대 경로")])
+def test_bad_settings_stop_the_viewer_in_korean_before_it_serves(monkeypatch, tmp_path, capsys, text, words):
+    path = settings_file(monkeypatch, tmp_path, text)
+    no_server(monkeypatch)
+
+    code = view.main(["--runs", str(FIXTURE_RUNS), "--no-browser"])
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert err.startswith("오류: ") and words in err and str(path) in err
+
+
+def test_prune_and_export_do_not_read_the_settings(monkeypatch, tmp_path, capsys):
+    settings_file(monkeypatch, tmp_path, "unknown_key: x\n")
+    no_server(monkeypatch)
+    runs = make_runs(tmp_path)
+
+    assert view.main(["--runs", str(runs), "--prune", "--keep", "5"]) == 0
+    assert view.main(["--runs", str(FIXTURE_RUNS), "--export", "latest", str(tmp_path / "out.html")]) == 0
+
+
+class FakeClient:
+    """Stands in for the OpenAI client and records every Responses API call."""
+
+    def __init__(self):
+        self.calls = []
+        self.responses = self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(output=[], usage=SimpleNamespace(total_tokens=1))
+
+
+def test_a_run_started_from_the_viewer_calls_the_model_named_in_the_settings_file(monkeypatch, tmp_path):
+    exe = tmp_path / "Tool.exe"
+    exe.write_bytes(b"")
+    binary = tmp_path / "agent-desktop.exe"
+    binary.write_bytes(b"")
+    settings_file(monkeypatch, tmp_path, f"model: house-model-7\nreasoning_effort: medium\nexe: '{exe}'\n")
+    monkeypatch.setenv("AGENT_DESKTOP_BIN", str(binary))
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    client = FakeClient()
+    monkeypatch.setattr(view, "OpenAIResponder", lambda model, effort: OpenAIResponder(model, effort, client=client))
+    monkeypatch.setattr(run_manager_module, "start_session", lambda *_args, **_kwargs: "session-1")
+
+    def agent(model, _toolbox, _task, _log, gate=None, register=None):
+        model.respond("instructions", [], [])
+        return RunResult("gave_up", 1, "done")
+
+    monkeypatch.setattr(run_manager_module, "run_agent", agent)
+    seen = {}
+    monkeypatch.setattr(view, "make_server", lambda *args, **kwargs: seen.update(kwargs) or FakeServer())
+    monkeypatch.setattr(view, "load_dotenv", lambda path: None)
+    runs = tmp_path / "runs"
+
+    assert view.main(["--runs", str(runs), "--no-browser"]) == 0
+    manager = seen["run_manager"]
+    run_id = manager.start("g")
+    manager.join(5)
+
+    assert [(call["model"], call["reasoning"]) for call in client.calls] == [("house-model-7", {"effort": "medium"})]
+    meta = json.loads((runs / run_id / "run.json").read_text(encoding="utf-8"))
+    assert (meta["model"], meta["exe"], meta["status"]) == ("house-model-7", str(exe), "gave_up")
+
+
+QUESTIONS_RUN = "20261113-101500"
+
+
+def questions_runs(tmp_path):
+    runs = tmp_path / "runs"
+    shutil.copytree(Path(__file__).parent / "fixtures" / "run_questions", runs / QUESTIONS_RUN)
+    return runs
+
+
+@pytest.mark.parametrize("value", [QUESTIONS_RUN, "latest"])
+def test_summary_rebuilds_a_past_run_summary_from_its_records(monkeypatch, tmp_path, capsys, value):
+    settings_file(monkeypatch, tmp_path, "unknown_key: x\n")
+    no_server(monkeypatch)
+    runs = questions_runs(tmp_path)
+    (runs / QUESTIONS_RUN / "summary.txt").write_text("stale\n", encoding="utf-8")
+
+    code = view.main(["--runs", str(runs), "--summary", value])
+
+    out = capsys.readouterr().out.splitlines()
+    assert code == 0
+    assert out[:3] == ["요약 (화면 내용 없음)", "  코드: 알 수 없음", "  판정: confirmed · 스텝 8 · 토큰 15200"]
+    assert "stale" not in out and not any(word in "\n".join(out) for word in ("극판", "WA1", "맞아"))
+
+
+def test_summary_uses_the_code_recorded_when_the_run_started(monkeypatch, tmp_path, capsys):
+    no_server(monkeypatch)
+    runs = tmp_path / "runs"
+    write_run(runs, "20261107-120000", code="abc1234+수정")
+
+    assert view.main(["--runs", str(runs), "--summary", "20261107-120000"]) == 0
+    assert capsys.readouterr().out.splitlines()[1] == "  코드: abc1234+수정"
+
+
+def test_summary_of_a_dead_running_run_says_interrupted(monkeypatch, tmp_path, capsys):
+    no_server(monkeypatch)
+    runs = tmp_path / "runs"
+    write_run(runs, "20261107-120000", status="running", started_at="2026-11-07T12:00:00Z")
+
+    assert view.main(["--runs", str(runs), "--summary", "latest"]) == 0
+    assert capsys.readouterr().out.splitlines()[2].startswith("  판정: interrupted")
+
+
+@pytest.mark.parametrize("value", ["20261101-000000", "20261107-090000", "latest", "../20261107-120000", ".."])
+def test_summary_of_a_missing_run_or_an_old_log_exits_1(monkeypatch, tmp_path, capsys, value):
+    no_server(monkeypatch)
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "20261107-090000.jsonl").write_bytes(b'{"step": 1}\n')
+
+    code = view.main(["--runs", str(runs), "--summary", value])
+
+    captured = capsys.readouterr()
+    assert code == 1 and captured.err.strip() and not captured.out
+    assert ("옛 로그" in captured.err) == (value == "latest")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--summary", "latest", "--open", "latest"],
+        ["--summary", "latest", "--export", "latest", "out.html"],
+        ["--summary", "latest", "--prune", "--keep", "3"],
+    ],
+)
+def test_summary_does_not_mix_with_the_other_modes(monkeypatch, tmp_path, argv):
+    no_server(monkeypatch)
+    with pytest.raises(SystemExit) as stopped:
+        view.main(["--runs", str(tmp_path), *argv])
+    assert stopped.value.code == 2

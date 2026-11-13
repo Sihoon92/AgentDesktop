@@ -1,0 +1,570 @@
+"""check.py: seven lines of counts and codes, exit code 1 on any failure, and no screen text.
+
+The CLI is tests/fake_cli.py and the model is a fake client, so no window opens and no
+model is called.
+"""
+
+import base64
+import io
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import httpx2 as httpx
+import openai
+import pytest
+from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).parent))
+from fake_cli import FakeCli, scene_window  # noqa: E402
+
+import check  # noqa: E402
+import run  # noqa: E402
+from agent import checks, settings as settings_module  # noqa: E402
+from agent.survey import id_keys, kinds  # noqa: E402
+
+FIXTURES = Path(__file__).parent / "fixtures"
+MARK = "MARKER-화면글"
+NAMES = ["바이너리", "설정", "LLM 호출", "LLM 도구 호출", "LLM 그림 입력", "앱 관찰", "id 유지"]
+ALLOWED_COMMANDS = {"version", "session", "launch", "list-windows", "snapshot", "screenshot"}
+MAIN = scene_window("w-1", f"{MARK} 창 제목", {"x": 0, "y": 0, "width": 816, "height": 608})
+
+
+def box(x, y, width=40, height=20):
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+def marked_tree(extra_id=None):
+    children = [
+        {"role": "button", "name": f"{MARK} 버튼", "ref_id": "@e1", "bounds": box(10, 10)},
+        {"role": "button", "ref_id": "@e2", "bounds": box(60, 10),
+         "native_id": {"kind": "automation_id", "value": f"{MARK}-id"}},
+        {"role": "button", "ref_id": "@e3", "bounds": box(110, 10)},
+        {"role": "text", "name": f"{MARK} 글자", "bounds": box(10, 40)},
+        {"role": "text", "name": f"{MARK} 글자 2", "bounds": box(10, 70)},
+        {"role": "pane", "bounds": box(10, 100, 200, 100)},
+    ]
+    if extra_id:
+        children.append({"role": "edit", "ref_id": "@e9", "bounds": box(10, 210),
+                         "native_id": {"kind": "automation_id", "value": extra_id}})
+    return {"role": "window", "name": f"{MARK} 창", "bounds": box(0, 0, 800, 600), "children": children}
+
+
+class CheckCli(FakeCli):
+    """FakeCli plus the two commands the check adds: version and session start."""
+
+    def __init__(self, tree=None, session_ok=True, launch_window=True):
+        super().__init__(scene={"tree": tree or marked_tree(), "windows": [dict(MAIN)]})
+        self.session_ok = session_ok
+        self.launch_window = launch_window
+        self.launch_process = None
+        self.snapshot_result = None
+
+    def _respond(self, words):
+        if words[0] == "version":
+            return json.loads((FIXTURES / "version.json").read_text(encoding="utf-8"))
+        if words[0] == "session":
+            if not self.session_ok:
+                return {"version": "2.6", "ok": False, "command": "session",
+                        "error": {"code": "INTERNAL", "message": f"{MARK} C:\\secret\\path"}}
+            return {"version": "2.6", "ok": True, "command": "session", "data": {"session_id": "check-1"}}
+        if words[0] == "snapshot" and self.snapshot_result is not None:
+            return self.snapshot_result
+        envelope = super()._respond(words)
+        if words[0] == "launch" and not self.launch_window:
+            envelope["data"].pop("window", None)
+        if words[0] == "launch" and self.launch_process is not None:
+            pid, instance = self.launch_process
+            envelope["data"]["pid"] = pid
+            envelope["data"].pop("process_instance", None)
+            if instance is not None:
+                envelope["data"]["process_instance"] = instance
+        return envelope
+
+
+class SequenceRng:
+    def __init__(self, values):
+        self.values = list(values)
+
+    def randint(self, _low, _high):
+        return self.values.pop(0)
+
+
+class FakeModel:
+    """Answers like a model that reads images in the forms listed in `reads`."""
+
+    def __init__(self, reads=("user_message", "tool_output"), calls_tool=True, error=None):
+        self.reads = set(reads)
+        self.calls_tool = calls_tool
+        self.error = error
+        self.requests = []
+
+    def client(self):
+        return SimpleNamespace(responses=SimpleNamespace(create=self.create))
+
+    def create(self, **request):
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        items = request["input"]
+        mode, image = image_in(items)
+        if mode is not None:
+            digits = image_digits[image] if mode in self.reads else "0000"
+            return reply(call(check.REPORT_TOOL, {"digits": digits}))
+        text = items[0]["content"]
+        if "with digits" in text and self.calls_tool:
+            return reply(call(check.REPORT_TOOL, {"digits": text.split('"')[1]}))
+        return reply(SimpleNamespace(type="message"), text="ready")
+
+
+image_digits = {}
+
+
+def image_in(items):
+    """(mode, png bytes) of the image the request carries, or (None, None)."""
+    for item in items:
+        output = item.get("output") if isinstance(item, dict) else None
+        if isinstance(output, list):
+            return "tool_output", _png(output)
+        if isinstance(item, dict) and item.get("role") == "user" and isinstance(item.get("content"), list):
+            return "user_message", _png(item["content"])
+    return None, None
+
+
+def _png(parts):
+    url = next(part["image_url"] for part in parts if part.get("type") == "input_image")
+    return base64.b64decode(url.split(",", 1)[1])
+
+
+def call(name, arguments):
+    return SimpleNamespace(type="function_call", name=name, arguments=json.dumps(arguments), call_id="c1")
+
+
+def reply(*output, text=""):
+    return SimpleNamespace(output=list(output), output_text=text, usage=SimpleNamespace(total_tokens=10))
+
+
+@pytest.fixture
+def digit_images(monkeypatch):
+    """Remembers which digits each drawn image holds, so the fake model can 'read' it."""
+    original = checks.digit_image
+
+    def drawing(digits, path):
+        size = original(digits, path)
+        image_digits[Path(path).read_bytes()] = digits
+        return size
+
+    monkeypatch.setattr(checks, "digit_image", drawing)
+    yield
+    image_digits.clear()
+
+
+class Env:
+    def __init__(self, tmp_path, monkeypatch):
+        self.tmp = tmp_path
+        self.exe = tmp_path / f"{MARK}폴더" / "target.exe"
+        self.exe.parent.mkdir()
+        self.exe.write_bytes(b"")
+        self.debug = tmp_path / "debug" / "agent-desktop.exe"
+        self.debug.parent.mkdir()
+        self.debug.write_bytes(b"")
+        self.release = tmp_path / "release" / "agent-desktop.exe"
+        self.cli = CheckCli()
+        self.model = FakeModel()
+        self.environ = {"OPENAI_API_KEY": f"{MARK}-key"}
+        self.check_dir = tmp_path / ".check"
+        self.now = 0.0
+        monkeypatch.setattr(settings_module, "DEFAULT_PATH", tmp_path / "settings.local.yaml")
+
+    def clock(self):
+        self.now += 0.25
+        return self.now
+
+    def deps(self):
+        return check.Deps(runner=self.cli, make_client=self.model.client, environ=self.environ, clock=self.clock,
+                          sleep=lambda _s: None, rng=SequenceRng([4821, 5932, 7043] * 3),
+                          check_dir=self.check_dir, binaries=(self.release, self.debug), env_files=())
+
+    def settings(self, text):
+        path = self.tmp / "settings.local.yaml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def run(self, capsys, *argv):
+        code = check.main(list(argv), self.deps())
+        out = capsys.readouterr()
+        return code, out.out + out.err
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch, digit_images):
+    return Env(tmp_path, monkeypatch)
+
+
+def lines_of(out):
+    return {line.strip().split(":")[0]: line.strip() for line in out.splitlines() if line.startswith("  ")}
+
+
+def test_all_seven_checks_print_one_line_each_and_pass(env, capsys):
+    code, out = env.run(capsys, "--exe", str(env.exe))
+    item_lines = [line.strip() for line in out.splitlines() if line.startswith("  ")]
+    assert [line.split(":")[0] for line in item_lines] == NAMES
+    assert code == 0, out
+    assert all("실패" not in line for line in item_lines), out
+    assert lines_of(out)["id 유지"].startswith("id 유지: 건너뜀")
+    assert out.splitlines()[-1] == "결과: 실패 0 · 건너뜀 1 · 통과 6"
+
+
+def test_output_holds_no_screen_text_path_setting_value_or_key(env, capsys):
+    env.settings(f"model: {MARK}-model\nexe: {env.exe}\nsystem: marker-system\n")
+    env.environ["OPENAI_BASE_URL"] = f"https://{MARK}.internal/v1"
+    code, out = env.run(capsys)
+    assert code == 0, out
+    for secret in (MARK, "MARKER", str(env.tmp), "marker-system", "internal", "check-1"):
+        assert secret not in out
+
+
+def test_failures_print_codes_only_and_exit_one(env, capsys):
+    env.cli.session_ok = False
+    error = openai.AuthenticationError(
+        f"{MARK} body", response=httpx.Response(401, request=httpx.Request("POST", f"https://{MARK}.x/v1")),
+        body={"error": {"message": f"{MARK} detail"}})
+    env.model.error = error
+    code, out = env.run(capsys, "--exe", str(env.exe))
+    rows = lines_of(out)
+    assert code == 1
+    assert rows["LLM 호출"].startswith("LLM 호출: 실패(AuthenticationError 401)")
+    assert rows["LLM 도구 호출"].startswith("LLM 도구 호출: 건너뜀")
+    assert rows["LLM 그림 입력"].startswith("LLM 그림 입력: 건너뜀")
+    assert rows["앱 관찰"] == "앱 관찰: 실패(SESSION_FAILED)"
+    assert MARK not in out and "MARKER" not in out and "secret" not in out
+
+
+def test_connection_error_without_status_reports_the_class_name(env, capsys):
+    env.model.error = openai.APIConnectionError(request=httpx.Request("POST", f"https://{MARK}.x/v1"))
+    _, out = env.run(capsys, "--skip", "app")
+    assert lines_of(out)["LLM 호출"] == "LLM 호출: 실패(APIConnectionError) (기본 주소)"
+
+
+def test_skip_llm_and_app_print_skipped_and_touch_neither(env, capsys):
+    made = []
+    env.model.client = lambda: made.append(1)
+    code, out = env.run(capsys, "--skip", "llm", "--skip", "app", "--exe", str(env.exe))
+    rows = lines_of(out)
+    for name in NAMES[2:]:
+        assert rows[name] == f"{name}: 건너뜀"
+    assert code == 0
+    assert made == []
+    assert env.cli.command_names() == ["version"]
+
+
+def test_missing_api_key_fails_every_llm_check(env, capsys):
+    del env.environ["OPENAI_API_KEY"]
+    code, out = env.run(capsys, "--skip", "app")
+    assert code == 1
+    for name in ("LLM 호출", "LLM 도구 호출", "LLM 그림 입력"):
+        assert lines_of(out)[name] == f"{name}: 실패(NO_API_KEY)"
+    assert env.model.requests == []
+
+
+def test_llm_requests_carry_only_check_text_and_the_drawn_digits(env, capsys):
+    env.run(capsys, "--skip", "app")
+    assert len(env.model.requests) == 4
+    sent = json.dumps([r["input"] for r in env.model.requests], default=str)
+    assert MARK not in sent
+    images = [image_in(r["input"]) for r in env.model.requests]
+    assert [mode for mode, _ in images] == [None, None, "user_message", "tool_output"]
+    for _, png in images[2:]:
+        assert Image.open(io.BytesIO(png)).size == checks.DIGIT_CANVAS
+        assert image_digits[png].isdigit()
+
+
+def test_requests_use_the_settings_model_and_the_agent_call_shape(env, capsys):
+    path = env.settings("model: company-model\nreasoning_effort: medium\n")
+    env.run(capsys, "--skip", "app", "--settings", str(path))
+    for request in env.model.requests:
+        assert request["model"] == "company-model"
+        assert request["reasoning"] == {"effort": "medium"}
+        assert request["parallel_tool_calls"] is False
+        assert all(tool["strict"] for tool in request["tools"])
+
+
+def test_code_default_model_is_used_without_settings(env, capsys):
+    env.run(capsys, "--skip", "app")
+    assert {r["model"] for r in env.model.requests} == {check.Task.__dataclass_fields__["model"].default}
+
+
+def test_tool_check_fails_when_the_model_does_not_call_the_tool(env, capsys):
+    env.model.calls_tool = False
+    code, out = env.run(capsys, "--skip", "app")
+    assert code == 1
+    assert lines_of(out)["LLM 도구 호출"].startswith("LLM 도구 호출: 실패(NO_TOOL_CALL)")
+
+
+@pytest.mark.parametrize(
+    ("reads", "status", "recommended"),
+    [
+        (("user_message", "tool_output"), "통과", "user_message"),
+        (("tool_output",), "통과", "tool_output"),
+        (("user_message",), "통과", "user_message"),
+        ((), "실패(IMAGE_NOT_READ)", "off"),
+    ],
+)
+def test_image_check_measures_both_forms_and_recommends_one(env, capsys, reads, status, recommended):
+    env.model.reads = set(reads)
+    code, out = env.run(capsys, "--skip", "app")
+    row = lines_of(out)["LLM 그림 입력"]
+    assert row.startswith(f"LLM 그림 입력: {status}")
+    assert row.endswith(f"권장 image_mode: {recommended})")
+    for mode in ("user_message", "tool_output"):
+        assert f"{mode} {'읽음' if mode in reads else '못 읽음'}" in row
+    assert code == (0 if reads else 1)
+
+
+def test_settings_line_names_the_keys_from_the_file_but_not_values(env, capsys):
+    path = env.settings(f"model: {MARK}\nimage_mode: tool_output\n")
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app", "--settings", str(path))
+    assert lines_of(out)["설정"] == "설정: 통과 (설정 파일 읽음 · 설정 파일에서 온 키: model, image_mode)"
+
+
+def test_settings_line_without_a_file(env, capsys):
+    code, out = env.run(capsys, "--skip", "llm", "--skip", "app")
+    assert lines_of(out)["설정"] == "설정: 통과 (설정 파일 없음 · 코드 기본값 사용)"
+    assert code == 0
+
+
+@pytest.mark.parametrize(("content", "code"), [(None, "SETTINGS_MISSING"), ("colour: red\n", "SETTINGS_INVALID")])
+def test_unusable_settings_fail_with_a_code(env, capsys, content, code):
+    path = env.tmp / f"{MARK}.yaml"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    exit_code, out = env.run(capsys, "--skip", "llm", "--skip", "app", "--settings", str(path))
+    assert exit_code == 1
+    assert lines_of(out)["설정"] == f"설정: 실패({code})"
+    assert MARK not in out
+
+
+def test_settings_named_by_the_environment_variable(env, capsys):
+    path = env.tmp / "named.yaml"
+    path.write_text("system: abc\n", encoding="utf-8")
+    env.environ[settings_module.SETTINGS_ENV] = str(path)
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app")
+    assert lines_of(out)["설정"].endswith("설정 파일에서 온 키: system)")
+
+
+@pytest.mark.parametrize("where", ["env", "release", "debug"])
+def test_binary_line_names_where_it_was_found_like_run_py(env, capsys, monkeypatch, where):
+    if where == "env":
+        env.environ["AGENT_DESKTOP_BIN"] = str(env.debug)
+    if where == "release":
+        env.release.parent.mkdir()
+        env.release.write_bytes(b"")
+    kind = {"env": "환경변수", "release": "release", "debug": "debug"}[where]
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app")
+    assert lines_of(out)["바이너리"] == f"바이너리: 통과 ({kind} · 버전 1.2.0)"
+    monkeypatch.setattr(run, "BINARIES", [env.release, env.debug])
+    monkeypatch.setattr(run.os, "environ", env.environ)
+    assert checks.binary_location(env.environ, (env.release, env.debug))[0] == run.find_binary()
+
+
+def test_missing_binary_fails_and_the_app_check_does_not_run(env, capsys):
+    env.debug.unlink()
+    code, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    rows = lines_of(out)
+    assert code == 1
+    assert rows["바이너리"] == "바이너리: 실패(BINARY_MISSING) (debug)"
+    assert rows["앱 관찰"] == "앱 관찰: 실패(BINARY_MISSING)"
+    assert env.cli.calls == []
+
+
+def test_app_line_holds_the_survey_counts_time_capture_and_scale(env, capsys):
+    env.cli.screenshot_result = {"ok": True, "data": {"path": "x", "width": 1896, "height": 2060,
+                                                      "scale_factor": 1.75}}
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    counted = kinds(marked_tree())
+    assert counted["named_ref"] == 1 and counted["unnamed_ref"] == 2 and counted["text"] == 2
+    expected = checks.observation_detail(counted, True, 0.25, {"width": 1896, "height": 2060, "scale_factor": 1.75})
+    assert lines_of(out)["앱 관찰"] == f"앱 관찰: 통과 ({expected})"
+    assert "배율 1.75" in expected and "캡처 1896x2060" in expected and "잘림 없음" in expected
+
+
+def test_app_check_only_reads_and_leaves_the_app_open(env, capsys):
+    env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert set(env.cli.command_names()) <= ALLOWED_COMMANDS
+    assert not any(call[0] == "taskkill" for call in env.cli.calls)
+    launch = env.cli.commands()[env.cli.command_names().index("launch")]
+    assert launch == ["launch", str(env.exe)]
+    snapshot = env.cli.commands()[env.cli.command_names().index("snapshot")]
+    assert snapshot[:3] == ["snapshot", "--window-id", "w-1"]
+
+
+def test_app_window_is_found_by_process_when_launch_reports_none(env, capsys):
+    env.cli.launch_window = False
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert lines_of(out)["앱 관찰"].startswith("앱 관찰: 통과")
+    assert "list-windows" in env.cli.command_names()
+
+
+def test_app_without_a_window_fails_after_waiting(env, capsys):
+    env.cli.launch_window = False
+    env.cli.scene["windows"][0]["visible"] = False
+    code, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert code == 1
+    assert lines_of(out)["앱 관찰"] == "앱 관찰: 실패(NO_WINDOW)"
+    assert "snapshot" not in env.cli.command_names()
+
+
+def test_snapshot_and_screenshot_failures_give_their_cli_codes(env, capsys):
+    env.cli.snapshot_result = {"ok": False, "error": {"code": "TIMEOUT", "message": f"{MARK}"}}
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert lines_of(out)["앱 관찰"].startswith("앱 관찰: 실패(snapshot TIMEOUT)")
+    env.cli.snapshot_result = None
+    env.cli.screenshot_result = {"ok": False, "error": {"code": "ACTION_FAILED", "message": f"{MARK}"}}
+    code, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert code == 1
+    assert lines_of(out)["앱 관찰"].startswith("앱 관찰: 실패(screenshot ACTION_FAILED) (이름 있는 ref 1")
+    assert MARK not in out
+
+
+def test_exe_comes_from_settings_and_is_required(env, capsys):
+    code, out = env.run(capsys, "--skip", "llm")
+    assert code == 1
+    assert lines_of(out)["앱 관찰"] == "앱 관찰: 실패(NO_EXE)"
+    assert lines_of(out)["id 유지"] == "id 유지: 건너뜀 (관찰 없음)"
+    env.settings(f"exe: {env.exe}\n")
+    code, out = env.run(capsys, "--skip", "llm")
+    assert code == 0, out
+    assert ["launch", str(env.exe)] in env.cli.commands()
+
+
+def test_missing_exe_fails_without_launching(env, capsys):
+    code, out = env.run(capsys, "--skip", "llm", "--exe", str(env.tmp / "none.exe"))
+    assert lines_of(out)["앱 관찰"] == "앱 관찰: 실패(EXE_MISSING)"
+    assert "launch" not in env.cli.command_names()
+
+
+def restart(env, pid=101, instance="windows-proc-v1:restarted"):
+    env.cli.launch_process = (pid, instance)
+
+
+def test_ids_are_saved_then_compared_after_the_app_restarts(env, capsys):
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    first = id_keys(marked_tree())
+    assert lines_of(out)["id 유지"] == f"id 유지: 건너뜀 (지난 점검 없음 · 이번 id {len(first)} 저장)"
+    saved = env.check_dir / "target.json"
+    stored = json.loads(saved.read_text(encoding="utf-8"))
+    assert stored["id_keys"] == sorted(first)
+    assert (env.check_dir / ".gitignore").read_text(encoding="utf-8") == "*\n"
+    assert MARK not in saved.read_text(encoding="utf-8")
+
+    restart(env, instance="windows-proc-v1:second")
+    env.cli.scene["tree"] = marked_tree(extra_id="new-id")
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert lines_of(out)["id 유지"] == f"id 유지: 통과 (같은 id {len(first)}/{len(first)} · 새 id 1)"
+
+    restart(env, instance="windows-proc-v1:third")
+    env.cli.scene["tree"] = {"role": "window", "children": []}
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert lines_of(out)["id 유지"] == f"id 유지: 통과 (같은 id 0/{len(first) + 1} · 새 id 0)"
+
+
+def test_same_process_is_skipped_and_keeps_the_saved_ids(env, capsys):
+    env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    saved = env.check_dir / "target.json"
+    before = saved.read_text(encoding="utf-8")
+    env.cli.scene["tree"] = marked_tree(extra_id="new-id")
+    code, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert lines_of(out)["id 유지"] == "id 유지: 건너뜀 (앱을 다시 켜지 않음 · 껐다 켠 뒤 다시 점검)"
+    assert code == 0
+    assert saved.read_text(encoding="utf-8") == before
+
+
+def test_saved_process_mark_is_a_hash_of_pid_and_instance(env, capsys):
+    restart(env, pid=4242, instance="windows-proc-v1:raw-instance")
+    env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    text = (env.check_dir / "target.json").read_text(encoding="utf-8")
+    assert json.loads(text)["process"] == checks.process_mark(4242, "windows-proc-v1:raw-instance")
+    assert "raw-instance" not in text and "4242" not in text
+
+
+def test_reused_pid_with_a_new_instance_counts_as_a_restart(env, capsys):
+    restart(env, pid=7, instance="windows-proc-v1:a")
+    env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    restart(env, pid=7, instance="windows-proc-v1:b")
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert lines_of(out)["id 유지"].startswith("id 유지: 통과 (같은 id")
+
+
+@pytest.mark.parametrize(("second_pid", "expected"), [(7, "건너뜀 (앱을 다시 켜지 않음"), (8, "통과 (같은 id")])
+def test_without_process_instance_the_pid_alone_decides(env, capsys, second_pid, expected):
+    restart(env, pid=7, instance=None)
+    env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    restart(env, pid=second_pid, instance=None)
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert lines_of(out)["id 유지"].startswith(f"id 유지: {expected}")
+
+
+def test_a_saved_file_without_a_process_mark_is_compared(env, capsys):
+    saved = env.check_dir / "target.json"
+    saved.parent.mkdir()
+    saved.write_text(json.dumps({"format": 1, "id_keys": sorted(id_keys(marked_tree()))}), encoding="utf-8")
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert lines_of(out)["id 유지"].startswith("id 유지: 통과 (같은 id 1/1")
+
+
+def test_ids_file_is_named_by_the_settings_system(env, capsys):
+    env.settings(f"exe: {env.exe}\nsystem: plant-a\n")
+    env.run(capsys, "--skip", "llm")
+    assert (env.check_dir / "plant-a.json").is_file()
+
+
+def test_unexpected_error_fails_the_group_with_its_class_name(env, capsys, monkeypatch):
+    def broken(_tree):
+        raise ValueError(MARK)
+
+    monkeypatch.setattr(check, "kinds", broken)
+    code, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert code == 1
+    assert lines_of(out)["앱 관찰"] == "앱 관찰: 실패(INTERNAL ValueError)"
+    assert MARK not in out
+
+
+PROFILES = ["easy", "mes_like", "hard"]
+
+
+def test_three_practice_profiles_give_different_app_lines(env, capsys):
+    paths = [FIXTURES / f"snapshot_virtual_mes_{name}.json" for name in PROFILES]
+    if not all(path.is_file() for path in paths):
+        pytest.skip("profile snapshots are not captured")
+    rows = []
+    for path in paths:
+        env.cli.snapshot_result = json.loads(path.read_text(encoding="utf-8"))
+        _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+        rows.append(lines_of(out)["앱 관찰"].split(" · 잘림")[0])
+    assert len(set(rows)) == 3, rows
+
+
+def test_digit_image_is_a_large_png(tmp_path):
+    path = tmp_path / "d.png"
+    assert checks.digit_image("4821", path) == checks.DIGIT_CANVAS
+    with Image.open(path) as image:
+        assert image.format == "PNG"
+        assert image.convert("L").getextrema()[0] < 50
+
+
+def test_llm_error_code_takes_the_status_from_the_response():
+    class Fails(Exception):
+        response = SimpleNamespace(status_code=503)
+
+    assert checks.llm_error_code(Fails("body")) == "Fails 503"
+    assert checks.llm_error_code(ValueError("x")) == "ValueError"
+
+
+def test_saved_ids_that_cannot_be_read_count_as_none(tmp_path):
+    path = tmp_path / "s.json"
+    assert checks.load_ids(path) is None
+    path.write_text("{", encoding="utf-8")
+    assert checks.load_ids(path) is None
+    path.write_text('{"id_keys": "x"}', encoding="utf-8")
+    assert checks.load_ids(path) is None

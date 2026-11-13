@@ -68,6 +68,7 @@ const state = {
   chatShown: null,
   jumpedQuestion: null,
   baseTitle: "",
+  summaryLines: null,
 };
 const POLL_MS = 1000;
 const LEVEL_LABELS = ["0 · 커서 안 씀", "1 · 값 입력·키", "2 · 마우스·타이핑", "3 · 전체"];
@@ -610,14 +611,18 @@ async function fetchRunSummary(runId) {
 }
 
 async function selectRun(runId, kind = "run") {
-  if (runId !== state.runId || kind !== state.runKind) {
+  const changed = runId !== state.runId || kind !== state.runKind;
+  if (changed) {
     releaseFrames();
     state.pin = null;
     state.chatShown = null;
     state.composerKey = null;
+    state.summaryLines = null;
+    $("copy-status").textContent = "";
   }
   state.runId = runId;
   state.runKind = kind;
+  renderSummaryBox();
   if (!document.body.classList.contains("knowledge-mode")) {
     history.replaceState(null, "", `${location.pathname}#${kind === "legacy" ? "legacy" : "run"}=${encodeURIComponent(runId)}`);
   }
@@ -645,6 +650,66 @@ async function selectRun(runId, kind = "run") {
   state.view = "before";
   if (!isLive()) select(0);
   else if (!followPendingQuestion()) followLatest();
+  loadRunSummaryText(runId);
+}
+
+async function loadRunSummaryText(runId) {
+  if (state.exportMode || state.runKind !== "run" || !runId) return;
+  let lines = null;
+  try {
+    const data = await (await api(`/api/runs/${encodeURIComponent(runId)}/summary`)).json();
+    lines = Array.isArray(data.lines) ? data.lines.filter((line) => typeof line === "string") : null;
+  } catch (_) {
+    lines = null;
+  }
+  if (runId !== state.runId || state.runKind !== "run") return;
+  state.summaryLines = lines;
+  renderSummaryBox();
+}
+
+function renderSummaryBox() {
+  const lines = !state.exportMode && state.runKind === "run" ? state.summaryLines : null;
+  const box = $("summary-box");
+  box.hidden = !lines || lines.length === 0;
+  if (box.hidden) return;
+  $("summary-text").textContent = lines.join("\n");
+}
+
+function toggleSummary() {
+  const text = $("summary-text");
+  text.hidden = !text.hidden;
+  const button = $("toggle-summary");
+  button.setAttribute("aria-expanded", String(!text.hidden));
+  button.textContent = text.hidden ? "실행 요약 보기" : "실행 요약 접기";
+}
+
+async function copySummary() {
+  const lines = state.summaryLines || [];
+  if (lines.length === 0) return;
+  const text = lines.join("\n");
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    copied = true;
+  } catch (_) {
+    copied = copyBySelection(text);
+  }
+  $("copy-status").textContent = copied ? "복사했습니다" : "복사하지 못했습니다. 요약을 펼쳐 직접 선택해 복사하세요";
+}
+
+function copyBySelection(text) {
+  const area = el("textarea", { className: "offscreen-copy", attrs: { readonly: "", "aria-hidden": "true", tabindex: "-1" } });
+  area.value = text;
+  document.body.append(area);
+  area.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (_) {
+    copied = false;
+  }
+  area.remove();
+  return copied;
 }
 
 async function openLegacy(runId) {
@@ -675,6 +740,7 @@ async function refreshSelectedRun() {
   const runId = state.runId;
   const summary = await fetchRunSummary(runId);
   if (runId === state.runId && state.runKind === "run") state.run = summary;
+  await loadRunSummaryText(runId);
 }
 
 function rebuildEntries() {
@@ -1295,6 +1361,7 @@ function renderStartForm() {
   if (form.hidden) return;
   $("exe").placeholder = status.default_exe || "실행 파일의 절대 경로";
   $("exe").required = !status.default_exe;
+  $("system").placeholder = status.default_system ? `비우면 ${status.default_system} (설정 파일)` : "비우면 실행 파일 이름";
   const busy = Boolean(status.active);
   $("start-run").disabled = busy;
   if (busy) $("start-status").textContent = `실행 중: ${status.active}`;
@@ -1535,6 +1602,8 @@ function start() {
   state.baseTitle = document.title;
   $("refresh-runs").addEventListener("click", () => { loadRuns(); loadStatus(); });
   $("start-form").addEventListener("submit", submitRun);
+  $("toggle-summary").addEventListener("click", toggleSummary);
+  $("copy-summary").addEventListener("click", copySummary);
   document.addEventListener("keydown", onKey);
   new ResizeObserver(positionLabels).observe($("stage"));
   fillLevels();

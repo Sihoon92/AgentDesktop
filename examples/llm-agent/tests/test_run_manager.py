@@ -267,13 +267,55 @@ def test_runs_started_from_the_viewer_say_so_in_their_meta(tmp_path, monkeypatch
             super().__init__(runs_dir, desktop, meta, *args, **kwargs)
 
     monkeypatch.setattr(run_manager_module, "RunRecorder", WatchedRecorder)
+    monkeypatch.setattr(run_manager_module, "current_code", lambda: "abc1234")
     manager, exe = make_manager(tmp_path, launch_then_finish())
 
-    manager.start("설정을 열어줘", None, 3)
+    run_id = manager.start("설정을 열어줘", None, 3)
     manager.join(timeout=5)
 
     assert seen == [{"goal": "설정을 열어줘", "exe": str(exe), "model": seen[0]["model"], "permission_level": 3,
-                     "started_by": "viewer", "system": "app"}]
+                     "max_steps": 40, "started_by": "viewer", "system": "app", "code": "abc1234"}]
+    assert run_json(tmp_path, run_id)["code"] == "abc1234"
+
+
+def test_a_finished_viewer_run_leaves_its_summary(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_manager_module, "current_code", lambda: "abc1234")
+    manager, _ = make_manager(tmp_path, launch_then_finish())
+
+    run_id = manager.start("설정을 열어줘", None, 3)
+    manager.join(timeout=5)
+
+    written = (tmp_path / "runs" / run_id / "summary.txt").read_text(encoding="utf-8").splitlines()
+    final = run_json(tmp_path, run_id)
+    verdict = f"  판정: {final['status']} · 스텝 {final['steps']}/40 · 토큰 {final['tokens']}"
+    assert written[:3] == ["요약 (화면 내용 없음)", "  코드: abc1234", verdict]
+    assert "설정을 열어줘" not in "\n".join(written)
+
+
+def test_a_failing_summary_changes_neither_the_result_nor_the_free_slot(tmp_path, monkeypatch):
+    def broken(_path):
+        raise RuntimeError("summary is broken")
+
+    monkeypatch.setattr(run_manager_module, "write_summary", broken)
+    manager, _ = make_manager(tmp_path, launch_then_finish())
+
+    run_id = manager.start("설정을 열어줘", None, 3)
+    manager.join(timeout=5)
+
+    assert manager.active() is None
+    assert run_json(tmp_path, run_id)["status"] == "gave_up"
+    assert not (tmp_path / "runs" / run_id / "summary.txt").exists()
+    manager._model_factory = lambda _task: launch_then_finish()
+    assert manager.start("다시", None, 3) != run_id
+    manager.join(timeout=5)
+
+
+def test_default_system_is_the_settings_system_or_none(tmp_path):
+    with_setting, _ = make_manager(tmp_path, launch_then_finish(), task_defaults={"system": "mes"})
+    without, _ = make_manager(tmp_path, launch_then_finish())
+
+    assert with_setting.default_system == "mes"
+    assert without.default_system is None
 
 
 @pytest.mark.parametrize("broken", ["toolbox", "gate"])
@@ -301,6 +343,7 @@ def test_a_factory_failing_after_the_recorder_stops_its_heartbeat_and_frees_the_
     assert not recorder._heartbeat_thread.is_alive()
     assert manager.active() is None
     assert run_json(tmp_path, recorder.run_id)["status"] == "stopped"
+    assert (recorder.path / "summary.txt").read_text(encoding="utf-8").splitlines()[2].startswith("  판정: stopped")
 
 
 class WatchedAskGate(AskGate):
@@ -471,6 +514,18 @@ def wait_for_event(tmp_path, run_id, kind, count=1, timeout=5):
     raise AssertionError(f"no {kind} event #{count} in {run_id}")
 
 
+def answer_once_waiting(manager, run_id, question_id, text, timeout=5, **answer):
+    """Answers once the run's ask gate holds the question. The run writes the question event just
+    before its gate starts waiting, so an answer sent the moment the event shows can come first."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        gate = manager._ask_gate
+        if gate is not None and gate.waiting(question_id):
+            return manager.answer(run_id, question_id, text, **answer)
+        time.sleep(0.01)
+    raise AssertionError(f"{question_id} never waited for an answer in {run_id}")
+
+
 def stuck_question():
     return {"kind": "stuck", "text": "무엇을 눌러야 하나요?", "proposed": None, "basis": [],
             "candidates": [{"label": "라인 오른쪽", "mark": 3, "capture": None, "x": None, "y": None}]}
@@ -527,10 +582,10 @@ def test_question_from_the_run_is_answered_through_the_manager(tmp_path, monkeyp
     run_id = manager.start("목록을 열어줘", None, 2)
     question = wait_for_event(tmp_path, run_id, "question")
     assert manager.can_answer() is True
-    assert manager.answer(run_id, question["id"], "1번") is True
+    assert answer_once_waiting(manager, run_id, question["id"], "1번") is True
     completion = wait_for_event(tmp_path, run_id, "question", count=2)
     assert completion["kind"] == "completion"
-    assert manager.answer(run_id, completion["id"], "", accepted=True) is True
+    assert answer_once_waiting(manager, run_id, completion["id"], "", accepted=True) is True
     manager.join(timeout=5)
 
     events = run_events(tmp_path, run_id)
@@ -593,3 +648,76 @@ def test_knowledge_folder_defaults_like_run_py(tmp_path, monkeypatch):
     manager.join(timeout=5)
 
     assert [call["knowledge"].folder for call in spy.calls] == [DEFAULT_ROOT / "app", (tmp_path / "from-env" / "app").resolve()]
+
+
+def test_task_defaults_from_the_settings_shape_every_new_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_manager_module, "run_agent", lambda *args, **kwargs: RunResult("gave_up", 0, "test"))
+    defaults = {"model": "house-model", "reasoning_effort": "high", "image_mode": "off", "system": "공정",
+                "knowledge_dir": str(tmp_path / "from-settings"), "exe": "C:/elsewhere/Other.exe"}
+    models = []
+    manager, spy = spy_manager(tmp_path, GatedModel(), task_defaults=defaults)
+    manager._model_factory = lambda task: models.append((task.model, task.reasoning_effort)) or GatedModel()
+
+    run_id = manager.start("열어줘", None, 2)
+    manager.join(timeout=5)
+
+    [call] = spy.calls
+    assert models == [("house-model", "high")]
+    assert call["task"].image_mode == "off"
+    assert call["task"].exe == manager.default_exe
+    assert call["knowledge"].folder == tmp_path / "from-settings" / "공정"
+    assert (run_json(tmp_path, run_id)["model"], run_json(tmp_path, run_id)["system"]) == ("house-model", "공정")
+
+
+def test_the_form_system_and_knowledge_dir_argument_beat_the_task_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_manager_module, "run_agent", lambda *args, **kwargs: RunResult("gave_up", 0, "test"))
+    defaults = {"system": "공정", "knowledge_dir": str(tmp_path / "from-settings")}
+    manager, spy = spy_manager(tmp_path, GatedModel(), task_defaults=defaults, knowledge_dir=tmp_path / "arg")
+
+    manager.start("열어줘", None, 2, system="mes")
+    manager.join(timeout=5)
+
+    assert spy.calls[0]["knowledge"].folder == tmp_path / "arg" / "mes"
+
+
+def test_without_task_defaults_new_runs_keep_the_code_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_manager_module, "run_agent", lambda *args, **kwargs: RunResult("gave_up", 0, "test"))
+    manager, spy = spy_manager(tmp_path, GatedModel())
+
+    manager.start("열어줘", None, 2)
+    manager.join(timeout=5)
+
+    assert spy.calls[0]["task"].model == "gpt-6.1-terra"
+
+
+def test_viewer_meta_carries_the_task_step_limit(tmp_path, monkeypatch):
+    seen = []
+
+    class WatchedRecorder(run_manager_module.RunRecorder):
+        def __init__(self, runs_dir, desktop, meta, *args, **kwargs):
+            seen.append(dict(meta))
+            super().__init__(runs_dir, desktop, meta, *args, **kwargs)
+
+    monkeypatch.setattr(run_manager_module, "RunRecorder", WatchedRecorder)
+    monkeypatch.setattr(run_manager_module, "run_agent", lambda *args, **kwargs: RunResult("gave_up", 3, "test"))
+    manager, spy = spy_manager(tmp_path, GatedModel())
+
+    run_id = manager.start("열어줘", None, 2)
+    manager.join(timeout=5)
+
+    assert [meta["max_steps"] for meta in seen] == [spy.calls[0]["task"].max_steps] == [40]
+    assert run_json(tmp_path, run_id)["max_steps"] == 40
+
+
+def test_the_run_list_reads_a_run_json_that_holds_the_step_limit(tmp_path):
+    from viewer.history import RunIndex
+
+    folder = tmp_path / "runs" / "20261114-010203"
+    folder.mkdir(parents=True)
+    (folder / "run.json").write_text(json.dumps({"format": 2, "run_id": folder.name, "status": "gave_up", "steps": 3,
+                                                 "max_steps": 40, "model": "m"}), encoding="utf-8")
+
+    summary = RunIndex(tmp_path / "runs").run(folder.name)
+
+    assert (summary["status"], summary["steps"], summary["model"]) == ("gave_up", 3, "m")
+    assert not summary["newer_format"]

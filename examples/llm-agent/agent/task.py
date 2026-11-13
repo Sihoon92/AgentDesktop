@@ -33,21 +33,25 @@ class Task:
 ARGS_MAX_STEPS = 40
 OPTIONAL_KEYS = ("max_steps", "token_budget", "model", "reasoning_effort", "baseline_target",
                  "system", "knowledge_dir", "image_mode", "ask_timeout_s", "mismatch_limit")
+DEFAULT_KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "system")
 
 
-def task_from_args(goal, exe, permission_level=3):
+def task_from_args(goal, exe, permission_level=3, defaults=None):
     """A one-off instruction with no success conditions; the harness cannot verify it alone.
 
     It gets more steps than a task file's default, because observing, looking at captures and
-    asking add turns that a scripted task does not need."""
+    asking add turns that a scripted task does not need. `defaults` (the settings file) supplies
+    the DEFAULT_KEYS in place of the code defaults."""
     if not PureWindowsPath(exe).is_absolute():
         raise TaskError("exe must be an absolute path")
-    return Task(goal, exe, permission_level, [], max_steps=ARGS_MAX_STEPS)
+    optional = _defaults(defaults)
+    _check_optional(optional)
+    return Task(goal, exe, permission_level, [], max_steps=ARGS_MAX_STEPS, **optional)
 
 
-def load_task(path):
+def load_task(path, defaults=None):
     """Reads a task file. success is optional: without it the run is judged by learned
-    completion entries or by a person."""
+    completion entries or by a person. A key the file sets beats the same key in `defaults`."""
     raw = yaml.safe_load(open(path, encoding="utf-8").read()) or {}
     for key in ("goal", "exe", "permission_level"):
         if key not in raw:
@@ -62,9 +66,14 @@ def load_task(path):
         require = (raw["success"] or {}).get("require")
         if not require:
             raise TaskError("success.require must list at least one element")
-    optional = {key: raw[key] for key in OPTIONAL_KEYS if key in raw}
+    optional = {**_defaults(defaults), **{key: raw[key] for key in OPTIONAL_KEYS if key in raw}}
     _check_optional(optional)
     return Task(raw["goal"], raw["exe"], level, require, **optional)
+
+
+def _defaults(defaults):
+    defaults = defaults or {}
+    return {key: defaults[key] for key in DEFAULT_KEYS if defaults.get(key) is not None}
 
 
 def _check_optional(optional):
@@ -74,6 +83,6 @@ def _check_optional(optional):
         value = optional.get(key, 1)
         if type(value) is not int or value < 1:
             raise TaskError(f"{key} must be a whole number of at least 1")
-    for key in ("system", "knowledge_dir"):
+    for key in ("model", "reasoning_effort", "system", "knowledge_dir"):
         if key in optional and not isinstance(optional[key], str):
             raise TaskError(f"{key} must be text")

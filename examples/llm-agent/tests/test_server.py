@@ -394,7 +394,7 @@ def test_status_reports_the_active_run_and_default_exe(tmp_path):
         manager.join(timeout=5)
 
     assert json.loads(idle) == {"can_start": True, "active": None, "default_exe": str(exe),
-                                 "can_answer": False}
+                                 "can_answer": False, "default_system": None}
     assert json.loads(busy)["active"] == started["run_id"]
 
 
@@ -404,7 +404,8 @@ def test_status_without_a_run_manager_says_runs_cannot_start(server):
     status, _, body = request(instance, "/api/status")
 
     assert status == 200
-    assert json.loads(body) == {"can_start": False, "active": None, "default_exe": None, "can_answer": False}
+    assert json.loads(body) == {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
+                                "default_system": None}
 
 
 def test_favicon_request_is_answered_without_a_404(server):
@@ -1384,8 +1385,48 @@ def test_status_reports_can_answer(tmp_path, server):
     assert json.loads(busy)["can_answer"] is True
 
 
+def test_status_names_the_settings_system_that_an_empty_form_falls_back_to(tmp_path):
+    manager, _ = make_manager(tmp_path, GatedModel(), task_defaults={"system": "mes"})
+    with serving(tmp_path / "runs", manager) as instance:
+        _, _, body = request(instance, "/api/status")
+
+    assert json.loads(body)["default_system"] == "mes"
+
+
 QUESTIONS_FIXTURE = Path(__file__).parent / "fixtures" / "run_questions"
 QUESTIONS_RUN = "20261113-101500"
+
+
+def test_summary_of_a_recorded_run_has_no_screen_content(tmp_path):
+    runs_dir = tmp_path / "runs"
+    shutil.copytree(QUESTIONS_FIXTURE, runs_dir / QUESTIONS_RUN)
+    with serving(runs_dir) as instance:
+        status, content_type, body = request(instance, f"/api/runs/{QUESTIONS_RUN}/summary")
+
+    lines = json.loads(body)["lines"]
+    assert status == 200 and content_type.startswith("application/json")
+    assert lines[0] == "요약 (화면 내용 없음)" and lines[2] == "  판정: confirmed · 스텝 8 · 토큰 15200"
+    assert not any(word in "\n".join(lines) for word in ("극판", "WA1", "맞아", "VirtualMes"))
+
+
+def test_summary_of_a_run_whose_process_is_gone_says_interrupted(server):
+    instance, runs_dir = server
+    write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z", [{"type": "model", "step": 1, "tokens": 9}])
+
+    _, _, body = request(instance, "/api/runs/20261107-120000/summary")
+
+    assert json.loads(body)["lines"][2] == "  판정: interrupted · 스텝 1 · 토큰 9"
+
+
+def test_summary_of_an_unknown_run_is_404_and_needs_the_token(server):
+    instance, runs_dir = server
+    write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z")
+
+    missing, _, _ = request(instance, "/api/runs/20261107-130000/summary")
+    odd, _, _ = request(instance, "/api/runs/..%2F..%2Fx/summary")
+    no_token, _, _ = request(instance, "/api/runs/20261107-120000/summary", {"X-Agent-Token": None})
+
+    assert (missing, odd, no_token) == (404, 404, 403)
 
 
 @pytest.fixture

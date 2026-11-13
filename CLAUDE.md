@@ -84,6 +84,8 @@ python view.py --exe "<절대경로>"                              # 단계 뷰�
 python view.py --open latest                                # 지난 실행 바로 열기(run.py가 돌지 않아도 됨)
 python view.py --prune --older-than 30d [--yes]              # 오래된 기록 정리, --yes 없으면 출력만
 python view.py --export <run_id|latest> <out.html>           # 실행 하나를 서버 없이 열리는 HTML로
+python view.py --summary <run_id|latest>                     # 화면 내용 없는 실행 요약(수와 코드만)
+python check.py [--exe "<절대경로>"] [--skip llm|app]         # 바이너리, 설정, LLM, 대상 앱 점검. app은 창을 띄움
 ```
 
 **가상 MES 앱:** `examples/llm-agent/virtual-mes/`는 CUA 개발용 연습 앱입니다(`virtual-mes/README.md`). `powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1`로 빌드합니다. `tests\test_virtual_mes.py`는 창을 띄우지 않습니다. `tests\test_virtual_mes_live.py`와 `tests\test_scenes_live.py`는 `VIRTUAL_MES_LIVE=1`일 때만 돌고 실제 창을 띄우며 커서를 움직이므로, 돌리기 전에 사용자에게 확인받습니다.
@@ -93,5 +95,7 @@ python view.py --export <run_id|latest> <out.html>           # 실행 하나를 
 `run.py`가 작업 파일과 CLI 바이너리를 찾아 `agent/loop.py`의 루프를 돌립니다. 모델은 `agent/tools.py`의 도구로만 앱을 조작하고, 쓸 수 있는 도구는 작업 파일의 `permission_level`로 제한되며, `agent/guard.py`가 반복 동작을 막습니다. 성공 여부는 모델이 아니라 하니스(`agent/verify.py`)가 작업 파일의 `success` 조건으로 판단합니다. 조건이 없으면 지식의 완료 조건(`agent/completion.py`)이나 사람의 확인으로 판정합니다. 바이너리는 `AGENT_DESKTOP_BIN`, `target/release`, `target/debug` 순으로 찾습니다.
 
 **묻기와 배우기:** 좌표를 직접 고른 클릭, 표에서 후보가 여럿인 셀, 기대와 다른 결과가 이어진 뒤에는 하니스(`agent/policy.py`)가 사람에게 묻게 합니다. 승인한 답은 `knowledge\<시스템>\`에 YAML로 쌓이고(`agent/knowledge.py`, Git 제외) 다음 실행의 모델에게 주어집니다. 앱마다 다른 것은 이 지식 파일에만 둡니다. `agent/`와 `viewer/`의 코드에 앱 이름이나 화면의 글을 넣으면 `tests\test_application_agnostic.py`가 실패합니다. 설계는 `examples/llm-agent/docs/specs/2026-11-13-observe-ask-learn-design.md`에 있습니다.
+
+**회사 반입 도구:** PC마다 다른 값(모델 이름, `image_mode`, 지식 폴더, 대상 앱 경로)은 Git에서 제외된 `settings.local.yaml`에 둡니다(`agent/settings.py`, 예시는 `settings.example.yaml`). `check.py`는 실행 전 환경을 점검하고, 실행 끝의 요약(`agent/summary.py`)은 수와 코드만 담아 회사 실행 결과를 말로 전할 때 씁니다. 요약과 점검 출력에 화면의 글, 요소 이름, 경로, 설정 값을 넣지 않습니다. `check.py`의 앱 관찰은 창을 띄우므로 돌리기 전에 사용자에게 확인받습니다.
 
 **사내 배포:** 내부 OpenAI 호환 LLM을 `OPENAI_BASE_URL`로 쓸 계획입니다. 이 예제는 Chat Completions가 아니라 **Responses API**를 호출하며(`agent/llm.py`), 내부 API도 이를 지원한다고 사용자가 확인했습니다. `scripts/jev/`는 외부 결정 API로 화면 내용을 보내고 OpenAI 형식도 아니므로 사내에서 쓰지 않습니다.

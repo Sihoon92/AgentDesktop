@@ -340,6 +340,12 @@ pre {
 }
 .observation { margin-top: 14px; }
 .observation summary { cursor: pointer; color: var(--muted); margin-bottom: 6px; }
+.summary-box { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.summary-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.summary-head .summary-note { color: var(--muted); font-size: 11px; flex-basis: 100%; }
+.copy-status { color: var(--muted); font-size: 12px; }
+.summary-text { margin-top: 8px; max-width: 100%; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+.offscreen-copy { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
 .timeline-bar {
   border-top: 1px solid var(--border);

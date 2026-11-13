@@ -6,6 +6,7 @@ completion checks, and the exchanges (question, answer, actions after it) that r
 turns into new entries. Exchanges never hold coordinates.
 """
 
+import inspect
 import re
 
 from agent import capture as capturing
@@ -68,8 +69,7 @@ class AskingTools:
         question_id = f"q{self._question_count}"
         question = {"candidates": [], "proposed": None, "basis": [], "items": [], "window_id": None,
                     "text": "", **question, "type": "question", "id": question_id, "step": self.step}
-        self._emit(question)
-        answer = self.asker.ask(question) if self.asker is not None else NO_ANSWER
+        answer = self._asked(question)
         pin_element = self._pinned_element(answer.pin)
         self._emit({
             "type": "answer", "id": question_id, "text": answer.text,
@@ -80,6 +80,28 @@ class AskingTools:
         })
         if answer.timed_out:
             raise AgentStopped(f"No answer to question {question_id}, so the run stopped")
+        return answer
+
+    def _asked(self, question):
+        """Records the question and returns the asker's answer. An asker whose ask() takes
+        on_waiting (the viewer's gate) records it only once the question can be answered, so a
+        question seen in the record is never refused; any other asker sees it already recorded."""
+        recorded = []
+
+        def record():
+            if not recorded:
+                recorded.append(True)
+                self._emit(question)
+
+        if self.asker is None:
+            record()
+            return NO_ANSWER
+        if _takes_on_waiting(self.asker):
+            answer = self.asker.ask(question, on_waiting=record)
+        else:
+            record()
+            answer = self.asker.ask(question)
+        record()
         return answer
 
     def briefing(self):
@@ -323,3 +345,12 @@ def _identity(element):
     if not element or not element.get("role"):
         return None
     return {"role": element.get("role"), "name": element.get("name")}
+
+
+def _takes_on_waiting(asker):
+    """True when the asker's ask() accepts on_waiting, the callback the viewer's gate runs once a
+    question can be answered. TerminalAsker, NoAsker and other one-argument askers do not."""
+    try:
+        return "on_waiting" in inspect.signature(asker.ask).parameters
+    except (TypeError, ValueError):
+        return False

@@ -6,6 +6,7 @@ before a run folder exists, and a run that crashes still ends with a final statu
 A run started with approval holds each app-changing action until decide() answers it.
 Every run gets an ask gate, so a question from the agent waits until answer() replies, and the
 knowledge store of its system, so a confirmed run can register what the person taught it.
+Every run that ends leaves summary.txt in its folder, as a run.py run does.
 """
 
 import functools
@@ -19,6 +20,7 @@ from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, syst
 from agent.loop import RunResult, run_agent
 from agent.recorder import RunRecorder
 from agent.registration import register_after_run
+from agent.summary import current_code, write_summary
 from agent.task import TaskError, task_from_args
 from agent.tools import Toolbox
 
@@ -44,9 +46,19 @@ def default_toolbox(desktop, task, confirm, observer, asker, knowledge, captures
                    captures_dir=captures_dir)
 
 
+def _leave_summary(run_dir):
+    """Writes summary.txt; nothing about it may change the run's result or free slot."""
+    try:
+        write_summary(run_dir)
+    except Exception:
+        pass
+
+
 class RunManager:
     def __init__(self, runs_dir, binary, default_exe, model_factory, toolbox_factory=default_toolbox,
-                 desktop_factory=None, gate_factory=ApprovalGate, ask_gate_factory=AskGate, knowledge_dir=None):
+                 desktop_factory=None, gate_factory=ApprovalGate, ask_gate_factory=AskGate, knowledge_dir=None,
+                 task_defaults=None):
+        """task_defaults are the settings file's values that every new run's task starts from."""
         self.runs_dir = Path(runs_dir)
         self.binary = str(binary)
         self.default_exe = default_exe
@@ -56,6 +68,7 @@ class RunManager:
         self._gate_factory = gate_factory
         self._ask_gate_factory = ask_gate_factory
         self._knowledge_dir = knowledge_dir
+        self._task_defaults = dict(task_defaults or {})
         self._lock = threading.Lock()
         self._active = None
         self._gate = None
@@ -65,6 +78,11 @@ class RunManager:
     def active(self):
         with self._lock:
             return self._active
+
+    @property
+    def default_system(self):
+        """The settings file's system name that a form left empty falls back to, or None."""
+        return self._task_defaults.get("system") or None
 
     def decide(self, run_id, proposal_id, approved, comment=""):
         """Answers a proposal of the active run. False when the run is not active, it was
@@ -98,7 +116,7 @@ class RunManager:
         task = self.build_task(goal, exe, level)
         if type(approve) is not bool:
             raise InvalidRun("approve는 true 또는 false여야 합니다")
-        system = self.build_system(system, task.exe)
+        system = self.build_system(system, task.exe, task.system)
         with self._lock:
             if self._active is not None:
                 raise RunBusy(f"실행 중인 작업이 있습니다: {self._active}")
@@ -121,6 +139,7 @@ class RunManager:
             register = functools.partial(register_after_run, store=store, run_id=recorder.run_id)
         except Exception as error:
             recorder.finish(RunResult("stopped", 0, f"실행을 시작하지 못했습니다: {error}"))
+            _leave_summary(recorder.path)
             self._release()
             raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
         with self._lock:
@@ -153,15 +172,16 @@ class RunManager:
         if type(level) is not int or not 0 <= level <= 3:
             raise InvalidRun("권한 단계는 0부터 3까지의 정수여야 합니다")
         try:
-            return task_from_args(goal.strip(), exe, level)
+            return task_from_args(goal.strip(), exe, level, defaults=self._task_defaults)
         except TaskError as error:
             raise InvalidRun(str(error)) from error
 
-    def build_system(self, system, exe):
+    def build_system(self, system, exe, fallback=None):
+        """The form's system name, else `fallback` (the settings file's), else the exe name."""
         if system is not None and not isinstance(system, str):
             raise InvalidRun("시스템 이름은 글이어야 합니다")
         try:
-            return system_name((system or "").strip() or None, exe)
+            return system_name((system or "").strip() or fallback, exe)
         except KnowledgeError as error:
             raise InvalidRun("시스템 이름은 영문, 숫자, 한글, '.', '_', '-'로 64자까지 쓸 수 있습니다") from error
 
@@ -173,6 +193,7 @@ class RunManager:
         try:
             recorder.finish(result)
         finally:
+            _leave_summary(recorder.path)
             self._release()
 
     def _release(self):
@@ -187,8 +208,10 @@ class RunManager:
             "exe": task.exe,
             "model": task.model,
             "permission_level": task.permission_level,
+            "max_steps": task.max_steps,
             "started_by": "viewer",
             "system": system,
+            "code": current_code(),
         }
 
     def _new_session(self):

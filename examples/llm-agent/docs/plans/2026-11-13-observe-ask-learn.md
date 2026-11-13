@@ -98,7 +98,7 @@ NO_ANSWER = Answer(timed_out=True)
 
 class AskGate:                      # 뷰어용. interactive = True
     def __init__(self, timeout_s=1800, clock=time.monotonic): ...
-    def ask(self, question: dict) -> Answer: ...            # 답이나 시간 초과까지 기다림
+    def ask(self, question: dict, on_waiting=None) -> Answer: ...   # 답이나 시간 초과까지 기다림. on_waiting은 답을 받을 수 있게 된 직후 한 번 불림(질문을 기록하는 자리)
     def answer(self, question_id: str, answer: Answer) -> bool: ...   # 모르는 id, 이미 답한 id는 False
     def waiting(self, question_id: str) -> bool: ...        # 질문이 떠 있고 아직 답이 없으면 True
 

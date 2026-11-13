@@ -94,6 +94,48 @@ def test_answer_from_another_thread_releases_the_question():
     helper.join(timeout=5)
 
 
+def test_on_waiting_runs_once_the_question_can_be_answered():
+    gate = AskGate(timeout_s=5)
+    seen = []
+
+    def on_waiting():
+        seen.append(gate.waiting("q1"))
+        seen.append(gate.answer("q1", Answer(text="바로")))
+
+    answer = gate.ask({"id": "q1", "kind": "stuck", "text": "?"}, on_waiting=on_waiting)
+
+    assert seen == [True, True]
+    assert answer == Answer(text="바로")
+    assert gate.waiting("q1") is False
+
+
+def test_on_waiting_does_not_hold_the_gate_lock():
+    gate = AskGate(timeout_s=5)
+    answered = []
+    during_callback = []
+
+    def on_waiting():
+        helper = threading.Thread(target=lambda: answered.append(gate.answer("q1", Answer(text="다른 스레드"))))
+        helper.start()
+        helper.join(timeout=1)
+        during_callback.extend(answered)
+
+    assert gate.ask({"id": "q1", "kind": "stuck", "text": "?"}, on_waiting=on_waiting).text == "다른 스레드"
+    assert during_callback == [True]
+
+
+def test_a_failing_on_waiting_leaves_no_question_waiting():
+    gate = AskGate(timeout_s=5)
+
+    def broken():
+        raise RuntimeError("recording failed")
+
+    with pytest.raises(RuntimeError):
+        gate.ask({"id": "q1", "kind": "stuck", "text": "?"}, on_waiting=broken)
+    assert gate.waiting("q1") is False
+    assert gate.answer("q1", Answer(text="늦음")) is False
+
+
 def test_answer_keeps_the_pin_and_the_completion_fields():
     gate = AskGate(timeout_s=5)
     sent = Answer(text="여기", pin=(1018, 520), accepted=None)

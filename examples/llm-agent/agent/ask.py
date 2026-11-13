@@ -38,10 +38,21 @@ class AskGate:
         self._changed = threading.Condition()
         self._waiting = {}
 
-    def ask(self, question):
+    def ask(self, question, on_waiting=None):
+        """Waits for the answer. `on_waiting` runs once the question can be answered and before
+        the wait, outside the lock: the caller records the question there, so anyone who sees it
+        recorded can answer at once. If it raises, the question stops waiting and the error goes on."""
         question_id = question["id"]
         with self._changed:
             self._waiting[question_id] = _PENDING
+        if on_waiting is not None:
+            try:
+                on_waiting()
+            except BaseException:
+                with self._changed:
+                    self._waiting.pop(question_id, None)
+                raise
+        with self._changed:
             deadline = self._clock() + self._timeout_s
             while self._waiting[question_id] is _PENDING:
                 remaining = deadline - self._clock()
