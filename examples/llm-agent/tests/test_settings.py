@@ -25,7 +25,8 @@ def write(tmp_path, text, name="settings.yaml"):
 def test_contract_names():
     assert SETTINGS_ENV == "AGENT_SETTINGS"
     assert DEFAULT_PATH == HERE / "settings.local.yaml"
-    assert KEYS == ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system")
+    assert KEYS == ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
+                    "plan_reasoning_effort")
 
 
 def test_every_key_is_read(tmp_path):
@@ -191,3 +192,107 @@ def test_local_settings_and_check_folder_are_ignored_by_git():
 
     assert "/settings.local.yaml" in lines
     assert "/.check/" in lines
+
+
+B = "\\"
+PATH_MARK = f"C:{B}Users{B}secret-user{B}VirtualMes.exe"
+
+
+def reason_of(tmp_path, text):
+    with pytest.raises(SettingsError) as caught:
+        load_settings(write(tmp_path, text), environ={})
+    return caught.value
+
+
+def test_unquoted_and_single_quoted_windows_paths_are_read_as_written(tmp_path):
+    for line in (f"exe: {PATH_MARK}\n", f"exe: '{PATH_MARK}'\n"):
+        assert load_settings(write(tmp_path, line), environ={}) == {"exe": PATH_MARK}
+
+
+@pytest.mark.parametrize("folder", [f"D:{B}Users{B}team{B}knowledge", f"'D:{B}Users{B}team{B}knowledge'"])
+def test_unquoted_and_single_quoted_knowledge_dirs_are_read_as_written(tmp_path, folder):
+    loaded = load_settings(write(tmp_path, f"knowledge_dir: {folder}\n"), environ={})
+    assert loaded == {"knowledge_dir": str(Path(f"D:{B}Users{B}team{B}knowledge").resolve())}
+
+
+@pytest.mark.parametrize("line", [f'exe: "{PATH_MARK}"', f'exe: "C:{B}Apps{B}VirtualMes.exe"',
+                                  f'model: m1\nsystem: s\nexe:   "{PATH_MARK}"  '])
+def test_backslash_inside_double_quotes_gets_the_quote_hint_without_the_line(tmp_path, line):
+    error = reason_of(tmp_path, line + "\n")
+    row = line.count("\n") + 1
+    assert f"YAML 형식이 틀렸습니다: {row}행" in str(error)
+    assert settings.QUOTE_HINT in str(error)
+    assert error.reason == f"YAML 형식 오류 {row}행 · 큰따옴표 안의 역슬래시 · {settings.QUOTE_HINT}"
+    assert "secret-user" not in error.reason and "VirtualMes" not in error.reason
+
+
+def test_other_yaml_errors_get_no_quote_hint(tmp_path):
+    error = reason_of(tmp_path, 'model: m1\nexe: "C:/Apps/a.exe" "x"\n')
+    assert error.reason == "YAML 형식 오류 2행"
+    assert settings.QUOTE_HINT not in str(error)
+
+
+def test_double_quoted_backslash_on_another_line_gives_no_hint(tmp_path):
+    error = reason_of(tmp_path, f'exe: "C:{B}{B}Apps{B}{B}a.exe"\nsystem: a: b\n')
+    assert error.reason == "YAML 형식 오류 2행"
+
+
+def test_correctly_escaped_double_quoted_path_is_read(tmp_path):
+    text = f'exe: "C:{B}{B}Apps{B}{B}a.exe"\n'
+    assert load_settings(write(tmp_path, text), environ={}) == {"exe": f"C:{B}Apps{B}a.exe"}
+
+
+@pytest.mark.parametrize("key", ["exe", "knowledge_dir"])
+def test_double_quoted_path_that_yaml_reads_as_control_characters_is_rejected(tmp_path, key):
+    error = reason_of(tmp_path, f'{key}: "C:{B}tools{B}new{B}a-secret.exe"\n')
+    assert error.reason == f"{key} 경로에 제어 문자 · {settings.QUOTE_HINT}"
+    assert settings.QUOTE_HINT in str(error)
+
+
+@pytest.mark.parametrize(("text", "reason"), [
+    ("model: m1\nmodle: secret-key-1\nsecret-key-2: x\n", "모르는 키 2개"),
+    ("image_mode: secret-mode\n", "image_mode 값이 off, user_message, tool_output 중 하나가 아님"),
+    ("exe: secret-tool.exe\n", "exe가 절대 경로가 아님"),
+    ("system: 'secret name'\n", "system 이름 규칙에 맞지 않음"),
+    ("model: [secret]\n", "model 값이 글이 아님"),
+    ("- secret\n", "'키: 값' 줄이 아님"),
+    ("model: m1\nsystem: s\nexe: secret: b\n", "YAML 형식 오류 3행"),
+])
+def test_reason_is_short_and_holds_no_value_or_typed_key(tmp_path, text, reason):
+    error = reason_of(tmp_path, text)
+    assert error.reason == reason
+    assert "secret" not in error.reason and str(tmp_path) not in error.reason
+    assert str(tmp_path) in str(error)
+
+
+def test_reason_for_a_file_that_is_not_utf8_or_missing(tmp_path):
+    path = tmp_path / "settings.yaml"
+    path.write_bytes("model: 모델\n".encode("cp949"))
+    with pytest.raises(SettingsError) as caught:
+        load_settings(path, environ={})
+    assert caught.value.reason == "UTF-8이 아님"
+    with pytest.raises(SettingsError) as caught:
+        load_settings(tmp_path / "absent.yaml", environ={})
+    assert caught.value.reason == "설정 파일 없음"
+
+
+def test_example_file_tells_how_to_write_paths():
+    text = (HERE / "settings.example.yaml").read_text(encoding="utf-8")
+    for key in ("exe", "knowledge_dir"):
+        block = text.split(f"# {key}:")[0].rsplit("\n\n", 1)[-1]
+        assert "따옴표 없이 적습니다. 큰따옴표 안에서는 역슬래시가 특수 문자입니다" in block
+        assert f"#   예) {key}: " in block
+
+
+def test_stage_keys_are_read(tmp_path):
+    loaded = load_settings(write(tmp_path, "stage_call_limit: 5\nplan_reasoning_effort: high\n"), environ={})
+
+    assert loaded == {"stage_call_limit": 5, "plan_reasoning_effort": "high"}
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "eight", "true", "2.5", "'8'"])
+def test_a_stage_call_limit_must_be_a_whole_number_of_at_least_one(tmp_path, value):
+    with pytest.raises(SettingsError) as raised:
+        load_settings(write(tmp_path, f"stage_call_limit: {value}\n"), environ={})
+
+    assert "stage_call_limit" in raised.value.reason and value not in raised.value.reason

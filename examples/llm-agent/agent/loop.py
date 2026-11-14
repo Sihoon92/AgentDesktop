@@ -1,10 +1,19 @@
-"""The observe-act loop between the model and the toolbox."""
+"""The observe-act loop between the model and the toolbox, run stage by stage.
+
+The model splits the goal into stages with `plan` and closes each with `stage_done`; the loop
+keeps the plan (agent.stages) and what the model is sent (agent.history). Each stage has a call
+limit: at the limit the person is asked before the next model call. The run's ceiling (calls or
+tokens) is checked before each call, and reaching it gives the model one last call that offers
+only finish.
+"""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agent.guard import AgentStopped
-from agent.images import image_items
+from agent.history import Transcript
+from agent.results import refused
+from agent.stages import StageError, StagePlan
 from agent.tool_schemas import READ_ONLY_TOOLS
 
 SYSTEM_PROMPT = """\
@@ -16,6 +25,21 @@ Rules:
 - A line that starts with [n] is an element numbered n. The numbers are valid only for the
   observation they appear in, like refs. Elements without a ref have a number too.
 - An element's desc often explains it better than its name.
+- After you launch the target and observe the first screen, call plan to split the goal into
+  stages. Write each stage as a result the screen shows: goal is the state of the screen when the
+  stage is done (not what to press), done_when is what on the screen proves it. Put the values the
+  goal gives (codes, names, dates) into the stage text as given. Tools that change the app, except
+  launch_target, are refused until a plan exists.
+- When the current stage is done, call stage_done with evidence from the latest observation: the
+  marks of elements that show the result, or the capture id of a look when only the picture shows
+  it, and a note on what you saw.
+- If the plan turns out wrong, call plan again with the whole list; repeat the done stages
+  unchanged and change only the rest.
+- Each stage has a call limit. At the limit the user is asked whether to go on, and may tell you
+  how; follow that advice.
+- Earlier observations are left out of what you are sent; observe again when you need something
+  you no longer see. The latest observation stays even after you finish a stage, so when the
+  screen has not changed you do not need to observe again.
 - Prefer semantic tools (toggle, check, uncheck, select, set_value, click). Use press next. Use
   physical tools (type, double_click, right_click, click_part, mouse_*, drag) only when no semantic
   path exists. Use click_part for an element without a ref, or for one end of an element.
@@ -28,6 +52,11 @@ Rules:
 - When expected_met is false, do not repeat the same action. Look at the capture (or call look) and
   try another part: a dropdown that does not open from its middle often opens from the arrow at
   its right end. Two unexpected results in a row block actions until you ask the user.
+- When expected_met is null with verdict "unconfirmed", the observation text did not change but the
+  picture around the target did (effects.picture), for example a check mark the tree does not
+  expose. Look at the attached capture (or call look) to decide whether the expected change
+  happened before you act again. It does not count as an unexpected result. This verdict is never
+  given for a window: window_opened and window_closed are judged from the window list alone.
 - Read disposition after each action. Repeat an action only when disposition.retry is "safe".
   Otherwise decide from the new observation.
 - Find a table cell with find_cells. Decide the usual reading of the user's words yourself (for
@@ -42,11 +71,22 @@ Rules:
   the task, put its id in completion_id.
 - Use restart_target only when the task cannot finish any other way.
 - If the goal is unreachable, call finish with success=false and say why. Never call finish with
-  success=true before the observation shows the goal is met.
+  success=true before the observation shows the goal is met, or while stages are not done.
 """
 COMPLETION_QUESTION = "결과가 맞나요?"
 SUCCESS_STATUSES = ("verified", "confirmed")
 TASK_MET = "작업 파일의 성공 조건을 모두 만족함"
+STAGE_LIMIT_QUESTION = "이 단계에 정한 호출 수를 다 썼으니 계속할지, 방법을 알려 줄지, 중단할지 골라 주세요."
+PLAN_LIMIT_QUESTION = "계획을 고칠 수 있는 횟수를 다 썼으니 더 고치게 할지, 중단할지 골라 주세요."
+CEILING_NOTE = (
+    "The run reached its ceiling of model calls or tokens. Call finish now with your judgement: "
+    "success=true only if the latest observation shows the goal is met, otherwise success=false."
+)
+NEEDS_PLAN = (
+    "Call plan before changing the app: observe the first screen, then split the goal into stages. "
+    "launch_target, reading tools and ask work without a plan."
+)
+STEP_LIMIT = "Step limit reached"
 
 
 @dataclass(frozen=True)
@@ -55,6 +95,7 @@ class RunResult:
     steps: int
     reason: str
     tokens: int = 0
+    stats: dict | None = None
 
 
 class _Approval:
@@ -93,67 +134,243 @@ class _Approval:
 
 def run_agent(model, toolbox, task, log=lambda _event: None, gate=None, register=None):
     """Runs the loop. With a gate, every app-changing call the policy allows waits for
-    gate.review(proposal). A turn whose only calls are ask uses no step. After a verified or
-    confirmed run, register(model, toolbox, log) may save what was learned; its tokens count."""
-    result = _run(model, toolbox, task, log, gate)
+    gate.review(proposal); plan and stage_done never do. A turn whose only calls are ask uses no
+    step. After a verified or confirmed run, register(model, toolbox, log) may save what was
+    learned; its tokens count. The result's stats and toolbox.stage_records hold the stages."""
+    result = _Run(model, toolbox, task, log, gate).run()
     if result.status in SUCCESS_STATUSES and register is not None:
         try:
             spent = register(model, toolbox, log)
         except Exception as error:
             log({"type": "warning", "message": f"등록 중 오류: {type(error).__name__}: {error}"})
         else:
-            result = RunResult(result.status, result.steps, result.reason, result.tokens + (spent or 0))
+            result = replace(result, tokens=result.tokens + (spent or 0))
     return result
 
 
-def _run(model, toolbox, task, log, gate):
-    approval = _Approval(gate, toolbox, log)
-    briefing = toolbox.briefing()
-    goal = f"{task.goal}\n\n{briefing}" if briefing else task.goal
-    items = [{"role": "user", "content": goal}]
-    tokens = 0
-    turn = 0
-    counted = 0
-    while counted < task.max_steps:
-        turn += 1
-        toolbox.step = turn
-        response = model.respond(SYSTEM_PROMPT, items, toolbox.definitions())
-        tokens += response.usage.total_tokens if response.usage else 0
-        log({"type": "model", "step": turn, "tokens": tokens})
-        items += response.output
-        calls = [item for item in response.output if item.type == "function_call"]
-        if not calls:
-            return RunResult("stopped", turn, "The model replied without calling a tool", tokens)
-        if any(call.name != "ask" for call in calls):
-            counted += 1
-        for call in calls:
-            try:
-                ended, output = _execute(call, toolbox, task, approval, turn, log)
-            except AgentStopped as stop:
-                return RunResult("stopped", turn, str(stop), tokens)
-            log({"type": "tool", "step": turn, "tool": call.name, "arguments": call.arguments, "result": output})
-            if ended:
-                return RunResult(output["status"], turn, output["reason"], tokens)
-            items += image_items(call.call_id, output, toolbox.take_attachments(), task.image_mode)
-        if tokens >= task.token_budget:
-            return RunResult("stopped", turn, f"Token budget used: {tokens}", tokens)
-    return RunResult("stopped", turn, "Step limit reached", tokens)
+class _Run:
+    """One run of the loop: the turns, the counts, the plan and the transcript."""
+
+    def __init__(self, model, toolbox, task, log, gate):
+        self._model = model
+        self._toolbox = toolbox
+        self._task = task
+        self._log = log
+        self._approval = _Approval(gate, toolbox, log)
+        self._plan = StagePlan(task.stage_call_limit)
+        self._transcript = None
+        self._turn = 0
+        self._counted = 0
+        self._tokens = 0
+        self._call_tokens = 0
+        self._max_call_tokens = 0
+        self._delivered = []
+
+    def run(self):
+        briefing = self._toolbox.briefing()
+        goal = f"{self._task.goal}\n\n{briefing}" if briefing else self._task.goal
+        self._transcript = Transcript({"role": "user", "content": goal}, self._task.image_mode)
+        try:
+            result = self._turns()
+        except AgentStopped as stop:
+            result = self._result("stopped", str(stop))
+        if result.status == "stopped":
+            event = self._plan.stop()
+            if event is not None:
+                self._log_event(event)
+        self._toolbox.stage_records = self._plan.records()
+        return replace(result, stats={**self._plan.stats(), "max_call_tokens": self._max_call_tokens})
+
+    def _turns(self):
+        while True:
+            ceiling = self._ceiling()
+            if ceiling is not None:
+                return self._last_turn(ceiling)
+            if self._plan.at_limit():
+                self._ask_at_limit()
+            response = self._respond(self._toolbox.definitions())
+            calls = [item for item in response.output if item.type == "function_call"]
+            if any(call.name != "ask" for call in calls):
+                self._counted += 1
+                self._plan.count_call()
+            self._log_model()
+            if not calls:
+                return self._result("stopped", "The model replied without calling a tool")
+            for call in calls:
+                ended, output = self._execute(call)
+                self._log_tool(call, output)
+                if ended:
+                    return self._result(output["status"], output["reason"])
+                self._transcript.add_result(call.call_id, call.name, output, self._toolbox.take_attachments())
+
+    def _ceiling(self):
+        """Why the run is at its ceiling, or None. Checked before each model call."""
+        if self._counted >= self._task.max_steps:
+            return STEP_LIMIT
+        if self._tokens >= self._task.token_budget:
+            return f"Token budget used: {self._tokens}"
+        return None
+
+    def _last_turn(self, reason):
+        """One more call that offers only finish; its finish is judged as usual, with or without
+        unfinished stages. Anything else stops the run."""
+        tools = [tool for tool in self._toolbox.definitions() if tool["name"] == "finish"]
+        items = self._transcript.view() + [{"role": "user", "content": CEILING_NOTE}]
+        response = self._respond(tools, items)
+        self._log_model()
+        call = next((item for item in response.output
+                     if item.type == "function_call" and item.name == "finish"), None)
+        if call is None:
+            return self._result("stopped", reason)
+        ended, output = self._execute(call, at_ceiling=True)
+        self._log_tool(call, output)
+        if ended:
+            return self._result(output["status"], output["reason"])
+        return self._result("stopped", reason)
+
+    def _respond(self, tools, items=None):
+        self._turn += 1
+        self._toolbox.step = self._turn
+        effort = None if self._plan.exists else self._task.plan_reasoning_effort
+        response = self._model.respond(SYSTEM_PROMPT, self._transcript.view() if items is None else items,
+                                       tools, effort=effort)
+        self._call_tokens = response.usage.total_tokens if response.usage else 0
+        self._tokens += self._call_tokens
+        self._max_call_tokens = max(self._max_call_tokens, self._call_tokens)
+        if items is None:
+            self._transcript.add_response(response.output)
+        return response
+
+    def _log_model(self):
+        event = {"type": "model", "step": self._turn, "tokens": self._tokens, "call_tokens": self._call_tokens}
+        current = self._plan.current()
+        if current is not None:
+            event.update(stage=current["n"], stage_calls=current["calls"], stage_limit=current["limit"])
+        self._log(event)
+
+    def _log_tool(self, call, output):
+        self._log({"type": "tool", "step": self._turn, "tool": call.name, "arguments": call.arguments,
+                   "result": output})
+
+    def _log_event(self, event):
+        self._log({**event, "step": self._turn})
+
+    def _result(self, status, reason):
+        return RunResult(status, self._turn, reason, self._tokens)
+
+    def _execute(self, call, at_ceiling=False):
+        try:
+            arguments = json.loads(call.arguments)
+        except ValueError as error:
+            return False, {"ok": False, "refused": f"Arguments were not valid JSON: {error}"}
+        name = call.name
+        if name == "finish":
+            return self._finish(arguments, at_ceiling)
+        if name == "plan":
+            return False, self._set_plan(arguments)
+        if name == "stage_done":
+            return False, self._stage_done(arguments)
+        if not self._plan.exists and name not in READ_ONLY_TOOLS and name != "launch_target":
+            return False, refused(NEEDS_PLAN, "needs_plan")
+        output = None
+        if self._toolbox.precheck(name, arguments) is None:
+            output = self._approval.refusal(self._turn, name, arguments)
+        if output is None:
+            output = self._toolbox.call(name, arguments)
+        self._plan.note_action(name, arguments, output)
+        if name not in READ_ONLY_TOOLS and arguments.get("intent") and _delivered(output):
+            self._delivered.append(arguments["intent"])
+        return False, output
+
+    def _finish(self, arguments, at_ceiling):
+        if not arguments["success"]:
+            return True, {"status": "gave_up", "reason": arguments["evidence"]}
+        unfinished = self._plan.unfinished()
+        if self._plan.exists and unfinished and not at_ceiling:
+            return False, refused(
+                f"Not done yet: stage {', '.join(map(str, unfinished))}. Close each with stage_done first, "
+                "or call finish with success=false.",
+                "stages_unfinished",
+            )
+        return _finish(self._toolbox, self._task, arguments, self._log)
+
+    def _set_plan(self, arguments):
+        try:
+            event = self._plan.set(arguments.get("stages"))
+        except StageError as error:
+            if error.code == "too_many_revisions":
+                return self._ask_for_revisions(error)
+            return refused(str(error), error.code)
+        self._log_event(event)
+        current = self._plan.current()
+        return {"ok": True, "revision": event["revision"], "stages": len(event["stages"]),
+                "current_stage": current["n"] if current else None}
+
+    def _stage_done(self, arguments):
+        check = self._toolbox.evidence(arguments.get("marks"), arguments.get("capture"))
+        if not check.get("ok"):
+            return check
+        stage = self._plan.current()
+        try:
+            events = self._plan.complete(check["kind"], arguments["note"])
+        except StageError as error:
+            return refused(str(error), error.code)
+        for event in events:
+            self._log_event(event)
+        following = self._plan.current()
+        self._transcript.close_stage(_stage_summary(stage, arguments["note"], self._delivered, following))
+        self._delivered = []
+        return {"ok": True, "stage": stage["n"], "next_stage": following["n"] if following else None}
+
+    def _ask_at_limit(self):
+        """Asks the person before the next model call: stop ends the run, anything else gives the
+        stage one more allowance and passes any advice on to the model."""
+        stage = self._plan.current()
+        record = self._plan.records()[stage["n"] - 1]
+        intents = [action["intent"] for action in record["actions"] if action.get("intent")]
+        question = {"kind": "stage_limit", "text": STAGE_LIMIT_QUESTION, "stage": stage["n"],
+                    "calls": stage["calls"], "intents": intents}
+        answer = self._toolbox.ask_about_screen(question)
+        if answer.accepted is False:
+            raise AgentStopped(f"The user stopped the run at the call limit of stage {stage['n']}")
+        self._log_event(self._plan.extend())
+        self._pass_on(question, answer)
+
+    def _ask_for_revisions(self, error):
+        """Asks the person once the plan was revised too often: stop ends the run, anything else
+        allows more revisions. The plan call is refused either way, so the model calls it again."""
+        stage = self._plan.current()
+        question = {"kind": "plan_limit", "text": PLAN_LIMIT_QUESTION,
+                    "stage": stage["n"] if stage else None, "revisions": self._plan.stats()["plan_revisions"]}
+        answer = self._toolbox.ask_about_screen(question)
+        if answer.accepted is False:
+            raise AgentStopped("The user stopped the run at the plan revision limit")
+        self._plan.allow_revisions()
+        self._pass_on(question, answer)
+        return refused("The user allowed more revisions. Call plan again with the whole list.", error.code)
+
+    def _pass_on(self, question, answer):
+        if answer.text and answer.text.strip():
+            self._transcript.add_note(f"The user's answer at the {question['kind']} question: {answer.text}")
+            self._toolbox.note_exchange(question, answer)
 
 
-def _execute(call, toolbox, task, approval, step, log):
-    try:
-        arguments = json.loads(call.arguments)
-    except ValueError as error:
-        return False, {"ok": False, "refused": f"Arguments were not valid JSON: {error}"}
-    if call.name != "finish":
-        if toolbox.precheck(call.name, arguments) is None:
-            refusal = approval.refusal(step, call.name, arguments)
-            if refusal is not None:
-                return False, refusal
-        return False, toolbox.call(call.name, arguments)
-    if not arguments["success"]:
-        return True, {"status": "gave_up", "reason": arguments["evidence"]}
-    return _finish(toolbox, task, arguments, log)
+def _delivered(output):
+    disposition = output.get("disposition") or {}
+    return "refused" not in output and disposition.get("delivery") != "not_delivered"
+
+
+def _stage_summary(stage, note, intents, following):
+    """The one line that stands for a closed stage: its goal, the model's note and the intents of
+    the actions that reached the app. No observation text."""
+    parts = [f"Stage {stage['n']} is done: {stage['goal']}.", f"Note: {note}."]
+    if intents:
+        parts.append(f"Actions: {'; '.join(intents)}.")
+    if following is not None:
+        parts.append(f"Now stage {following['n']}: {following['goal']} (done when: {following['done_when']}).")
+    else:
+        parts.append("Every stage is done; call finish when the screen shows the goal is met.")
+    return " ".join(" ".join(part.split()) for part in parts)
 
 
 def _finish(toolbox, task, arguments, log):

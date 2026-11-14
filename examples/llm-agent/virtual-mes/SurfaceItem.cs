@@ -27,11 +27,18 @@ namespace VirtualMesApp
         internal string Name;
 
         /// <summary>
-        /// Smaller items inside this one, such as a box's arrow. The owner draws them, so they
-        /// paint nothing themselves; clicks hit them before the owner, and the ref exposure
-        /// shows them as children of the owner's element.
+        /// Smaller items inside this one, such as a box's arrow. A part is drawn after its owner
+        /// only when it has its own Paint; clicks hit it before the owner. In the accessibility
+        /// tree a part is a sibling right after its owner, so it shows even when the owner does
+        /// not.
         /// </summary>
         internal SurfaceItem[] Parts;
+
+        /// <summary>
+        /// This item's own exposure, for an item whose accessibility is chosen apart from its
+        /// surface's region, such as a filter box's arrow. Null follows the surface.
+        /// </summary>
+        internal Exposure? Exposure;
         internal ItemKind Kind = ItemKind.Label;
         internal bool Enabled = true;
         internal bool Checked;

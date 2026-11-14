@@ -13,7 +13,7 @@ from agent.effects import EXPECTATIONS
 from agent.guard import ActionGuard, signature
 from agent.observe import render_marked
 from agent.results import refused as _refused
-from agent.screen_tools import ScreenTools
+from agent.screen_tools import UNCONFIRMED, ScreenTools
 from agent.tool_schemas import READ_ONLY_TOOLS, SCHEMAS
 from agent.verify import first_unmet
 
@@ -105,6 +105,7 @@ class Toolbox(AskingTools, ScreenTools):
         self._instance = None
         self._current_window = None
         self._refs = {}
+        self._view_origin = None
         self._last_read = None
         self._levels = {s["definition"]["name"]: s["level"] for s in SCHEMAS}
         self._init_screen(captures_dir)
@@ -129,6 +130,8 @@ class Toolbox(AskingTools, ScreenTools):
         before = self._before_state(name, arguments) if runnable else None
         result = self._dispatch(name, arguments)
         if not acting or "refused" in result:
+            if runnable:
+                self._note_delivery(result)
             self._observer.on_action(name, arguments, target, result)
             return result
         self._cite_knowledge(arguments)
@@ -138,7 +141,8 @@ class Toolbox(AskingTools, ScreenTools):
         if arguments.get("knowledge_id") is not None:
             result["knowledge_id"] = arguments["knowledge_id"]
         self._after_action(name, arguments, target, result)
-        taken = self._capture_current("mismatch") if result.get("expected_met") is False else None
+        reason = _capture_reason(result)
+        taken = self._capture_current(reason) if reason is not None else None
         if taken is not None:
             result["capture"] = taken[0].id
         self._observer.on_action(name, arguments, target, result)
@@ -169,7 +173,10 @@ class Toolbox(AskingTools, ScreenTools):
         """
         if name in REF_ACTIONS:
             element = self._refs.get(arguments.get("ref"))
-            return None if element is None else {"ref": arguments["ref"], **element}
+            if element is None:
+                return None
+            shown = {key: value for key, value in element.items() if key != "native_id"}
+            return {"ref": arguments["ref"], **shown}
         if name in POINT_TOOLS:
             points = [[arguments[x], arguments[y]] for x, y in POINT_TOOLS[name]]
             return {"window_id": arguments.get("window_id"), "points": points}
@@ -221,6 +228,7 @@ class Toolbox(AskingTools, ScreenTools):
                 self._current_window = window["id"]
                 text, self._refs, self._marks = render_marked(envelope["data"]["tree"])
                 self._marks_view = (window["id"], True)
+                self._view_origin = _origin(window)
                 self._last_read = (window, envelope, text)
                 if source is not None:
                     self._observer.on_observation(window, envelope, text, source=source)
@@ -281,6 +289,7 @@ class Toolbox(AskingTools, ScreenTools):
         text, refs, self._marks = render_marked(data["tree"], include_bounds)
         self._refs = {**self._refs, **refs} if root_ref else refs
         self._marks_view = (window_id, not root_ref and surface in FULL_SURFACES)
+        self._view_origin = _origin(window)
         self._current_window = window_id
         self._last_read = (window, envelope, text)
         if source is not None:
@@ -299,7 +308,9 @@ class Toolbox(AskingTools, ScreenTools):
         return {"windows": windows, **self._observe(window, source=source)}
 
     def _act(self, tool, element, identity, args, headed=False):
-        sig = signature(tool, element, *identity)
+        """Runs one app-changing CLI command under the guard. Refs and marks come from the
+        latest observation, so its window's top-left places a nameless element."""
+        sig = signature(tool, element, *identity, origin=self._view_origin)
         refusal = self._guard.check(sig)
         if refusal:
             return _refused(refusal)
@@ -323,9 +334,11 @@ class Toolbox(AskingTools, ScreenTools):
             identity.append(arguments[spec.positional])
         return self._act(name, element, identity, args, headed=spec.headed)
 
-    def _physical(self, tool, arguments, points, args, element=None, identity=None):
+    def _physical(self, tool, arguments, points, args, element=None, identity=None, observed=None):
         """Clicks or drags at screen points of an owned window after giving it focus. The guard
-        identifies the action by `element` and `identity`, or by the window and the arguments."""
+        identifies the action by `element` and `identity`, or by the window and the arguments.
+        The re-read after the action reads `observed` (the window whose picture the point came
+        from), or the clicked window when it is None, until that window is gone."""
         window_id = arguments["window_id"]
         row = self._owned_window(window_id)
         if row is None:
@@ -341,7 +354,7 @@ class Toolbox(AskingTools, ScreenTools):
             identity = sorted((k, v) for k, v in arguments.items() if k not in NON_IDENTITY_ARGUMENTS)
         if element is None:
             element = {"role": "window", "name": window_id}
-        self._current_window = window_id
+        self._current_window = observed or window_id
         return self._act(tool, element, identity, args, headed=True)
 
     def _tool_list_windows(self, _arguments):
@@ -423,6 +436,22 @@ class Toolbox(AskingTools, ScreenTools):
                 return {"ok": False, "code": "RESTART_TIMEOUT", "message": "The app is still open; it may be prompting"}
             self.sleep(POLL_S)
         return self._launch()
+
+
+def _capture_reason(result):
+    """Why the window is captured after an action, or None when it is not: a mismatch, or an
+    unconfirmed verdict the model has to check with its own eyes."""
+    if result.get("expected_met") is False:
+        return "mismatch"
+    if result.get("verdict") == UNCONFIRMED:
+        return UNCONFIRMED
+    return None
+
+
+def _origin(window):
+    """The (x, y) of a window row's top-left, or None without bounds."""
+    bounds = window.get("bounds")
+    return (bounds["x"], bounds["y"]) if bounds else None
 
 
 def _inside(bounds, x, y):

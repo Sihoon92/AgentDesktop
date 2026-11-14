@@ -4,8 +4,10 @@ Run records can carry what was on the screen, the instruction, questions, answer
 knowledge and file paths. None of that may leave the machine the run happened on, so the
 summary is built only from counts, codes, tool names and verdicts. Every printed word comes
 from this module or passes CODE: a status, tool name or error code that is not a plain
-identifier is printed as OTHER instead. The counts come from events.jsonl alone; a value the
-record does not hold is printed as UNKNOWN or its line is left out.
+identifier is printed as OTHER instead. The counts come from events.jsonl, except the stage
+counts, which come from run.json's `stages` (numbers only, written when the run ends); a value
+the record does not hold is printed as UNKNOWN or its line is left out. The texts of a plan and
+its stages are never read.
 
 The run's own folder gets the same lines as summary.txt when it ends (write_summary); the
 code line is the version recorded in run.json as `code` when the run started.
@@ -24,6 +26,8 @@ OTHER = "기타"
 NONE = "없음"
 NO_CODE = "코드 없음"
 MODIFIED = "+수정"
+UNCONFIRMED = "확인 못 함"
+UNCONFIRMED_VERDICT = "unconfirmed"
 SEPARATOR = " · "
 CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,47}")
 VERSION = re.compile(r"[0-9a-f]{4,40}(\+수정)?")
@@ -54,6 +58,12 @@ def summarize(run, events, code=None):
         "  오류 코드: " + _tally(_errors(actions)),
         "  질문: " + _questions(events),
     ]
+    stages = run.get("stages") if isinstance(run.get("stages"), dict) else {}
+    if _count(stages.get("stage_count")):
+        lines.append("  단계: " + _stages(stages))
+    largest = _count(stages.get("max_call_tokens"))
+    if largest is not None:
+        lines.append(f"  호출당 토큰 최대: {largest}")
     knowledge = _knowledge(events)
     if knowledge:
         lines.append("  지식: " + knowledge)
@@ -185,6 +195,8 @@ def _outcome(result):
         return "일치"
     if result.get("expected_met") is False:
         return "불일치"
+    if _unconfirmed(result):
+        return UNCONFIRMED
     if result.get("ok") is True:
         return "성공"
     return UNKNOWN
@@ -195,7 +207,18 @@ def _action_counts(actions):
     expected = sum(1 for result in results if result.get("expect"))
     met = sum(1 for result in results if result.get("expected_met") is True)
     missed = sum(1 for result in results if result.get("expected_met") is False)
-    return SEPARATOR.join([f"{len(actions)}회", f"기대 지정 {expected}", f"일치 {met}", f"불일치 {missed}"])
+    unconfirmed = sum(1 for result in results if _unconfirmed(result))
+    return SEPARATOR.join([f"{len(actions)}회", f"기대 지정 {expected}", f"일치 {met}", f"불일치 {missed}",
+                           f"{UNCONFIRMED} {unconfirmed}"])
+
+
+def _unconfirmed(result):
+    """An action judged neither met nor unmet: the text did not meet its expectation and the
+    picture around its target changed. A record with a verdict says so by verdict "unconfirmed";
+    an older record without one by an expectation with a null expected_met."""
+    if "verdict" in result:
+        return result["verdict"] == UNCONFIRMED_VERDICT
+    return bool(result.get("expect")) and "expected_met" in result and result["expected_met"] is None
 
 
 def _refusals(actions):
@@ -226,6 +249,23 @@ def _questions(events):
     asked = sum(1 for event in events if event.get("type") == "question")
     answered = sum(1 for event in events if event.get("type") == "answer" and event.get("timed_out") is not True)
     return SEPARATOR.join([str(asked), f"답 {answered}", f"무응답 {max(asked - answered, 0)}"])
+
+
+def _stages(stages):
+    calls = stages.get("stage_calls")
+    listed = isinstance(calls, list) and all(_count(value) is not None for value in calls)
+
+    def counted(key):
+        value = _count(stages.get(key))
+        return UNKNOWN if value is None else value
+
+    return SEPARATOR.join([
+        str(counted("stage_count")),
+        f"완료 {counted('stages_done')}",
+        f"단계별 호출 {'/'.join(str(value) for value in calls) if listed else UNKNOWN}",
+        f"한도 질문 {counted('limit_questions')}",
+        f"계획 고침 {counted('plan_revisions')}",
+    ])
 
 
 def _knowledge(events):

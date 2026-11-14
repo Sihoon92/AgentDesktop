@@ -20,6 +20,8 @@ class Answer:
 
 
 NO_ANSWER = Answer(timed_out=True)
+LIMIT_KINDS = ("stage_limit", "plan_limit")
+"""Questions the harness asks at a limit; the answer is go on, stop, or go on with guidance."""
 
 _PENDING = object()
 
@@ -92,9 +94,29 @@ class TerminalAsker:
                 return self._ask_completion(question)
             if question.get("kind") == "registration":
                 return self._ask_registration(question)
+            if question.get("kind") in LIMIT_KINDS:
+                return self._ask_limit(question)
             return self._ask_text(question)
         except EOFError:
             return NO_ANSWER
+
+    def _ask_limit(self, question):
+        """A stage ran out of calls, or the plan was revised too often. An empty line goes on,
+        q stops the run, and any other text goes on with that text passed to the model."""
+        self._show(question.get("text", ""))
+        details = [f"단계 {question.get('stage')}"]
+        if question.get("kind") == "stage_limit":
+            details.append(f"호출 {question.get('calls')}")
+        else:
+            details.append(f"고친 횟수 {question.get('revisions')}")
+        self._show("  " + " · ".join(details))
+        for intent in question.get("intents") or []:
+            if intent:
+                self._show(f"  - {intent}")
+        typed = self._ask("[빈 줄 계속 / q 중단 / 방법을 적으면 그 글을 전하고 계속] ").strip()
+        if typed.lower() == "q":
+            return Answer(accepted=False)
+        return Answer(text=typed, accepted=True)
 
     def _ask_text(self, question):
         self._show_question(question)

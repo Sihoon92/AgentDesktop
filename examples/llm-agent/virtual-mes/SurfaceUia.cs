@@ -73,6 +73,10 @@ namespace VirtualMesApp
         internal static UiaShape ShapeOf(Exposure exposure, SurfaceItem item)
         {
             bool hasText = item.Text.Length > 0;
+            if (exposure == Exposure.Bare)
+            {
+                return item.Kind == ItemKind.Button || item.Kind == ItemKind.Cell ? UiaShape.Button : UiaShape.Hidden;
+            }
             if (exposure == Exposure.Text)
             {
                 return hasText && item.Kind != ItemKind.Check ? UiaShape.Text : UiaShape.Hidden;
@@ -106,10 +110,13 @@ namespace VirtualMesApp
                     List<SurfaceItemProvider> built = new List<SurfaceItemProvider>();
                     foreach (SurfaceItem item in source)
                     {
-                        UiaShape shape = ShapeOf(this.surface.Exposure, item);
-                        if (shape != UiaShape.Hidden)
+                        this.AddChild(built, item, false);
+                        if (item.Parts != null)
                         {
-                            built.Add(new SurfaceItemProvider(this, null, built.Count, item, shape));
+                            foreach (SurfaceItem part in item.Parts)
+                            {
+                                this.AddChild(built, part, true);
+                            }
                         }
                     }
                     this.cachedSource = source;
@@ -119,9 +126,15 @@ namespace VirtualMesApp
             }
         }
 
-        internal Exposure Exposure
+        /// <summary>Adds the item as the next child when its exposure shows it.</summary>
+        private void AddChild(List<SurfaceItemProvider> built, SurfaceItem item, bool isPart)
         {
-            get { return this.surface.Exposure; }
+            Exposure exposure = item.Exposure ?? this.surface.Exposure;
+            UiaShape shape = ShapeOf(exposure, item);
+            if (shape != UiaShape.Hidden)
+            {
+                built.Add(new SurfaceItemProvider(this, built.Count, item, shape, exposure, isPart));
+            }
         }
 
         internal System.Windows.Rect ScreenRect(Rectangle client)
@@ -237,16 +250,17 @@ namespace VirtualMesApp
         public IRawElementProviderFragment ElementProviderFromPoint(double x, double y)
         {
             System.Windows.Point point = new System.Windows.Point(x, y);
-            foreach (SurfaceItemProvider child in this.Children())
+            SurfaceItemProvider[] children = this.Children();
+            foreach (SurfaceItemProvider child in children)
             {
-                foreach (SurfaceItemProvider part in child.Parts())
+                if (child.IsPart && child.BoundingRectangle.Contains(point))
                 {
-                    if (part.BoundingRectangle.Contains(point))
-                    {
-                        return part;
-                    }
+                    return child;
                 }
-                if (child.BoundingRectangle.Contains(point))
+            }
+            foreach (SurfaceItemProvider child in children)
+            {
+                if (!child.IsPart && child.BoundingRectangle.Contains(point))
                 {
                     return child;
                 }
@@ -261,71 +275,40 @@ namespace VirtualMesApp
     }
 
     /// <summary>
-    /// One exposed item, or one exposed part of an item. Reads go to the surface's current
-    /// item with the same id, so state is never stale.
+    /// One exposed item, or one exposed part of an item, as a child of the surface. Reads go
+    /// to the surface's current item with the same id, so state is never stale.
     /// </summary>
     internal sealed class SurfaceItemProvider
         : IRawElementProviderFragment, IInvokeProvider, IToggleProvider, IGridItemProvider
     {
         private readonly SurfaceRootProvider root;
-        private readonly SurfaceItemProvider owner;
         private readonly int index;
         private readonly SurfaceItem original;
         private readonly UiaShape shape;
-        private readonly SurfaceItemProvider[] parts;
+        private readonly Exposure exposure;
+        private readonly bool isPart;
 
         internal SurfaceItemProvider(
-            SurfaceRootProvider root, SurfaceItemProvider owner, int index, SurfaceItem item, UiaShape shape)
+            SurfaceRootProvider root, int index, SurfaceItem item, UiaShape shape, Exposure exposure, bool isPart)
         {
             this.root = root;
-            this.owner = owner;
             this.index = index;
             this.original = item;
             this.shape = shape;
-            List<SurfaceItemProvider> built = new List<SurfaceItemProvider>();
-            if (owner == null && item.Parts != null)
-            {
-                foreach (SurfaceItem part in item.Parts)
-                {
-                    UiaShape partShape = SurfaceRootProvider.ShapeOf(root.Exposure, part);
-                    if (partShape != UiaShape.Hidden)
-                    {
-                        built.Add(new SurfaceItemProvider(root, this, built.Count, part, partShape));
-                    }
-                }
-            }
-            this.parts = built.ToArray();
+            this.exposure = exposure;
+            this.isPart = isPart;
         }
 
-        internal SurfaceItemProvider[] Parts()
+        /// <summary>True for a part of another item, such as a box's arrow.</summary>
+        internal bool IsPart
         {
-            return this.parts;
-        }
-
-        private SurfaceItemProvider[] Siblings()
-        {
-            return this.owner == null ? this.root.Children() : this.owner.parts;
+            get { return this.isPart; }
         }
 
         private SurfaceItem Current()
         {
             if (this.original.Id == null)
             {
-                return this.original;
-            }
-            if (this.owner != null)
-            {
-                SurfaceItem[] current = this.owner.Current().Parts;
-                if (current != null)
-                {
-                    foreach (SurfaceItem part in current)
-                    {
-                        if (part.Id == this.original.Id)
-                        {
-                            return part;
-                        }
-                    }
-                }
                 return this.original;
             }
             foreach (SurfaceItemProvider sibling in this.root.Children())
@@ -370,6 +353,10 @@ namespace VirtualMesApp
             }
             if (propertyId == AutomationElementIdentifiers.NameProperty.Id)
             {
+                if (this.exposure == Exposure.Bare)
+                {
+                    return string.Empty;
+                }
                 return item.Text.Length > 0 ? item.Text : (item.Name ?? string.Empty);
             }
             if (propertyId == AutomationElementIdentifiers.AutomationIdProperty.Id)
@@ -432,18 +419,10 @@ namespace VirtualMesApp
 
         public IRawElementProviderFragment Navigate(NavigateDirection direction)
         {
-            SurfaceItemProvider[] siblings = this.Siblings();
+            SurfaceItemProvider[] siblings = this.root.Children();
             if (direction == NavigateDirection.Parent)
             {
-                return this.owner != null ? (IRawElementProviderFragment)this.owner : this.root;
-            }
-            if (direction == NavigateDirection.FirstChild && this.parts.Length > 0)
-            {
-                return this.parts[0];
-            }
-            if (direction == NavigateDirection.LastChild && this.parts.Length > 0)
-            {
-                return this.parts[this.parts.Length - 1];
+                return this.root;
             }
             if (direction == NavigateDirection.NextSibling && this.index + 1 < siblings.Length)
             {
@@ -459,10 +438,6 @@ namespace VirtualMesApp
 
         public int[] GetRuntimeId()
         {
-            if (this.owner != null)
-            {
-                return new[] { AutomationInteropProvider.AppendRuntimeId, this.owner.index + 1, this.index + 1 };
-            }
             return new[] { AutomationInteropProvider.AppendRuntimeId, this.index + 1 };
         }
 

@@ -752,8 +752,8 @@ def test_run_meta_carries_the_task_step_limit(monkeypatch, tmp_path):
     wired(monkeypatch, tmp_path, task, "--baseline")
     wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x")
 
-    assert [meta["max_steps"] for meta in seen] == [9, 9, 40]
-    assert sorted(meta["max_steps"] for meta, _ in recorded_runs(tmp_path)) == [9, 9, 40]
+    assert [meta["max_steps"] for meta in seen] == [9, 9, 60]
+    assert sorted(meta["max_steps"] for meta, _ in recorded_runs(tmp_path)) == [9, 9, 60]
 
 
 def test_task_file_run_takes_the_settings_model_when_the_file_has_none(monkeypatch, tmp_path):
@@ -781,7 +781,7 @@ def test_the_run_ends_with_its_summary_after_the_usual_lines_and_leaves_summary_
     written = (folder / "summary.txt").read_text(encoding="utf-8").splitlines()
     assert code == 3
     assert out[trace + 1:] == written
-    assert written[:3] == ["요약 (화면 내용 없음)", "  코드: abc1234", "  판정: claimed · 스텝 1/40 · 토큰 7"]
+    assert written[:3] == ["요약 (화면 내용 없음)", "  코드: abc1234", "  판정: claimed · 스텝 1/60 · 토큰 7"]
     assert "화면을 연다" not in "\n".join(written)
 
 

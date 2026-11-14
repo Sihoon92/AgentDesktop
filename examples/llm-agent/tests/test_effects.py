@@ -124,3 +124,29 @@ def test_changes_are_capped_at_eight():
 def test_unknown_expectation_raises():
     with pytest.raises(ValueError):
         met("popup", diff(state([W1], MARKS), state([W1], MARKS)))
+
+
+def test_marks_read_from_two_windows_are_not_compared():
+    popup_items = {1: _element(1, "WA2"), 2: _element(2, "Select")}
+
+    effects = diff(state([W1, W2], popup_items, "w-2"), state([W1], MARKS, "w-1"))
+
+    assert effects["observed_window"] == {"before": "w-2", "after": "w-1"}
+    assert effects["added"]["count"] == 0 and effects["removed"]["count"] == 0 and effects["changed"] == []
+    assert effects["windows_closed"] == [{"id": "w-2", "title": "목록"}] and effects["none"] is False
+    assert met("window_closed", effects) and met("any", effects)
+    assert not met("content_changed", effects) and not met("value_changed", effects)
+
+
+def test_a_window_switch_alone_is_still_an_effect():
+    effects = diff(state([W1, W2], MARKS, "w-2"), state([W1, W2], MARKS, "w-1"))
+
+    assert effects["none"] is False and effects["observed_window"] == {"before": "w-2", "after": "w-1"}
+
+
+def test_marks_of_the_same_window_or_of_an_unnamed_one_are_compared():
+    same = diff(state([W1], MARKS, "w-1"), state([W1], with_value(MARKS, 5, "금일"), "w-1"))
+    unnamed = diff(state([W1], MARKS), state([W1], with_value(MARKS, 5, "금일"), "w-1"))
+
+    assert "observed_window" not in same and same["changed"][0]["after"] == "금일"
+    assert "observed_window" not in unnamed and unnamed["changed"][0]["after"] == "금일"

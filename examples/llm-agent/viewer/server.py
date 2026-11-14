@@ -341,9 +341,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
         manager = self.server.run_manager
         if manager is None:
             return {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
-                    "default_system": None}
+                    "default_system": None, "default_stage_call_limit": None}
         return {"can_start": True, "active": manager.active(), "default_exe": manager.default_exe,
-                "can_answer": manager.can_answer(), "default_system": manager.default_system}
+                "can_answer": manager.can_answer(), "default_system": manager.default_system,
+                "default_stage_call_limit": getattr(manager, "default_stage_call_limit", None)}
 
     def _start_run(self):
         manager = self.server.run_manager
@@ -355,7 +356,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
         try:
             run_id = manager.start(
                 payload.get("goal"), payload.get("exe") or None, payload.get("level", 3), payload.get("approve", False),
-                system=payload.get("system"),
+                system=payload.get("system"), stage_call_limit=payload.get("stage_call_limit"),
             )
         except InvalidRun as error:
             return self._send_json(400, {"error": str(error)})

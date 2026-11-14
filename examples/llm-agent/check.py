@@ -164,13 +164,15 @@ def _cli(runner, argv):
 
 
 def check_settings(explicit, environ):
-    """(result, settings). The line names which keys came from the file, never their values."""
+    """(result, settings). The line names which keys came from the file, never their values.
+    A file that cannot be used fails with the error's reason, which holds no path, value or typed key."""
     path = settings_path(explicit, environ)
     try:
         settings = load_settings(explicit, environ)
-    except SettingsError:
-        code = "SETTINGS_INVALID" if path.is_file() else "SETTINGS_MISSING"
-        return failed(SETTINGS, code), {}
+    except SettingsError as error:
+        if not path.is_file():
+            return failed(SETTINGS, "SETTINGS_MISSING"), {}
+        return failed(SETTINGS, "SETTINGS_INVALID", error.reason), {}
     if not path.is_file():
         return passed(SETTINGS, "설정 파일 없음 · 코드 기본값 사용"), settings
     keys = ", ".join(settings) if settings else "없음"

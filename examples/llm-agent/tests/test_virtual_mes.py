@@ -15,13 +15,19 @@ def parsed(*args):
 
 def test_default_profile_is_mes_like():
     assert parsed()["expose"] == {
-        "menu": "ref", "filters": "text", "grid": "text", "icon": "pixel", "radial": "pixel"}
+        "menu": "ref", "filters": "text", "grid": "text", "icon": "pixel", "radial": "pixel", "arrow": "bare"}
 
 
 def test_easy_and_hard_profiles():
     assert set(parsed("--profile", "easy")["expose"].values()) == {"ref"}
     assert parsed("--profile", "hard")["expose"] == {
-        "menu": "text", "filters": "pixel", "grid": "pixel", "icon": "pixel", "radial": "pixel"}
+        "menu": "text", "filters": "pixel", "grid": "pixel", "icon": "pixel", "radial": "pixel", "arrow": "pixel"}
+
+
+@pytest.mark.parametrize("mode", ["ref", "bare", "pixel"])
+def test_arrow_region_takes_ref_bare_or_pixel_apart_from_filters(mode):
+    out = parsed("--expose", f"filters=pixel,arrow={mode}")
+    assert out["expose"]["arrow"] == mode and out["expose"]["filters"] == "pixel"
 
 
 def test_expose_overrides_profile():
@@ -32,6 +38,8 @@ def test_expose_overrides_profile():
 
 @pytest.mark.parametrize("args", [
     ["--expose", "icon=text"], ["--expose", "grid=shiny"], ["--expose", "nowhere=ref"],
+    ["--expose", "arrow=text"], ["--expose", "arrow=shiny"], ["--expose", "filters=bare"],
+    ["--expose", "menu=bare"], ["--expose", "icon=bare"],
     ["--profile", "medium"], ["--delay-ms", "soon"], ["--delay-ms", "-1"], ["--unknown"],
     ["--delay-ms"]])
 def test_bad_options_exit_2_with_a_reason(args):
@@ -40,8 +48,8 @@ def test_bad_options_exit_2_with_a_reason(args):
     assert done.stderr.strip()
 
 
-def test_combo_open_defaults_to_anywhere_and_accepts_arrow():
-    assert parsed()["combo_open"] == "anywhere"
+def test_combo_open_defaults_to_arrow_and_accepts_anywhere():
+    assert parsed()["combo_open"] == "arrow"
     assert parsed("--combo-open", "arrow")["combo_open"] == "arrow"
     assert parsed("--combo-open", "anywhere")["combo_open"] == "anywhere"
 

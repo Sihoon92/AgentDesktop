@@ -177,3 +177,18 @@ def test_render_tree_output_is_unchanged_by_marks():
 
     assert "[1]" not in render_tree(tree)[0]
     assert render_marked(tree, include_bounds=True)[0].endswith('[1] statictext "라인" bounds=0,0,10,10')
+
+
+def test_native_ids_reach_refs_and_marks_but_not_the_text_or_the_recorded_elements():
+    native = {"kind": "automation_id", "value": "7003"}
+    tree = {"role": "window", "name": "Main", "children": [
+        {"role": "button", "ref_id": "@s1:e1", "native_id": native, "available_actions": ["Click"]},
+        {"role": "button", "name": "Save", "ref_id": "@s1:e2", "native_id": {"kind": "automation_id", "value": ""}},
+    ]}
+
+    text, refs, marks = render_marked(tree)
+
+    assert refs["@s1:e1"]["native_id"] == native and "native_id" not in refs["@s1:e2"]
+    assert marks[1]["native_id"] == native and "native_id" not in marks[2]
+    assert "7003" not in text and "automation_id" not in text
+    assert all("native_id" not in element for element in visible_elements(tree))

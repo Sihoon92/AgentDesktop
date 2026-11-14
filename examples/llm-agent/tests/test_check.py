@@ -334,15 +334,23 @@ def test_settings_line_without_a_file(env, capsys):
     assert code == 0
 
 
-@pytest.mark.parametrize(("content", "code"), [(None, "SETTINGS_MISSING"), ("colour: red\n", "SETTINGS_INVALID")])
-def test_unusable_settings_fail_with_a_code(env, capsys, content, code):
+@pytest.mark.parametrize(("content", "expected"), [
+    (None, "설정: 실패(SETTINGS_MISSING)"),
+    (f"colour: red\n{MARK}-key: x\n", "설정: 실패(SETTINGS_INVALID) (모르는 키 2개)"),
+    (f"image_mode: {MARK}\n", "설정: 실패(SETTINGS_INVALID) (image_mode 값이 off, user_message, tool_output 중 하나가 아님)"),
+    (f'model: m1\nexe: "C:\\Users\\{MARK}\\VirtualMes.exe"\n',
+     "설정: 실패(SETTINGS_INVALID) (YAML 형식 오류 2행 · 큰따옴표 안의 역슬래시 · 경로는 따옴표 없이 적거나 작은따옴표로 감싸세요)"),
+    (f'exe: "C:\\tools\\new{MARK}.exe"\n',
+     "설정: 실패(SETTINGS_INVALID) (exe 경로에 제어 문자 · 경로는 따옴표 없이 적거나 작은따옴표로 감싸세요)"),
+])
+def test_unusable_settings_fail_with_a_code_and_a_reason(env, capsys, content, expected):
     path = env.tmp / f"{MARK}.yaml"
     if content is not None:
         path.write_text(content, encoding="utf-8")
     exit_code, out = env.run(capsys, "--skip", "llm", "--skip", "app", "--settings", str(path))
     assert exit_code == 1
-    assert lines_of(out)["설정"] == f"설정: 실패({code})"
-    assert MARK not in out
+    assert lines_of(out)["설정"] == expected
+    assert MARK not in out and str(env.tmp) not in out
 
 
 def test_settings_named_by_the_environment_variable(env, capsys):

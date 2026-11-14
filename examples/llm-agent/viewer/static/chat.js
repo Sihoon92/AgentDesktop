@@ -5,7 +5,10 @@
    expected/observed change of each action. app.js owns the state, the DOM helpers and rendering
    and calls into the functions here; nothing here runs before app.js has started. */
 
-const QUESTION_KIND_LABELS = { confirm: "누르기 전 확인", stuck: "막힘", completion: "완료 확인", registration: "등록 승인" };
+const QUESTION_KIND_LABELS = {
+  confirm: "누르기 전 확인", stuck: "막힘", completion: "완료 확인", registration: "등록 승인",
+  stage_limit: "단계 한도", plan_limit: "계획 고치기 한도",
+};
 const EXPECT_LABELS = {
   window_opened: "새 창이 뜸",
   window_closed: "창이 닫힘",
@@ -15,6 +18,13 @@ const EXPECT_LABELS = {
 };
 const COMPLETION_BY_LABELS = { task: "작업 파일의 조건", knowledge: "지식의 완료 조건", human: "사람이 확인" };
 const ITEM_DECISION_LABELS = { approve: "승인", edit: "고쳐서 승인", reject: "거절" };
+const ORIGIN_LABELS = { question: "질문에서", discovered: "스스로 알아냄" };
+const LIMIT_ANSWERS = [
+  { key: "continue", label: "계속", className: "approve" },
+  { key: "method", label: "방법 보내기", className: "method" },
+  { key: "stop", label: "중단", className: "reject" },
+];
+const UNCONFIRMED = "unconfirmed";
 const EFFECT_NAMES = 3;
 const ANSWER_MAX_CHARS = 2000;
 
@@ -50,9 +60,33 @@ function questionTimelineLabel(entry) {
 
 /* ---------- step information ---------- */
 
+/* An action's judged outcome. The recorder keeps it inside `result`; older made-up records had it on
+   the event itself, so the event is the fallback. */
+function actionOutcome(action) {
+  const result = (action && action.result) || {};
+  const pick = (key) => (key in result ? result[key] : action ? action[key] : undefined);
+  return {
+    expect: pick("expect"), expected_met: pick("expected_met"), effects: pick("effects"), verdict: pick("verdict"),
+    capture: pick("capture"), refused_code: pick("refused_code"),
+  };
+}
+
+/* "확인 못 함": the text did not change but the picture around the target did. Records written before
+   the verdict was kept show it as an expectation left open (null) with a changed picture. */
+function isUnconfirmed(outcome) {
+  if (outcome.verdict) return outcome.verdict === UNCONFIRMED;
+  const picture = outcome.effects && outcome.effects.picture;
+  return outcome.expect !== undefined && outcome.expect !== null && outcome.expected_met === null && Boolean(picture && picture.changed);
+}
+
+function windowSwitchText(switched) {
+  return `${switched.before || "?"} → ${switched.after || "?"}`;
+}
+
 function effectsSummary(effects) {
   if (!effects || typeof effects !== "object") return null;
-  if (effects.none) return "변화 없음";
+  const picture = effects.picture && effects.picture.changed ? effects.picture : null;
+  if (effects.none) return picture ? `관찰 글 변화 없음 · 누른 곳 주변 그림만 바뀜 (${picture.pixels}픽셀)` : "변화 없음";
   const names = (list) => {
     const shown = (list || []).slice(0, EFFECT_NAMES).filter(Boolean);
     return shown.length ? ` (${shown.join(", ")}${(list || []).length > shown.length ? " …" : ""})` : "";
@@ -67,6 +101,8 @@ function effectsSummary(effects) {
     parts.push(`${change.name || `표시 ${change.mark}`}: ${change.field || "값"} ${quote(change.before)} → ${quote(change.after)}`);
   }
   if (effects.focus && (effects.focus.name || effects.focus.mark)) parts.push(`포커스 → ${effects.focus.name || `표시 ${effects.focus.mark}`}`);
+  if (effects.observed_window) parts.push(`관찰하는 창이 바뀜 (${windowSwitchText(effects.observed_window)})`);
+  if (picture) parts.push(`누른 곳 주변 그림이 바뀜 (${picture.pixels}픽셀)`);
   return parts.length ? parts.join(" · ") : "변화 없음";
 }
 
@@ -78,18 +114,39 @@ const REFUSED_CODE_LABELS = {
   no_one_to_ask: "답할 사람이 없음",
 };
 
+function verdictCell(outcome) {
+  if (isUnconfirmed(outcome)) return el("span", { className: "unconfirmed-badge", text: "확인 못 함" });
+  if (outcome.expected_met === false) return el("span", { className: "mismatch-badge", text: "기대와 다름" });
+  return outcome.expected_met === true ? "기대대로" : null;
+}
+
 function expectationRows(action) {
   if (!action) return [];
-  const mismatch = action.expected_met === false;
-  const refused = action.refused_code ? `${REFUSED_CODE_LABELS[action.refused_code] || action.refused_code} (${action.refused_code})` : null;
+  const outcome = actionOutcome(action);
+  const effects = outcome.effects || {};
+  const refused = outcome.refused_code ? `${REFUSED_CODE_LABELS[outcome.refused_code] || outcome.refused_code} (${outcome.refused_code})` : null;
+  const picture = effects.picture && typeof effects.picture === "object" ? effects.picture : null;
   return [
     ["거절 이유", refused, "bad-text"],
-    ["기대한 변화", action.expect === undefined || action.expect === null ? null : EXPECT_LABELS[action.expect] || action.expect],
-    ["일어난 변화", effectsSummary(action.effects)],
-    ["기대 판정", mismatch ? el("span", { className: "mismatch-badge", text: "기대와 다름" }) : action.expected_met === true ? "기대대로" : null,
-      mismatch ? "" : "ok-text"],
-    ["모델에게 보낸 캡처", action.capture || null],
+    ["기대한 변화", outcome.expect === undefined || outcome.expect === null ? null : EXPECT_LABELS[outcome.expect] || outcome.expect],
+    ["일어난 변화", effectsSummary(outcome.effects)],
+    ["기대 판정", verdictCell(outcome), outcome.expected_met === true ? "ok-text" : ""],
+    ["그림 비교", picture ? `${picture.changed ? "바뀜" : "안 바뀜"} · ${picture.pixels}픽셀 (누른 곳 주변)` : null],
+    ["관찰한 창", effects.observed_window ? el("span", { className: "window-switch-badge", text: `바뀜 · ${windowSwitchText(effects.observed_window)}` }) : null],
+    ["모델에게 보낸 캡처", outcome.capture || null],
   ];
+}
+
+function outcomeNotes(action) {
+  const outcome = actionOutcome(action);
+  const notes = [];
+  if (isUnconfirmed(outcome)) {
+    notes.push(el("p", { className: "outcome-note unconfirmed", text: "확인 못 함: 관찰 글은 그대로이고 누른 곳 주변의 그림만 바뀌었습니다. 모델이 캡처로 확인합니다. 기대와 다른 결과로 세지 않습니다." }));
+  }
+  if (outcome.effects && outcome.effects.observed_window) {
+    notes.push(el("p", { className: "outcome-note window-switch", text: "관찰하는 창이 바뀜: 동작 전과 뒤에 본 창이 달라 두 창의 요소는 비교하지 않았습니다." }));
+  }
+  return notes;
 }
 
 function knowledgeNotes(entry) {
@@ -122,9 +179,19 @@ function candidateList(question) {
   }));
 }
 
+function limitAnswerKey(answer) {
+  if (!answer || answer.timed_out) return null;
+  if (answer.accepted === false) return "stop";
+  return answer.text ? "method" : "continue";
+}
+
 function answerText(answer, question) {
   if (!answer) return null;
   if (answer.timed_out) return "답 없음";
+  if (isLimitQuestion(question)) {
+    const key = limitAnswerKey(answer);
+    return key === "method" ? `방법 보내기: ${answer.text}` : key === "stop" ? "중단" : "계속";
+  }
   const parts = [];
   if (answer.accepted === true) parts.push("맞음");
   if (answer.accepted === false) parts.push("아님");
@@ -159,10 +226,54 @@ function questionDetails(entry) {
     candidateList(question),
   ];
   if (question.kind === "registration") nodes.push(registrationItemsView(question, answer));
+  if (isLimitQuestion(question)) nodes.push(...limitQuestionView(entry));
   if (!answer && isLive()) {
-    nodes.push(el("p", { className: "hint", text: canAnswerHere() ? "오른쪽 아래 대화 칸에서 답하세요." : "이 실행은 터미널에서 답합니다." }));
+    nodes.push(el("p", { className: "hint", text: canAnswerHere() ? "대화 칸에서 답하세요." : "이 실행은 터미널에서 답합니다." }));
   }
   return nodes.filter(Boolean);
+}
+
+function limitFacts(question) {
+  return factList([
+    ["단계", Number.isInteger(question.stage) ? `단계 ${question.stage}` : null],
+    ["쓴 호출", Number.isInteger(question.calls) ? `${question.calls}번` : null],
+    ["고친 횟수", Number.isInteger(question.revisions) ? `${question.revisions}번` : null],
+  ]);
+}
+
+function limitQuestionView(entry) {
+  const { question, answer } = entry;
+  const nodes = [limitFacts(question)];
+  const intents = (question.intents || []).filter((text) => typeof text === "string");
+  if (intents.length) {
+    nodes.push(el("h3", { text: "이 단계에서 한 동작" }), el("ol", { className: "limit-intents" }, intents.map((text) => el("li", { text }))));
+  }
+  if (answer || !isLive() || !canAnswerHere()) nodes.push(lockedLimitAnswer(answer));
+  return nodes;
+}
+
+/* The answer form of a limit question where it cannot be answered: a finished run, an exported
+   file, or a run the terminal answers. The chosen answer is marked with a check and aria-pressed. */
+function lockedLimitAnswer(answer) {
+  const chosen = limitAnswerKey(answer);
+  const area = el("textarea", { attrs: { rows: "2", disabled: "", "aria-label": "방법", placeholder: "방법" } });
+  if (chosen === "method") area.value = answer.text;
+  const note = !answer ? "여기서는 답할 수 없습니다." : answer.timed_out ? "답이 없어 실행이 멈췄습니다." : "고른 답";
+  return el("div", { className: "limit-answer locked", attrs: { role: "group", "aria-label": "한도 질문의 답 (잠김)" } }, [
+    el("p", { className: "composer-note", text: `한도 질문의 답 양식 (잠김) · ${note}` }),
+    area,
+    el("div", { className: "limit-buttons" }, LIMIT_ANSWERS.map((choice) => el("button", {
+      className: choice.className,
+      text: chosen === choice.key ? `✓ ${choice.label}` : choice.label,
+      attrs: { type: "button", disabled: "", "aria-pressed": String(chosen === choice.key) },
+    }))),
+  ]);
+}
+
+function originTag(item) {
+  if (!item || !ORIGIN_LABELS[item.origin]) return null;
+  const stage = Number.isInteger(item.stage) ? ` · 단계 ${item.stage}` : "";
+  return el("span", { className: `origin-tag ${item.origin}`, text: `${ORIGIN_LABELS[item.origin]}${stage}` });
 }
 
 function describeEntry(entry) {
@@ -180,7 +291,7 @@ function registrationItemsView(question, answer) {
     const decision = decided.get(item.n);
     const head = `${item.action === "update" ? `고침 ${item.id || ""}` : "새 항목"}`.trim();
     return el("li", { className: "registration-item" }, [
-      el("span", { className: "registration-head", text: `${item.n}. ${head}` }),
+      el("span", { className: "registration-head" }, [`${item.n}. ${head} `, originTag(item)]),
       el("span", { className: "registration-body", text: describeEntry(item.entry) }),
       decision ? el("span", { className: `registration-decision ${decision.decision}`, text: ITEM_DECISION_LABELS[decision.decision] || decision.decision }) : null,
       decision && decision.entry ? el("span", { className: "registration-body edited", text: `고친 내용 · ${describeEntry(decision.entry)}` }) : null,
@@ -233,7 +344,8 @@ function pinnable() {
   const pending = pendingQuestion();
   const entry = state.entries[state.index];
   return Boolean(pending && entry === pending && canAnswerHere() && pending.observation && pending.observation.image
-    && pending.question.kind !== "registration" && pending.question.kind !== "completion" && !state.sentAnswers.has(pending.question.id));
+    && pending.question.kind !== "registration" && pending.question.kind !== "completion" && !isLimitQuestion(pending.question)
+    && !state.sentAnswers.has(pending.question.id));
 }
 
 function onStageClick(event) {
@@ -262,8 +374,12 @@ function onStageClick(event) {
 function chatRecords(events) {
   const questions = new Map();
   const records = [];
+  let planned = null;
   for (const event of events) {
-    if (event.type === "question") {
+    if (event.type === "plan" && Array.isArray(event.stages)) {
+      if (planned && event.revision) records.push({ kind: "plan", event, before: planned.stages.length });
+      planned = event;
+    } else if (event.type === "question") {
       const record = { kind: "question", question: event, answer: null };
       questions.set(event.id, record);
       records.push(record);
@@ -290,6 +406,11 @@ function chatMessage(record) {
       decisions,
       pin,
     ]);
+  }
+  if (record.kind === "plan") {
+    const { event } = record;
+    const step = event.step !== undefined ? ` · 스텝 ${event.step}` : "";
+    return systemMessage(`계획을 고침 · ${event.revision}번째 · 단계 ${record.before}개 → ${event.stages.length}개${step}`, "plan");
   }
   if (record.kind === "completion") {
     const { event } = record;
@@ -320,7 +441,8 @@ function registrationDecisionLines(question, answer) {
     const entry = decision.entry || (item && item.entry);
     return el("li", { className: `chat-item ${decision.decision}` }, [
       el("span", { className: "chat-item-decision", text: `${decision.n}. ${ITEM_DECISION_LABELS[decision.decision] || decision.decision}` }),
-      el("span", { text: entry ? describeEntry(entry) : "" }),
+      originTag(item),
+      el("span", { text: entry ? ` ${describeEntry(entry)}` : "" }),
     ]);
   }));
 }
@@ -333,8 +455,11 @@ function questionMessage(record) {
     if (index >= 0) select(index);
   });
   const items = question.kind === "registration"
-    ? el("ol", { className: "chat-items" }, (question.items || []).map((item) => el("li", { text: `${item.n}. ${describeEntry(item.entry)}` })))
-    : null;
+    ? el("ol", { className: "chat-items" }, (question.items || []).map((item) => {
+      const tag = originTag(item);
+      return el("li", {}, [`${item.n}. `, tag, tag ? " " : null, describeEntry(item.entry)]);
+    }))
+    : isLimitQuestion(question) ? limitFacts(question) : null;
   return el("li", { className: `chat-msg question ${record.answer ? "" : "open"}`.trim() }, [
     el("span", { className: "chat-who", text: `질문 · ${questionKindLabel(question.kind)}${question.step !== undefined ? ` · 스텝 ${question.step}` : ""}` }),
     el("p", { className: "chat-text", text: question.text || "" }),
@@ -353,12 +478,15 @@ function renderChat() {
   const pending = pendingQuestion();
   const chat = $("chat");
   chat.hidden = records.length === 0 && !pending;
+  $("layout").classList.toggle("no-chat", chat.hidden);
+  renderPendingBadge();
   if (chat.hidden) {
     state.chatShown = null;
     $("chat-composer").replaceChildren();
     state.composerKey = null;
     return;
   }
+  revealPendingQuestion(pending);
   const logKey = `${state.runId}|${state.events.length}|${isLive()}`;
   if (state.chatShown !== logKey) {
     state.chatShown = logKey;
@@ -367,6 +495,37 @@ function renderChat() {
     log.scrollTop = log.scrollHeight;
   }
   renderComposer(pending);
+  focusAnswer(pending);
+}
+
+function renderPendingBadge() {
+  $("chat-pending").hidden = !(state.collapsed.chat && pendingQuestion());
+}
+
+function revealPendingQuestion(pending) {
+  if (!pending || !canAnswerHere()) return;
+  const key = `${state.runId}|${pending.question.id}`;
+  if (state.revealedQuestion === key) return;
+  state.revealedQuestion = key;
+  if (state.collapsed.chat) setCollapsed("chat", false);
+}
+
+function typingElsewhere() {
+  const active = document.activeElement;
+  if (!active || active === document.body || $("chat-composer").contains(active)) return false;
+  const tag = active.tagName.toLowerCase();
+  return ["input", "textarea", "select"].includes(tag) || active.isContentEditable;
+}
+
+function focusAnswer(pending) {
+  if (!pending || !canAnswerHere() || state.collapsed.chat || state.sentAnswers.has(pending.question.id)) return;
+  const key = `${state.runId}|${pending.question.id}`;
+  if (state.focusedQuestion === key) return;
+  const area = $("chat-composer").querySelector("textarea:not([disabled]):not([hidden])");
+  if (!area) return;
+  state.focusedQuestion = key;
+  $("chat-log").scrollTop = $("chat-log").scrollHeight;
+  if (!typingElsewhere()) area.focus();
 }
 
 /* ---------- answer form ---------- */
@@ -381,8 +540,13 @@ function renderComposer(pending) {
     return;
   }
   state.composerKey = key;
+  box.classList.toggle("long", Boolean(pending && answerable && !sent && pending.question.kind === "registration"));
   if (!pending) {
     box.replaceChildren();
+    return;
+  }
+  if (!answerable && isLimitQuestion(pending.question)) {
+    box.replaceChildren(limitComposer(pending.question, true));
     return;
   }
   if (!answerable) {
@@ -398,7 +562,8 @@ function renderComposer(pending) {
     return;
   }
   const { question } = pending;
-  if (question.kind === "completion") box.replaceChildren(completionComposer(question));
+  if (isLimitQuestion(question)) box.replaceChildren(limitComposer(question, false));
+  else if (question.kind === "completion") box.replaceChildren(completionComposer(question));
   else if (question.kind === "registration") box.replaceChildren(registrationComposer(question));
   else box.replaceChildren(textComposer(question));
 }
@@ -411,6 +576,9 @@ function draftArea(question, placeholder) {
   const area = el("textarea", { attrs: { rows: "2", maxlength: String(ANSWER_MAX_CHARS), placeholder, "aria-label": "답" } });
   area.value = state.answerDrafts.get(question.id) || "";
   area.addEventListener("input", () => state.answerDrafts.set(question.id, area.value));
+  area.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") area.blur();
+  });
   return area;
 }
 
@@ -494,6 +662,62 @@ function completionComposer(question) {
   ]);
 }
 
+function limitPrompt(question) {
+  if (question.kind === "plan_limit") {
+    return `계획을 ${Number.isInteger(question.revisions) ? question.revisions : "여러"}번 고쳤습니다. 더 고치게 할까요?`;
+  }
+  const stage = Number.isInteger(question.stage) ? `단계 ${question.stage}` : "이 단계";
+  return `${stage}에서 호출 ${Number.isInteger(question.calls) ? question.calls : "?"}번을 썼습니다. 한도만큼 더 줄까요?`;
+}
+
+/* Continue (accepted, no text), send a method (accepted with the text) or stop (not accepted).
+   Locked, every control is disabled: the terminal answers this run. */
+function limitComposer(question, locked) {
+  const area = locked
+    ? el("textarea", { attrs: { rows: "2", disabled: "", placeholder: "이 뷰어에서는 답할 수 없습니다" } })
+    : draftArea(question, "방법을 적어 보내면 모델이 읽고 이어서 합니다 (선택)");
+  area.setAttribute("aria-label", "방법");
+  const message = composerMessage();
+  const buttons = LIMIT_ANSWERS.map((choice) => el("button", {
+    className: choice.className, text: choice.label, attrs: { type: "button", ...(locked ? { disabled: "" } : {}) },
+  }));
+  const [go, method, stop] = buttons;
+  const prompt = locked ? `${limitPrompt(question)} 이 실행은 터미널에서 답합니다.` : limitPrompt(question);
+  const box = el("div", {
+    className: locked ? "composer limit-composer locked" : "composer limit-composer",
+    attrs: { role: "group", "aria-label": "한도 질문에 답하기" },
+  }, [
+    el("p", { className: "composer-note limit-prompt", text: prompt }),
+    area,
+    el("div", { className: "limit-buttons" }, buttons),
+    el("p", { className: "composer-note", text: "계속: 한도만큼 더 · 방법 보내기: 적은 글을 모델이 읽고 계속 · 중단: 실행을 멈춤" }),
+    message,
+  ]);
+  if (locked) return box;
+  const refresh = () => {
+    if (!go.disabled) method.disabled = area.value.trim() === "";
+  };
+  const send = async (body) => {
+    await submitAnswer(question, { question_id: question.id, ...body }, [...buttons, area], message);
+    refresh();
+  };
+  go.addEventListener("click", () => send({ text: "", accepted: true }));
+  method.addEventListener("click", () => {
+    const text = area.value.trim();
+    if (text) send({ text, accepted: true });
+  });
+  stop.addEventListener("click", () => send({ text: "", accepted: false }));
+  area.addEventListener("input", refresh);
+  area.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && area.value.trim()) {
+      event.preventDefault();
+      method.click();
+    }
+  });
+  refresh();
+  return box;
+}
+
 function registrationDraft(question) {
   if (!state.registrationDrafts.has(question.id)) state.registrationDrafts.set(question.id, new Map());
   return state.registrationDrafts.get(question.id);
@@ -550,7 +774,7 @@ function registrationComposer(question) {
     });
     const head = item.action === "update" ? `고침 ${item.id || ""}` : "새 항목";
     return el("li", { className: "registration-choice" }, [
-      el("p", { className: "registration-head", text: `${item.n}. ${head}` }),
+      el("p", { className: "registration-head" }, [`${item.n}. ${head} `, originTag(item)]),
       el("p", { className: "registration-body", text: describeEntry(item.entry) }),
       el("div", { className: "decision-buttons", attrs: { role: "group", "aria-label": `${item.n}번 결정` } }, buttons),
       edit,

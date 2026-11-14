@@ -4,66 +4,92 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>에이전트 단계 뷰어</title>
+  <title>에이전트 스텝 뷰어</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/chat.js" defer></script>
   <script src="/static/knowledge.js" defer></script>
+  <script src="/static/stages.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
-    <h1>에이전트 단계 뷰어</h1>
+    <h1>에이전트 스텝 뷰어</h1>
     <div id="view-switch" class="segmented view-switch" role="group" aria-label="보기" hidden>
       <button type="button" id="show-runs" aria-pressed="true">실행</button>
       <button type="button" id="show-knowledge" aria-pressed="false">지식</button>
     </div>
-    <p class="hint" id="key-hint">← → 단계 이동 · B 동작 전/후 · A 전체 요소/대상만 · T 텍스트 박스</p>
+    <p class="hint" id="key-hint">← → 스텝 이동 · B 동작 전/후 · A 전체 요소/대상만 · T 텍스트 박스</p>
   </header>
 
   <div id="export-warning" class="export-warning" role="note" hidden></div>
 
-  <form id="start-form" class="start-form" hidden autocomplete="off">
-    <label class="field goal-field">
-      <span>지시</span>
-      <input id="goal" name="goal" type="text" placeholder="예: 설정 패널을 열어줘" maxlength="2000">
-    </label>
-    <label class="field exe-field">
-      <span>실행 파일</span>
-      <input id="exe" name="exe" type="text" spellcheck="false">
-    </label>
-    <label class="field system-field">
-      <span>시스템</span>
-      <input id="system" name="system" type="text" maxlength="64" spellcheck="false" placeholder="비우면 실행 파일 이름" title="지식을 나눠 두는 이름. 영문, 숫자, 한글, '.', '_', '-'">
-    </label>
-    <label class="field">
-      <span>권한</span>
-      <select id="level" name="level"></select>
-    </label>
-    <label class="check-field">
-      <input id="approve" name="approve" type="checkbox">
-      <span>동작 전 승인</span>
-    </label>
-    <button type="submit" id="start-run" class="primary">실행</button>
-    <span id="start-status" class="start-status" role="status" aria-live="polite"></span>
+  <form id="start-form" class="start-form" hidden autocomplete="off" novalidate>
+    <div class="start-row">
+      <label class="field goal-field">
+        <span class="visually-hidden">지시</span>
+        <input id="goal" name="goal" type="text" placeholder="지시 · 예: 설정 패널을 열어줘" maxlength="2000" aria-label="지시">
+      </label>
+      <button type="button" id="toggle-settings" class="ghost settings-toggle" aria-expanded="false" aria-controls="start-settings">설정</button>
+      <span id="settings-summary" class="settings-summary"></span>
+      <span id="start-status" class="start-status" role="status" aria-live="polite"></span>
+      <button type="submit" id="start-run" class="primary">실행</button>
+    </div>
+    <div id="start-settings" class="start-settings" hidden>
+      <label class="field exe-field">
+        <span>실행 파일</span>
+        <input id="exe" name="exe" type="text" spellcheck="false">
+      </label>
+      <label class="field system-field">
+        <span>시스템</span>
+        <input id="system" name="system" type="text" maxlength="64" spellcheck="false" placeholder="비우면 실행 파일 이름" title="지식을 나눠 두는 이름. 영문, 숫자, 한글, '.', '_', '-'">
+      </label>
+      <label class="field">
+        <span>권한</span>
+        <select id="level" name="level"></select>
+      </label>
+      <label class="field stage-limit-field">
+        <span>단계별 호출 한도</span>
+        <input id="stage-call-limit" name="stage_call_limit" type="text" inputmode="numeric" maxlength="4" spellcheck="false" placeholder="비우면 기본값" title="계획의 단계 하나가 쓸 수 있는 모델 호출 수. 다 쓰면 사람에게 묻습니다">
+      </label>
+      <label class="check-field">
+        <input id="approve" name="approve" type="checkbox">
+        <span>동작 전 승인</span>
+      </label>
+    </div>
   </form>
 
-  <div class="layout">
-    <nav class="runs" aria-label="실행 목록">
+  <div id="layout" class="layout">
+    <nav id="runs-panel" class="runs panel" aria-label="실행 목록">
       <div class="panel-title">
+        <button type="button" id="toggle-runs" class="panel-toggle" aria-expanded="true" aria-controls="runs-body" data-panel="runs"><span class="panel-arrow" aria-hidden="true"></span><span class="visually-hidden">실행 목록 접기·펴기</span></button>
         <h2>실행</h2>
-        <button type="button" id="refresh-runs" class="ghost" title="목록 새로고침">새로고침</button>
+        <button type="button" id="refresh-runs" class="ghost panel-extra" title="목록 새로고침">새로고침</button>
       </div>
-      <div class="run-filters" role="search">
-        <input id="run-search" type="search" placeholder="지시·실행 파일 검색" maxlength="200" aria-label="지시나 실행 파일 이름으로 검색" autocomplete="off">
-        <div class="run-filter-row">
-          <select id="run-status" aria-label="상태"></select>
-          <input id="run-since" type="date" aria-label="이 날짜 이후" title="이 날짜 이후">
+      <div id="runs-body" class="panel-body runs-body">
+        <div class="run-filters" role="search">
+          <input id="run-search" type="search" placeholder="지시·실행 파일 검색" maxlength="200" aria-label="지시나 실행 파일 이름으로 검색" autocomplete="off">
+          <div class="run-filter-row">
+            <select id="run-status" aria-label="상태"></select>
+            <input id="run-since" type="date" aria-label="이 날짜 이후" title="이 날짜 이후">
+          </div>
         </div>
+        <ul id="run-list" class="run-list"></ul>
+        <p id="run-empty" class="empty" hidden>기록된 실행이 없습니다.</p>
+        <button type="button" id="run-more" class="ghost run-more" hidden>더 불러오기</button>
       </div>
-      <ul id="run-list" class="run-list"></ul>
-      <p id="run-empty" class="empty" hidden>기록된 실행이 없습니다.</p>
-      <button type="button" id="run-more" class="ghost run-more" hidden>더 불러오기</button>
     </nav>
+
+    <section id="chat" class="chat panel" aria-label="질문과 답" hidden>
+      <div class="panel-title">
+        <button type="button" id="toggle-chat" class="panel-toggle" aria-expanded="true" aria-controls="chat-body" data-panel="chat"><span class="panel-arrow" aria-hidden="true"></span><span class="visually-hidden">대화 접기·펴기</span></button>
+        <h2 class="chat-title">대화</h2>
+        <span id="chat-pending" class="pending-badge" hidden>질문 대기</span>
+      </div>
+      <div id="chat-body" class="panel-body chat-body">
+        <ol id="chat-log" class="chat-log"></ol>
+        <div id="chat-composer" class="chat-composer"></div>
+      </div>
+    </section>
 
     <main class="stage-area">
       <div id="banner" class="banner" role="status" hidden></div>
@@ -80,6 +106,13 @@
         <span id="frame-label" class="frame-label"></span>
         <span id="truncated-note" class="truncated-note" hidden></span>
       </div>
+      <section id="stage-bar" class="stage-bar" aria-label="단계" hidden>
+        <ol id="stage-list" class="stage-list"></ol>
+        <div class="stage-detail-row">
+          <p id="stage-detail" class="stage-detail" aria-live="polite"></p>
+          <button type="button" id="stage-detail-toggle" class="ghost stage-detail-toggle" aria-expanded="false" aria-controls="stage-detail" hidden>전체 보기</button>
+        </div>
+      </section>
       <div class="stage-scroll">
         <div id="stage" class="stage" hidden>
           <img id="frame" alt="">
@@ -100,8 +133,12 @@
       <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
     </main>
 
-    <aside class="details" aria-label="단계 정보와 대화">
-      <div class="details-scroll">
+    <aside id="details-panel" class="details panel" aria-label="스텝 정보">
+      <div class="panel-title">
+        <button type="button" id="toggle-details" class="panel-toggle" aria-expanded="true" aria-controls="details-body" data-panel="details"><span class="panel-arrow" aria-hidden="true"></span><span class="visually-hidden">스텝 정보 접기·펴기</span></button>
+        <h2>스텝 정보</h2>
+      </div>
+      <div id="details-body" class="panel-body details-scroll">
         <section id="summary-box" class="summary-box" aria-label="실행 요약" hidden>
           <div class="summary-head">
             <button type="button" id="toggle-summary" class="ghost" aria-expanded="false" aria-controls="summary-text">실행 요약 보기</button>
@@ -117,11 +154,6 @@
           <pre id="observation-text"></pre>
         </details>
       </div>
-      <section id="chat" class="chat" aria-label="질문과 답" hidden>
-        <h2 class="chat-title">대화</h2>
-        <ol id="chat-log" class="chat-log"></ol>
-        <div id="chat-composer" class="chat-composer"></div>
-      </section>
     </aside>
   </div>
 
@@ -129,7 +161,7 @@
 
   <footer class="timeline-bar">
     <div id="run-summary" class="run-summary" role="status" hidden></div>
-    <ol id="timeline" class="timeline" aria-label="단계 타임라인"></ol>
+    <ol id="timeline" class="timeline" aria-label="스텝 타임라인"></ol>
   </footer>
 </body>
 </html>

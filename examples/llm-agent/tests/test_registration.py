@@ -7,7 +7,7 @@ import pytest
 from agent.ask import NO_ANSWER, Answer
 from agent.guard import AgentStopped
 from agent.knowledge import KnowledgeStore
-from agent.registration import draft, register_after_run
+from agent.registration import DRAFT_INSTRUCTIONS, ITEM_SCHEMA, draft, register_after_run
 
 RUN = "20261113-101500"
 DAY = date(2026, 11, 13)
@@ -27,16 +27,33 @@ CONFIRM_EXCHANGE = {
     "failed_knowledge_id": None,
 }
 
-RESOLUTION_ITEM = {"action": "add", "id": None, "exchange": 1, "type": "resolution",
+RESOLUTION_ITEM = {"action": "add", "id": None, "exchange": 1, "stage": None, "type": "resolution",
                    "situation": "선택 칸의 가운데를 눌러도 목록이 열리지 않는다",
                    "resolution": "선택 칸은 오른쪽 끝의 화살표를 눌러 연다",
                    "task": None, "checks": None}
-COMPLETION_ITEM = {"action": "add", "id": None, "exchange": None, "type": "completion",
+DISCOVERED_ITEM = {"action": "add", "id": None, "exchange": None, "stage": 2, "type": "resolution",
+                   "situation": "찾는 값이 세 칸 중 어디에 있는지 몰라 칸마다 열어 보았다",
+                   "resolution": "값은 가운데 칸의 목록에 있다",
+                   "task": None, "checks": None}
+COMPLETION_ITEM = {"action": "add", "id": None, "exchange": None, "stage": None, "type": "completion",
                    "situation": None, "resolution": None, "task": "조회 결과를 엑셀로 저장하는 작업",
                    "checks": [{"kind": "file", "path": None, "pattern": "*.xlsx",
                                "role": None, "name": None, "name_contains": None}]}
 HUMAN_NOTE = {"goal": "엑셀로 저장해줘", "evidence": "저장함", "saved_path": r"C:\out\a.xlsx", "by": "human"}
 HARNESS_NOTE = {"goal": "설정 열기", "evidence": "열림", "saved_path": None, "by": "harness"}
+
+
+def stage_record(n, status="done", signals=()):
+    return {"n": n, "goal": f"단계 {n}의 결과", "done_when": f"단계 {n}의 확인", "status": status, "calls": 3,
+            "kind": "text" if status == "done" else None, "note": f"단계 {n}의 메모", "limit_questions": 0,
+            "actions": [{"tool": "click", "intent": f"단계 {n}에서 누름", "expected_met": True, "refused_code": None,
+                         "opened": 1, "closed": 1}],
+            "signals": list(signals)}
+
+
+CLEAN_STAGE = stage_record(1)
+DETOUR_STAGE = stage_record(2, signals=["abandoned_window", "looked_twice"])
+STOPPED_STAGE = stage_record(3, status="stopped", signals=["mismatch"])
 
 
 def function_call(items):
@@ -60,11 +77,12 @@ def drafting(*items, tokens=100):
 
 
 class FakeToolbox:
-    def __init__(self, exchanges=(), answers=(), finish_note=None, can_ask=True):
+    def __init__(self, exchanges=(), answers=(), finish_note=None, can_ask=True, stage_records=None):
         self._exchanges = list(exchanges)
         self.answers = list(answers)
         self.finish_note = finish_note
         self.can_ask = can_ask
+        self.stage_records = stage_records
         self.questions = []
 
     def exchanges(self):
@@ -127,7 +145,7 @@ def test_approved_item_is_saved_with_its_source(store, events):
     assert tokens == 100 and saved["resolution"] == RESOLUTION_ITEM["resolution"]
     assert saved["id"] == "r-20261113-001"
     assert saved["source"] == {"run_id": RUN, "question": STUCK_EXCHANGE["question"]["text"],
-                               "answer": "4번", "date": "2026-11-13"}
+                               "answer": "4번", "origin": "question", "date": "2026-11-13"}
     assert events[-1] == {"type": "registration",
                           "saved": [{"id": "r-20261113-001", "type": "resolution", "action": "add"}],
                           "rejected": 0}
@@ -140,7 +158,7 @@ def test_the_question_shows_the_draft_items_in_the_contract_shape(store, events)
 
     question = toolbox.questions[0]
     assert question["kind"] == "registration" and question["text"] == "다음 내용을 등록할까요?"
-    assert question["items"] == [{"n": 1, "action": "add", "id": None, "entry": {
+    assert question["items"] == [{"n": 1, "action": "add", "id": None, "origin": "question", "stage": None, "entry": {
         "type": "resolution", "situation": RESOLUTION_ITEM["situation"], "resolution": RESOLUTION_ITEM["resolution"]}}]
 
 
@@ -291,7 +309,7 @@ def test_draft_sends_one_call_with_only_the_proposal_tool_and_the_material():
     for text in ("4번", "목록이 열리지 않습니다", "r-1", "엑셀로 저장해줘", ".xlsx", "human"):
         assert text in sent, text
     assert "coordinates" in model.inputs[0]["instructions"]
-    assert items == [{"n": 1, "action": "add", "id": None, "exchange": 1, "entry": {
+    assert items == [{"n": 1, "action": "add", "id": None, "exchange": 1, "stage": None, "origin": "question", "entry": {
         "type": "resolution", "situation": RESOLUTION_ITEM["situation"], "resolution": RESOLUTION_ITEM["resolution"]}}]
 
 
@@ -334,3 +352,114 @@ def test_with_the_real_toolbox_the_answer_is_registered_without_coordinates(tmp_
     assert asker.questions[-1]["kind"] == "registration" and asker.questions[-1]["id"] == "q2"
     assert [e["type"] for e in observer.events if e["type"] in ("question", "answer")][-2:] == ["question", "answer"]
     assert events[-1]["saved"][0]["action"] == "add"
+
+
+def material(model):
+    return json.loads(model.inputs[0]["items"][0]["content"])
+
+
+def test_a_run_with_no_question_but_a_detour_is_drafted(store, events):
+    model = drafting(DISCOVERED_ITEM)
+    toolbox = FakeToolbox(answers=[approve_all], finish_note=HARNESS_NOTE, stage_records=[CLEAN_STAGE, DETOUR_STAGE])
+
+    tokens = register_after_run(model, toolbox, events.append, store=store, run_id=RUN, today=DAY)
+
+    assert tokens == 100 and len(model.inputs) == 1
+    assert material(model)["stages"] == [DETOUR_STAGE]
+    assert material(model)["exchanges"] == []
+    assert store.entries()[0]["resolution"] == DISCOVERED_ITEM["resolution"]
+
+
+@pytest.mark.parametrize("records", [None, [], [CLEAN_STAGE], [CLEAN_STAGE, STOPPED_STAGE]])
+def test_a_run_with_no_question_and_no_detour_drafts_nothing(store, events, records):
+    model = drafting(DISCOVERED_ITEM)
+    toolbox = FakeToolbox(answers=[approve_all], finish_note=HARNESS_NOTE, stage_records=records)
+
+    assert register_after_run(model, toolbox, events.append, store=store, run_id=RUN) == 0
+    assert model.inputs == [] and toolbox.questions == [] and events == []
+
+
+def test_a_detour_needs_someone_to_approve(store, events):
+    model = drafting(DISCOVERED_ITEM)
+    toolbox = FakeToolbox(finish_note=HARNESS_NOTE, stage_records=[DETOUR_STAGE], can_ask=False)
+
+    assert register_after_run(model, toolbox, events.append, store=store, run_id=RUN) == 0
+    assert model.inputs == []
+
+
+def test_only_done_stages_with_a_signal_are_given_to_the_draft(store, events):
+    model = drafting()
+    toolbox = FakeToolbox(exchanges=[STUCK_EXCHANGE], finish_note=HARNESS_NOTE,
+                          stage_records=[CLEAN_STAGE, DETOUR_STAGE, STOPPED_STAGE])
+
+    register_after_run(model, toolbox, events.append, store=store, run_id=RUN)
+
+    assert material(model)["stages"] == [DETOUR_STAGE]
+
+
+def test_the_draft_instructions_explain_stage_records_and_keep_the_bans():
+    instructions = DRAFT_INSTRUCTIONS
+    for words in ("stages", "signals", "situation", "coordinates", "[n] mark numbers", "refs", "window ids",
+                  "values"):
+        assert words in instructions, words
+    assert "stage" in ITEM_SCHEMA["required"]
+
+
+def test_a_discovered_item_is_shown_with_its_origin(store, events):
+    toolbox = FakeToolbox(exchanges=[STUCK_EXCHANGE], answers=[approve_all], finish_note=HARNESS_NOTE,
+                          stage_records=[DETOUR_STAGE])
+
+    register_after_run(drafting(RESOLUTION_ITEM, DISCOVERED_ITEM), toolbox, events.append, store=store, run_id=RUN,
+                       today=DAY)
+
+    shown = toolbox.questions[0]["items"]
+    assert [(item["n"], item["origin"], item["stage"]) for item in shown] == [(1, "question", None),
+                                                                              (2, "discovered", 2)]
+    assert shown[1]["entry"] == {"type": "resolution", "situation": DISCOVERED_ITEM["situation"],
+                                 "resolution": DISCOVERED_ITEM["resolution"]}
+
+
+def test_a_stage_that_had_no_detour_does_not_make_an_item_discovered(store, events):
+    toolbox = FakeToolbox(exchanges=[STUCK_EXCHANGE], answers=[approve_all], finish_note=HARNESS_NOTE,
+                          stage_records=[CLEAN_STAGE, DETOUR_STAGE])
+    named_clean_stage = {**DISCOVERED_ITEM, "stage": 1}
+    from_question = {**RESOLUTION_ITEM, "stage": 2}
+
+    register_after_run(drafting(named_clean_stage, from_question), toolbox, events.append, store=store, run_id=RUN,
+                       today=DAY)
+
+    assert [(item["origin"], item["stage"]) for item in toolbox.questions[0]["items"]] == [
+        ("question", None), ("question", None)]
+
+
+def test_a_saved_discovered_entry_records_its_origin(store, events):
+    toolbox = FakeToolbox(exchanges=[STUCK_EXCHANGE], answers=[approve_all], finish_note=HARNESS_NOTE,
+                          stage_records=[DETOUR_STAGE])
+
+    register_after_run(drafting(DISCOVERED_ITEM), toolbox, events.append, store=store, run_id=RUN, today=DAY)
+
+    assert store.entries()[0]["source"] == {"run_id": RUN, "origin": "discovered", "stage": 2, "date": "2026-11-13"}
+    assert events[-1]["saved"] == [{"id": "r-20261113-001", "type": "resolution", "action": "add"}]
+
+
+def test_rejecting_every_item_saves_nothing(store, events):
+    toolbox = FakeToolbox(exchanges=[STUCK_EXCHANGE], answers=[reject_all], finish_note=HARNESS_NOTE,
+                          stage_records=[DETOUR_STAGE])
+
+    register_after_run(drafting(RESOLUTION_ITEM, DISCOVERED_ITEM), toolbox, events.append, store=store, run_id=RUN,
+                       today=DAY)
+
+    assert len(toolbox.questions[0]["items"]) == 2
+    assert store.entries(include_disabled=True) == []
+    assert not store.folder.exists() or not any(store.folder.glob("*.yaml"))
+    assert events[-1] == {"type": "registration", "saved": [], "rejected": 2}
+
+
+def test_a_discovered_item_with_coordinates_is_dropped_before_asking(store, events):
+    toolbox = FakeToolbox(answers=[approve_all], finish_note=HARNESS_NOTE, stage_records=[DETOUR_STAGE])
+    pointed = {**DISCOVERED_ITEM, "resolution": "(1192, 562)을 누른다"}
+
+    register_after_run(drafting(pointed), toolbox, events.append, store=store, run_id=RUN, today=DAY)
+
+    assert toolbox.questions == [] and store.entries() == []
+    assert events[-1]["type"] == "warning"

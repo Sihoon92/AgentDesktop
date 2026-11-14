@@ -21,7 +21,7 @@ from agent.loop import RunResult, run_agent
 from agent.recorder import RunRecorder
 from agent.registration import register_after_run
 from agent.summary import current_code, write_summary
-from agent.task import TaskError, task_from_args
+from agent.task import Task, TaskError, task_from_args
 from agent.tools import Toolbox
 
 
@@ -84,6 +84,11 @@ class RunManager:
         """The settings file's system name that a form left empty falls back to, or None."""
         return self._task_defaults.get("system") or None
 
+    @property
+    def default_stage_call_limit(self):
+        """The calls a stage gets when the form leaves the limit empty: the settings file's, else the code's."""
+        return self._task_defaults.get("stage_call_limit") or Task.stage_call_limit
+
     def decide(self, run_id, proposal_id, approved, comment=""):
         """Answers a proposal of the active run. False when the run is not active, it was
         started without approval, or the proposal is unknown or already answered."""
@@ -109,11 +114,12 @@ class RunManager:
         with self._lock:
             return self._ask_gate is not None
 
-    def start(self, goal, exe=None, level=3, approve=False, system=None):
+    def start(self, goal, exe=None, level=3, approve=False, system=None, stage_call_limit=None):
         """Returns the new run id once its folder exists; the run continues in the background.
         With approve, every app-changing action waits for decide() or times out as a stop.
-        `system` names the knowledge folder; empty means the exe file name."""
-        task = self.build_task(goal, exe, level)
+        `system` names the knowledge folder; empty means the exe file name. `stage_call_limit`
+        is the calls each stage gets; None means the settings file's value or the default."""
+        task = self.build_task(goal, exe, level, stage_call_limit)
         if type(approve) is not bool:
             raise InvalidRun("approve는 true 또는 false여야 합니다")
         system = self.build_system(system, task.exe, task.system)
@@ -159,7 +165,7 @@ class RunManager:
         if thread is not None:
             thread.join(timeout)
 
-    def build_task(self, goal, exe, level):
+    def build_task(self, goal, exe, level, stage_call_limit=None):
         if not isinstance(goal, str) or not goal.strip():
             raise InvalidRun("지시를 입력해 주세요")
         exe = exe or self.default_exe
@@ -171,8 +177,13 @@ class RunManager:
             raise InvalidRun(f"실행 파일이 없습니다: {exe}")
         if type(level) is not int or not 0 <= level <= 3:
             raise InvalidRun("권한 단계는 0부터 3까지의 정수여야 합니다")
+        defaults = dict(self._task_defaults)
+        if stage_call_limit is not None:
+            if type(stage_call_limit) is not int or stage_call_limit < 1:
+                raise InvalidRun("단계별 호출 한도는 1 이상의 정수여야 합니다(비우면 기본값)")
+            defaults["stage_call_limit"] = stage_call_limit
         try:
-            return task_from_args(goal.strip(), exe, level, defaults=self._task_defaults)
+            return task_from_args(goal.strip(), exe, level, defaults=defaults)
         except TaskError as error:
             raise InvalidRun(str(error)) from error
 

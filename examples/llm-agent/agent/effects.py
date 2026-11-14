@@ -8,29 +8,42 @@ caret must not look like the screen reacted.
 
 from agent.tool_schemas import EXPECTATIONS
 
-__all__ = ["EXPECTATIONS", "diff", "met", "state"]
+__all__ = ["EXPECTATIONS", "WINDOW_EXPECTATIONS", "diff", "met", "state"]
 
+# The window list answers these for certain, so no picture is compared for them.
+WINDOW_EXPECTATIONS = ("window_opened", "window_closed")
 MAX_LISTED = 8
 FOCUSED = "focused"
 
 
-def state(windows, marks):
-    """Freezes the window list and one window's mark map ({n: element}) for diff()."""
+def state(windows, marks, window_id=None):
+    """Freezes the window list and one window's mark map ({n: element}) for diff().
+    `window_id` names the window the marks were read from, when known."""
     return {
         "windows": [{"id": w.get("id"), "title": w.get("title")} for w in windows or []],
         "elements": [marks[n] for n in sorted(marks or {})],
+        "window": window_id,
     }
 
 
 def diff(before, after):
-    """Returns the effects object of an action: windows, added, removed, changed, focus, none."""
+    """Returns the effects object of an action: windows, added, removed, changed, focus, none.
+
+    Elements are compared only when both sides were read from the same window, or when
+    either side does not say. When the marks before and after come from two different
+    windows (the window acted on closed, so the re-read fell to another), no element
+    counts as added, removed or changed; `observed_window` names the two windows instead.
+    """
     before_ids = {w["id"] for w in before["windows"]}
     after_ids = {w["id"] for w in after["windows"]}
     opened = [w for w in after["windows"] if w["id"] not in before_ids]
     closed = [w for w in before["windows"] if w["id"] not in after_ids]
 
-    old = _keyed(before["elements"])
-    new = _keyed(after["elements"])
+    switched = None
+    if before.get("window") and after.get("window") and before["window"] != after["window"]:
+        switched = {"before": before["window"], "after": after["window"]}
+    old = _keyed([] if switched else before["elements"])
+    new = _keyed([] if switched else after["elements"])
     added = [new[key] for key in new if key not in old]
     removed = [old[key] for key in old if key not in new]
     changed = []
@@ -59,7 +72,9 @@ def diff(before, after):
         "changed": changed[:MAX_LISTED],
         "focus": focus,
     }
-    effects["none"] = not (opened or closed or added or removed or changed or focus)
+    if switched:
+        effects["observed_window"] = switched
+    effects["none"] = not (opened or closed or added or removed or changed or focus or switched)
     return effects
 
 

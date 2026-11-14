@@ -22,7 +22,8 @@ COMMON_KEYS = ("id", "type", "status")
 COUNT_KEYS = ("uses", "failures")
 CONTENT_KEYS = {"resolution": ("situation", "resolution"), "completion": ("task", "checks")}
 TEXT_KEYS = ("situation", "resolution", "task")
-SOURCE_KEYS = {"run_id", "question", "answer", "date"}
+SOURCE_KEYS = {"run_id", "question", "answer", "date", "origin", "stage"}
+SOURCE_ORIGINS = ("question", "discovered")
 CHECK_KEYS = {"file": {"kind", "path", "pattern"}, "element": {"kind", "require"}, "human": {"kind"}}
 REQUIRE_KEYS = {"role", "name", "name_contains", "description_contains", "states"}
 FIELD_LABELS = {
@@ -355,6 +356,11 @@ def _check_source(source):
     for key, value in source.items():
         if value is not None and not isinstance(value, (str, int)):
             raise KnowledgeError(f"근거의 {key}는 글이어야 합니다")
+    if "origin" in source and source["origin"] not in SOURCE_ORIGINS:
+        raise KnowledgeError(f"근거의 출처는 {', '.join(SOURCE_ORIGINS)} 중 하나여야 합니다")
+    stage = source.get("stage")
+    if "stage" in source and (type(stage) is not int or stage < 1):
+        raise KnowledgeError("근거의 단계는 1 이상의 정수여야 합니다")
 
 
 def _ordered(entry):

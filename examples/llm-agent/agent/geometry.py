@@ -51,6 +51,20 @@ def contains(bounds, x, y):
     )
 
 
+def overlap_area(first, second):
+    """The area two bounds share, or 0 when either has no area or they do not meet."""
+    if not has_area(first) or not has_area(second):
+        return 0
+    width = min(first["x"] + first["width"], second["x"] + second["width"]) - max(first["x"], second["x"])
+    height = min(first["y"] + first["height"], second["y"] + second["height"]) - max(first["y"], second["y"])
+    return width * height if width > 0 and height > 0 else 0
+
+
+def area(bounds):
+    """The area of bounds, or 0 when it has none."""
+    return _area(bounds) if has_area(bounds) else 0
+
+
 def smallest_containing(elements, x, y):
     """Returns the element whose bounds contain (x, y) with the smallest area, or None."""
     best = None

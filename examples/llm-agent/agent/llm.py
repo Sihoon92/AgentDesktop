@@ -11,12 +11,14 @@ class OpenAIResponder:
         self._model = model
         self._reasoning_effort = reasoning_effort
 
-    def respond(self, instructions, items, tools):
+    def respond(self, instructions, items, tools, effort=None):
+        """One model call. `effort` sets the reasoning effort of this call only; None keeps the
+        responder's own."""
         return self._client.responses.create(
             model=self._model,
             instructions=instructions,
             input=items,
             tools=tools,
             parallel_tool_calls=False,
-            reasoning={"effort": self._reasoning_effort},
+            reasoning={"effort": effort or self._reasoning_effort},
         )

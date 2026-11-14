@@ -51,6 +51,7 @@ class AskingTools:
         self.knowledge = knowledge
         self.step = None
         self.finish_note = None
+        self.stage_records = []
         self._wall = wall
         self._started_at = wall()
         self._policy = AskPolicy(mismatch_limit=getattr(task, "mismatch_limit", 2))
@@ -103,6 +104,41 @@ class AskingTools:
             answer = self.asker.ask(question)
         record()
         return answer
+
+    def ask_about_screen(self, question):
+        """Asks a question the harness made, such as the stage limit question, over the current
+        window: the window is reported as the question's observation first, as for the ask tool."""
+        self._show_question_screen()
+        return self.ask({"window_id": self._marks_window() or self._current_window, **question})
+
+    def note_exchange(self, question, answer):
+        """Keeps a harness question the person answered with text, so registration can turn it into
+        an entry like an ask-tool question. The actions after it are logged into it as well."""
+        self._exchanges.append({
+            "question": {"candidates": [], **question},
+            "answer": {"text": answer.text, "pin_on": None},
+            "actions": [],
+            "failed_knowledge_id": self._failed_knowledge,
+        })
+        self._failed_knowledge = None
+
+    def evidence(self, marks, capture):
+        """Checks stage_done's evidence: exactly one of marks (all in the latest observation) or a
+        fresh capture, and actions not blocked until a question. Returns {"ok": True, "kind":
+        "text" | "picture"} or a refusal. Whether the evidence means the goal is the model's call."""
+        if self._policy.blocked:
+            return refused(REFUSAL_REASONS[BLOCKED_UNTIL_QUESTION], BLOCKED_UNTIL_QUESTION)
+        if bool(marks) == (capture is not None):
+            return refused("Give exactly one kind of evidence: marks from the latest observation, or the "
+                           "capture id of a look.", "bad_evidence")
+        if capture is not None:
+            refusal = self._fresh_capture(capture)[1]
+            return refusal if refusal is not None else {"ok": True, "kind": "picture"}
+        missing = [number for number in marks if number not in self._marks]
+        if missing:
+            return refused(f"{', '.join(f'[{n}]' for n in missing)} not in the latest observation. "
+                           "Observe again.", "stale_evidence")
+        return {"ok": True, "kind": "text"}
 
     def briefing(self):
         """What the model should know from earlier runs, or "" without knowledge."""
@@ -309,13 +345,20 @@ class AskingTools:
         self._emit({"type": "knowledge_used", "step": self.step, "id": entry_id,
                     "text": entry.get("resolution") or entry.get("task")})
 
+    def _note_delivery(self, result):
+        """Tells the policy whether the action it allowed reached the app. Only a result that
+        says not_delivered (every harness refusal does) keeps the answer and the ambiguity."""
+        disposition = result.get("disposition") or {}
+        not_delivered = result.get("ok") is False and disposition.get("delivery") == "not_delivered"
+        self._policy.note_ran(delivered=not not_delivered)
+
     def _after_action(self, name, arguments, target, result):
         """Feeds the outcome to the policy, counts a failed citation, and logs the action into
         the open exchange."""
-        self._policy.note_ran()
+        self._note_delivery(result)
         expected_met = result.get("expected_met")
         knowledge_id = arguments.get("knowledge_id")
-        if expected_met is not None:
+        if "expected_met" in result:
             self._policy.note_result(expected_met, knowledge_id is not None)
             if expected_met is False and knowledge_id is not None:
                 self.knowledge.count_failure(knowledge_id)

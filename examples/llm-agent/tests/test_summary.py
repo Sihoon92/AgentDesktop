@@ -70,7 +70,7 @@ def test_a_detailed_run_gives_every_line_of_the_contract():
         "  코드: 284f163",
         "  판정: gave_up · 스텝 14/40 · 토큰 31200",
         "  마지막 동작: [14] click_point → needs_confirmation",
-        "  동작: 9회 · 기대 지정 2 · 일치 1 · 불일치 1",
+        "  동작: 9회 · 기대 지정 2 · 일치 1 · 불일치 1 · 확인 못 함 0",
         "  거절: needs_confirmation 2 · blocked_until_question 1",
         "  오류 코드: STALE_REF 1 · TIMEOUT 2",
         "  질문: 3 · 답 1 · 무응답 2",
@@ -96,7 +96,7 @@ def test_the_recorded_question_run_is_summarized_from_its_events():
         "  코드: 284f163",
         "  판정: confirmed · 스텝 8 · 토큰 15200",
         "  마지막 동작: [6] click → 성공",
-        "  동작: 4회 · 기대 지정 0 · 일치 0 · 불일치 0",
+        "  동작: 4회 · 기대 지정 0 · 일치 0 · 불일치 0 · 확인 못 함 0",
         "  거절: 코드 없음 1",
         "  오류 코드: 없음",
         "  질문: 4 · 답 4 · 무응답 0",
@@ -194,7 +194,7 @@ def test_unknown_values_are_said_to_be_unknown_and_empty_lines_are_left_out():
         "요약 (화면 내용 없음)",
         "  코드: 알 수 없음",
         "  판정: 알 수 없음 · 스텝 알 수 없음 · 토큰 알 수 없음",
-        "  동작: 0회 · 기대 지정 0 · 일치 0 · 불일치 0",
+        "  동작: 0회 · 기대 지정 0 · 일치 0 · 불일치 0 · 확인 못 함 0",
         "  거절: 없음",
         "  오류 코드: 없음",
         "  질문: 0 · 답 0 · 무응답 0",
@@ -225,6 +225,7 @@ def test_kinds_that_are_not_counts_leave_the_observation_line_out():
         ({"ok": False}, "실패"),
         ({"ok": True, "expect": "window_opened", "expected_met": False}, "불일치"),
         ({"ok": True, "expect": "window_opened", "expected_met": True}, "일치"),
+        ({"ok": True, "expect": "value_changed", "expected_met": None}, "확인 못 함"),
         ({"ok": True}, "성공"),
         ({}, "알 수 없음"),
     ],
@@ -232,6 +233,34 @@ def test_kinds_that_are_not_counts_leave_the_observation_line_out():
 def test_the_last_action_says_how_it_ended(result, outcome):
     lines = summarize({}, [action(3, "click", **result)])
     assert f"  마지막 동작: [3] click → {outcome}" in lines
+
+
+def test_unconfirmed_actions_are_counted_apart_from_mismatches():
+    events = [
+        action(1, "click_part", ok=True, expect="value_changed", expected_met=None,
+               effects={"none": True, "picture": {"changed": True, "pixels": 71}}),
+        action(2, "click_part", ok=True, expect="value_changed", expected_met=False),
+        action(3, "click_part", ok=True, expect="value_changed", expected_met=None),
+        action(4, "click", ok=True),
+    ]
+
+    lines = summarize({}, events)
+
+    assert "  동작: 4회 · 기대 지정 3 · 일치 0 · 불일치 1 · 확인 못 함 2" in lines
+
+
+def test_a_recorded_verdict_decides_unconfirmed_before_the_old_rule():
+    events = [
+        action(1, "click_part", ok=True, expected_met=None, verdict="unconfirmed"),
+        action(2, "click_part", ok=True, expect="value_changed", expected_met=None, verdict="other"),
+        action(3, "click_part", ok=True, expect="value_changed", expected_met=None),
+    ]
+
+    lines = summarize({}, events)
+
+    assert "  동작: 3회 · 기대 지정 2 · 일치 0 · 불일치 0 · 확인 못 함 2" in lines
+    assert "  마지막 동작: [3] click_part → 확인 못 함" in lines
+    assert summarize({}, events[:2])[3] == "  마지막 동작: [2] click_part → 성공"
 
 
 def test_summarize_does_not_change_its_inputs():
@@ -416,3 +445,42 @@ def test_current_code_is_the_version_of_the_agent_folder(monkeypatch):
 
     assert summary.current_code() == "abc1234"
     assert seen == [Path(summary.__file__).resolve().parent.parent]
+
+
+STAGES = {"stage_count": 4, "stages_done": 3, "stage_calls": [3, 7, 1, 0], "limit_questions": 1,
+          "plan_revisions": 0, "max_call_tokens": 9120}
+
+
+def test_the_summary_shows_stage_counts():
+    lines = summarize({"status": "verified", "stages": STAGES}, [])
+
+    assert "  단계: 4 · 완료 3 · 단계별 호출 3/7/1/0 · 한도 질문 1 · 계획 고침 0" in lines
+    assert "  호출당 토큰 최대: 9120" in lines
+    assert lines.index("  호출당 토큰 최대: 9120") == lines.index(
+        "  단계: 4 · 완료 3 · 단계별 호출 3/7/1/0 · 한도 질문 1 · 계획 고침 0") + 1
+
+
+@pytest.mark.parametrize("run", [{}, {"stages": None}, {"stages": "4"},
+                                 {"stages": {**STAGES, "stage_count": 0, "stages_done": 0, "stage_calls": []}}])
+def test_a_run_without_stages_has_no_stage_line(run):
+    lines = summarize({"status": "verified", **run}, [])
+
+    assert not any(line.strip().startswith("단계:") for line in lines)
+
+
+def test_a_run_without_a_plan_still_shows_its_largest_call():
+    stats = {"stage_count": 0, "stages_done": 0, "stage_calls": [], "limit_questions": 0, "plan_revisions": 0,
+             "max_call_tokens": 5000}
+
+    lines = summarize({"status": "verified", "stages": stats}, [])
+
+    assert "  호출당 토큰 최대: 5000" in lines
+
+
+def test_odd_stage_values_are_unknown():
+    odd = {**STAGES, "stages_done": "3", "stage_calls": [3, "x"], "limit_questions": -1, "max_call_tokens": "많음"}
+
+    lines = summarize({"status": "verified", "stages": odd}, [])
+
+    assert "  단계: 4 · 완료 알 수 없음 · 단계별 호출 알 수 없음 · 한도 질문 알 수 없음 · 계획 고침 0" in lines
+    assert not any(line.strip().startswith("호출당 토큰 최대") for line in lines)

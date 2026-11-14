@@ -2,7 +2,7 @@ import re
 import threading
 
 from fake_cli import FakeCli
-from test_loop import OBSERVE, ScriptedModel, call, last_output
+from test_loop import OBSERVE, PLAN, STAGE_DONE, ScriptedModel, call, last_output
 
 from agent.approval import ApprovalGate, Decision, TerminalGate
 from agent.desktop import DesktopClient
@@ -43,13 +43,14 @@ def check_settings(items):
     return [call("check", {"ref": ref, "intent": "설정 패널을 연다"})]
 
 
-def opening_model(after_check):
+def opening_model(*after_check):
     return ScriptedModel(
         [
             [call("launch_target", {"intent": "앱을 연다"})],
+            PLAN,
             [call("observe", OBSERVE)],
             check_settings,
-            after_check,
+            *after_check,
         ]
     )
 
@@ -80,14 +81,14 @@ def test_approved_action_runs_once():
     gate = ScriptedGate()
     events = []
 
-    result = run_agent(opening_model([call("finish", {"success": True, "evidence": "opened"})]),
+    result = run_agent(opening_model(STAGE_DONE, [call("finish", {"success": True, "evidence": "opened"})]),
                        toolbox, task, events.append, gate=gate)
 
     assert result.status == "verified"
     assert cli.command_names().count("check") == 1
     check = next(p for p in gate.proposals if p["tool"] == "check")
     assert check["type"] == "proposal"
-    assert check["step"] == 3
+    assert check["step"] == 4
     assert check["intent"] == check["arguments"]["intent"]
     assert check["target"]["name"] == "설정 ◂"
     proposal_event = next(e for e in events if e.get("type") == "proposal" and e["tool"] == "check")

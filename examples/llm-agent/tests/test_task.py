@@ -89,8 +89,38 @@ def test_bad_new_keys_are_rejected(tmp_path, line):
         load_task(write(tmp_path, VALID + line + "\n"))
 
 
-def test_task_from_args_allows_forty_steps():
-    assert task_from_args("열어", r"C:\\a\\b.exe").max_steps == 40
+def test_task_from_args_allows_sixty_steps():
+    assert task_from_args("열어", r"C:\\a\\b.exe").max_steps == 60
+
+
+def test_stage_defaults():
+    task = task_from_args("열어", r"C:\a\b.exe")
+
+    assert (task.stage_call_limit, task.plan_reasoning_effort, task.token_budget) == (8, "medium", 600_000)
+
+
+def test_stage_keys_come_from_the_task_file(tmp_path):
+    task = load_task(write(tmp_path, VALID + "stage_call_limit: 5\nplan_reasoning_effort: high\n"
+                                             "token_budget: 300000\nmax_steps: 30\n"))
+
+    assert (task.stage_call_limit, task.plan_reasoning_effort, task.token_budget, task.max_steps) == (
+        5, "high", 300_000, 30)
+
+
+def test_stage_keys_come_from_the_settings_and_the_task_file_beats_them(tmp_path):
+    settings = {"stage_call_limit": 4, "plan_reasoning_effort": "high"}
+
+    assert (task_from_args("열어", r"C:\a\b.exe", defaults=settings).stage_call_limit,
+            task_from_args("열어", r"C:\a\b.exe", defaults=settings).plan_reasoning_effort) == (4, "high")
+    from_file = load_task(write(tmp_path, VALID + "stage_call_limit: 6\n"), defaults=settings)
+    assert (from_file.stage_call_limit, from_file.plan_reasoning_effort) == (6, "high")
+
+
+@pytest.mark.parametrize("line", ["stage_call_limit: 0", "stage_call_limit: eight", "stage_call_limit: true",
+                                  "plan_reasoning_effort: 3"])
+def test_bad_stage_keys_are_rejected(tmp_path, line):
+    with pytest.raises(TaskError):
+        load_task(write(tmp_path, VALID + line + "\n"))
 
 
 SETTINGS = {"model": "house-model", "reasoning_effort": "high", "image_mode": "off",

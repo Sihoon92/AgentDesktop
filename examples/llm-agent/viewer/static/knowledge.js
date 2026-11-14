@@ -194,6 +194,7 @@ function knowledgeSource(entry) {
   const source = entry.source || {};
   const rows = [
     ["실행", source.run_id],
+    ["출처", ORIGIN_LABELS[source.origin] ? `${ORIGIN_LABELS[source.origin]}${Number.isInteger(source.stage) ? ` · 단계 ${source.stage}` : ""}` : null],
     ["날짜", source.date],
     ["질문", source.question],
     ["답", source.answer],

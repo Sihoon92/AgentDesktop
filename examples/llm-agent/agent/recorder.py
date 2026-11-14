@@ -1,9 +1,13 @@
 """Writes each run to runs/<run_id>/ so a person can replay what the agent saw and did.
 
-run.json holds the run's summary, events.jsonl one event per line, frames/ one window
-screenshot per observation. Element boxes are stored in image pixels, so the viewer only
-draws them. Recording must never end a run: every failure inside the recorder becomes a
+run.json holds the run's summary, events.jsonl one event per line, frames/ one picture per
+observation: the observed window with the other visible windows of the same process (popup
+menus, dropdown lists) pasted where they sit on screen (agent/capture.py). Element boxes are
+stored in image pixels, so the viewer only draws them. Recording must never end a run: every failure inside the recorder becomes a
 warning on the event, or an entry in `errors` printed to stderr.
+
+run.json holds numbers only about stages (`stages`, written at finish); the plan's texts and the
+stage notes are kept in events.jsonl alone.
 
 run.json is format 2: it names the recording process (pid and its start time) and carries a
 heartbeat_at that moves with every event and, from a daemon thread, at least every
@@ -20,6 +24,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent.capture import add_windows, stacked
 from agent.frames import frame_origin, to_image_rect
 from agent.observe import visible_elements
 from agent.process_identity import process_started_at
@@ -34,9 +39,15 @@ META_FIELDS = ("goal", "exe", "model", "permission_level", "started_by", "system
 WINDOW_FIELDS = ("id", "title", "bounds")
 RESULT_FIELDS = (
     "ok", "disposition", "code", "message", "refused", "post_state",
-    "expect", "effects", "expected_met", "knowledge_id", "refused_code", "capture",
+    "expect", "effects", "expected_met", "verdict", "knowledge_id", "refused_code", "capture",
 )
-KEPT_EVENTS = ("knowledge_loaded", "knowledge_used", "knowledge_failed", "completion", "registration", "warning")
+KEPT_EVENTS = ("knowledge_loaded", "knowledge_used", "knowledge_failed", "completion", "registration", "warning",
+               "plan", "stage")
+MODEL_FIELDS = ("call_tokens", "stage", "stage_calls", "stage_limit")
+"""Counts a model event may carry besides step and tokens; each is kept only when present."""
+STAGE_COUNTS = ("stage_count", "stages_done", "limit_questions", "plan_revisions", "max_call_tokens")
+STAGE_LISTS = ("stage_calls",)
+"""The numbers of a run's stages that run.json keeps. Plan and stage texts stay in events.jsonl."""
 
 
 def _never_raises(method):
@@ -106,8 +117,8 @@ class RunRecorder:
             "text": text,
             "warning": None,
         }
-        frame = self._capture(window, event)
-        self._last_frame = {"id": event["id"], "window_id": window.get("id"), "geometry": frame}
+        frame, window_ids = self._capture(window, event)
+        self._last_frame = {"id": event["id"], "window_ids": window_ids, "geometry": frame}
         tree = envelope["data"]["tree"]
         event["elements"], event["text_truncated"] = _elements(tree, frame)
         event["kinds"] = kinds(tree)
@@ -165,17 +176,23 @@ class RunRecorder:
         self._step = event["step"]
         with self._run_lock:
             self._run.update(steps=event["step"], tokens=event["tokens"])
-        self._append({"type": "model", "step": event["step"], "tokens": event["tokens"]})
+        kept = {key: event[key] for key in MODEL_FIELDS if key in event}
+        self._append({"type": "model", "step": event["step"], "tokens": event["tokens"], **kept})
 
     @_never_raises
     def finish(self, result):
-        """Writes the final status and finished_at, then stops the heartbeat for good."""
+        """Writes the final status and finished_at, then stops the heartbeat for good. A result
+        with stats (the loop's stage counts) adds their numbers to run.json as `stages`; a result
+        without them, such as one from a run that made no plan, adds nothing."""
         self.close()
+        stats = getattr(result, "stats", None)
         with self._run_lock:
             self._finished = True
             stamp = self._stamp_now()
             self._run.update(status=result.status, reason=result.reason, tokens=result.tokens,
                              steps=result.steps, finished_at=stamp, heartbeat_at=stamp)
+            if isinstance(stats, dict):
+                self._run["stages"] = _stage_numbers(stats)
             self._write_run_locked()
         self._append(
             {
@@ -210,29 +227,42 @@ class RunRecorder:
         return _stamp(self._now())
 
     def _capture(self, window, event):
-        """Takes the screenshot; returns (origin, size) for mapping boxes, or None."""
+        """Takes the picture. Returns ((origin, size) for mapping boxes, or None, and the ids of
+        the windows in it). The window list read after the screenshot both checks that the
+        window kept its place and names the other windows to paste over it."""
         name = f"{event['id']:04d}.png"
-        shot = self._desktop.run("screenshot", "--window-id", window["id"], str(self.path / "frames" / name))
+        path = self.path / "frames" / name
+        alone = [window.get("id")]
+        shot = self._desktop.run("screenshot", "--window-id", window["id"], str(path))
         if not shot.get("ok"):
             error = shot.get("error") or {}
             event["warning"] = f"스크린샷 실패: {error.get('code')}: {error.get('message')}"
-            return None
+            return None, alone
         size = (shot["data"]["width"], shot["data"]["height"])
         event["frame"] = name
         event["image"] = {"width": size[0], "height": size[1]}
-        after = self._window_bounds(window["id"])
+        rows = self._listed_windows()
+        after = next((row.get("bounds") for row in rows if row.get("id") == window["id"]), None)
         event["geometry_stale"] = after != window.get("bounds")
         if after is None:
             event["warning"] = "스크린샷 뒤에 창을 찾지 못해 박스 위치를 확인할 수 없습니다"
         if not window.get("bounds"):
             event["warning"] = "창 영역을 몰라 박스를 그릴 수 없습니다"
-            return None
-        return frame_origin(window["bounds"], *size), size
+            return None, alone
+        origin = frame_origin(window["bounds"], *size)
+        layout = add_windows(self._desktop, path, window, origin, stacked(window, rows))
+        if layout.size is not None:
+            size = layout.size
+            event["image"] = {"width": size[0], "height": size[1]}
+        if layout.missing:
+            missed = f"다른 창 {layout.missing}개를 찍지 못해 그림에서 뺐습니다"
+            event["warning"] = f"{event['warning']}; {missed}" if event["warning"] else missed
+        origin = (origin[0] + layout.shift[0], origin[1] + layout.shift[1])
+        return (origin, size), [window_id for window_id, _ in layout.windows]
 
-    def _window_bounds(self, window_id):
+    def _listed_windows(self):
         listing = self._desktop.run("list-windows")
-        rows = listing.get("data") or [] if listing.get("ok") else []
-        return next((row.get("bounds") for row in rows if row.get("id") == window_id), None)
+        return listing.get("data") or [] if listing.get("ok") else []
 
     def _image_target(self, target):
         if target is None:
@@ -242,7 +272,7 @@ class RunRecorder:
         if "bounds" in target:
             mapped["rect"] = _rect(target["bounds"], frame)
         if "points" in target:
-            same_window = self._last_frame and self._last_frame["window_id"] == target.get("window_id")
+            same_window = self._last_frame and target.get("window_id") in self._last_frame["window_ids"]
             points_frame = frame if same_window else None
             mapped["image_points"] = [_point(point, points_frame) for point in target["points"]]
         return mapped
@@ -320,6 +350,20 @@ def _claim_run_dir(runs_dir, run_id, base):
             return candidate, runs_dir / candidate
         except FileExistsError:
             suffix += 1
+
+
+def _stage_numbers(stats):
+    """The counts of `stats` that are whole numbers, and the lists made only of them."""
+    numbers = {key: stats[key] for key in STAGE_COUNTS if _whole(stats.get(key))}
+    for key in STAGE_LISTS:
+        value = stats.get(key)
+        if isinstance(value, list) and all(_whole(item) for item in value):
+            numbers[key] = list(value)
+    return numbers
+
+
+def _whole(value):
+    return type(value) is int and value >= 0
 
 
 def _elements(tree, frame):

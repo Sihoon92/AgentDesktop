@@ -11,7 +11,11 @@ EXPECTATIONS = ("window_opened", "window_closed", "content_changed", "value_chan
 EXPECT = {
     "type": "string",
     "enum": list(EXPECTATIONS),
-    "description": "The change you expect this action to cause. The result tells you whether it happened",
+    "description": (
+        "The change you expect this action to cause. The result tells you whether it happened: "
+        "expected_met true or false, or null with verdict unconfirmed when only the picture around "
+        "the target changed (never for window_opened or window_closed, which the window list decides)"
+    ),
 }
 KNOWLEDGE_ID = {
     "type": ["string", "null"],
@@ -19,7 +23,8 @@ KNOWLEDGE_ID = {
 }
 MARK = {"type": "integer", "description": "A [n] mark number from the latest observation"}
 CLICK_ACTION = {"type": "string", "enum": ["click", "double_click", "right_click"]}
-READ_ONLY_TOOLS = frozenset({"list_windows", "observe", "wait_for_text", "look", "find_cells", "ask", "finish"})
+READ_ONLY_TOOLS = frozenset({"list_windows", "observe", "wait_for_text", "look", "find_cells", "ask", "finish",
+                             "plan", "stage_done"})
 """Tools that change nothing in the app. Every other tool takes a required intent."""
 EXPECTING_TOOLS = frozenset({
     "click", "toggle", "expand", "collapse", "set_value", "select", "check", "uncheck", "scroll",
@@ -116,6 +121,40 @@ SCHEMAS = [
         proposed={"type": ["integer", "null"], "description": "The candidate number you propose, or null"},
         basis={"type": "array", "items": {"type": "integer"},
                "description": "Marks you based the choice on, such as row and column labels"},
+    ),
+    _tool(
+        "plan",
+        "Split the goal into stages after you observed the first screen, or revise the plan. Each stage is "
+        "one result a person can check on the screen. Give the whole list every time; stages already done "
+        "must be repeated unchanged at their place. Tools that change the app, except launch_target, are "
+        "refused until a plan exists. Changes nothing in the app.",
+        0,
+        stages={
+            "type": "array",
+            "description": "1 to 12 stages in order, in the language of the goal",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string",
+                             "description": "The state the screen shows when this stage is done, not what to press"},
+                    "done_when": {"type": "string",
+                                  "description": "What on the screen proves that state"},
+                },
+                "required": ["goal", "done_when"],
+                "additionalProperties": False,
+            },
+        },
+    ),
+    _tool(
+        "stage_done",
+        "Mark the current stage done, with evidence from the latest observation: the marks of elements "
+        "that show the result, or, when only the picture shows it, the id of a capture from look. Give "
+        "exactly one of them. Changes nothing in the app.",
+        0,
+        marks={"type": ["array", "null"], "items": {"type": "integer"},
+               "description": "[n] marks of the latest observation that show the result, or null"},
+        capture={"type": ["string", "null"], "description": "A capture id from look, or null"},
+        note={"type": "string", "description": "One sentence on what you saw, in the language of the goal"},
     ),
     _tool("restore_window", "Restore a minimized window. Refs fail while it is minimized.", 0, window_id=WINDOW),
     _tool(

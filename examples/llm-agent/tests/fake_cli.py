@@ -6,6 +6,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from agent.frames import frame_origin
+
 try:
     from PIL import Image
 except ImportError:
@@ -18,6 +20,7 @@ ONE_PIXEL_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg=="
 )
 MEASURED_SCREENSHOT_SIZE = (1896, 2060)
+READ_COMMANDS = {"launch", "list-windows", "screenshot", "snapshot", "focus-window"}
 OTHER_INSTANCE_WINDOW = {
     "accessible": True,
     "app_name": "FootprintChart.exe",
@@ -78,10 +81,15 @@ def _marked_nodes(tree):
 class FakeCli:
     def __init__(self, panel_open=False, scene=None):
         """scene, when given, replaces the captured FootprintChart replies with
-        {"tree": tree, "windows": [rows]}: snapshots return that tree, list-windows those rows,
-        screenshots a real PNG of each window's visible size, and mouse-click calls on_click(x, y)."""
+        {"tree": tree, "windows": [rows]}: snapshots return that tree (or scene["trees"][id] for
+        the window snapshotted, when given), list-windows those rows top first,
+        screenshots a real PNG of each window's visible size (in screenshot_colors[id], or light
+        gray, with screenshot_patches[id] = [(screen rect, color)] painted on it;
+        failing_screenshots ids fail), and mouse-click calls on_click(x, y). Any command that
+        is not a read (READ_COMMANDS) first calls on_command(name) when it is set."""
         self.scene = copy.deepcopy(scene) if scene is not None else None
         self.on_click = None
+        self.on_command = None
         self.calls = []
         self.panel_open = panel_open
         self.focused = True
@@ -91,6 +99,9 @@ class FakeCli:
         self.stdout_override = None
         self.screenshot_result = None
         self.move_window_on_screenshot = False
+        self.screenshot_colors = {}
+        self.screenshot_patches = {}
+        self.failing_screenshots = set()
         self.window_shift = 0
         self.snapshots = 0
         self.open_panel_on_snapshot = None
@@ -117,6 +128,8 @@ class FakeCli:
 
     def _respond(self, words):
         name = words[0]
+        if self.on_command is not None and name not in READ_COMMANDS:
+            self.on_command(name)
         if name == "launch":
             self.process_alive = True
             launched = _load("launch")
@@ -129,9 +142,11 @@ class FakeCli:
             return self._screenshot(words)
         if self.scene is not None and name == "snapshot":
             self.snapshots += 1
+            window_id = words[words.index("--window-id") + 1] if "--window-id" in words else None
+            tree = self.scene.get("trees", {}).get(window_id, self.scene["tree"])
             return {"version": "2.6", "ok": True, "command": "snapshot",
                     "data": {"snapshot_id": f"s{self.snapshots}", "complete": True,
-                             "tree": copy.deepcopy(self.scene["tree"])}}
+                             "tree": copy.deepcopy(tree)}}
         if self.scene is not None and name == "mouse-click":
             xy = next(word for word in words if word.startswith("--xy="))[len("--xy="):]
             x, y = (int(value) for value in xy.split(","))
@@ -156,8 +171,12 @@ class FakeCli:
         return _load("toggle")
 
     def open_window(self, row):
-        """Scene mode: a new window of the process appears."""
-        self.scene["windows"].append(dict(row))
+        """Scene mode: a new window of the process appears on top, so it is listed first."""
+        self.scene["windows"].insert(0, dict(row))
+
+    def close_window(self, window_id):
+        """Scene mode: a window of the process goes away."""
+        self.scene["windows"] = [row for row in self.scene["windows"] if row["id"] != window_id]
 
     def focus(self, mark):
         """Scene mode: the element numbered `mark` takes focus, as a caret placed in it would."""
@@ -168,10 +187,18 @@ class FakeCli:
 
     def _scene_screenshot(self, words):
         window_id = words[words.index("--window-id") + 1]
+        if window_id in self.failing_screenshots:
+            return {"version": "2.6", "ok": False, "command": "screenshot",
+                    "error": {"code": "WINDOW_NOT_FOUND", "message": "gone"}}
         row = next(r for r in self.scene["windows"] if r["id"] == window_id)
         width, height = int(row["bounds"]["width"]) - 16, int(row["bounds"]["height"]) - 8
         path = Path(words[-1])
-        Image.new("RGB", (width, height), (240, 240, 240)).save(path)
+        image = Image.new("RGB", (width, height), self.screenshot_colors.get(window_id, (240, 240, 240)))
+        origin = frame_origin(row["bounds"], width, height)
+        for rect, color in self.screenshot_patches.get(window_id, []):
+            left, top = int(rect["x"] - origin[0]), int(rect["y"] - origin[1])
+            image.paste(color, (left, top, left + rect["width"], top + rect["height"]))
+        image.save(path)
         data = {"path": str(path), "width": width, "height": height, "scale_factor": 1.0}
         return {"version": "2.6", "ok": True, "command": "screenshot", "data": data}
 

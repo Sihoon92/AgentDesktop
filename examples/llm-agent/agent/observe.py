@@ -31,6 +31,10 @@ def render_marked(tree, include_bounds=False):
 
 
 def _render(node, depth, include_bounds, lines, refs, marks=None, is_window_root=False):
+    """Fills refs and marks for the harness. An element with a native id (such as a UIA
+    AutomationId) also carries it as "native_id", for the action guard only; the rendered text
+    never shows it."""
+    native_id = _native_id(node)
     if node.get("ref_id"):
         refs[node["ref_id"]] = {
             "role": node.get("role"),
@@ -38,16 +42,28 @@ def _render(node, depth, include_bounds, lines, refs, marks=None, is_window_root
             "description": node.get("description"),
             "bounds": node.get("bounds"),
         }
+        if native_id is not None:
+            refs[node["ref_id"]]["native_id"] = native_id
     prefix = ""
     if marks is not None and _is_element(node, is_window_root):
         number = len(marks) + 1
         marks[number] = dict(_element(node), mark=number)
+        if native_id is not None:
+            marks[number]["native_id"] = native_id
         prefix = f"[{number}] "
     if _is_informative(node):
         lines.append("  " * depth + prefix + _line(node, include_bounds))
         depth += 1
     for child in node.get("children", []):
         _render(child, depth, include_bounds, lines, refs, marks)
+
+
+def _native_id(node):
+    """The snapshot's native id as {"kind", "value"}, or None when it has no value."""
+    native = node.get("native_id") or {}
+    if not native.get("value"):
+        return None
+    return {"kind": native.get("kind"), "value": native["value"]}
 
 
 def visible_elements(tree):

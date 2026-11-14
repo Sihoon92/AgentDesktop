@@ -536,3 +536,78 @@ def test_a_number_answer_to_a_capture_candidate_allows_its_point(tmp_path):
     toolbox.call("ask", question(kind="confirm", marks=[3], capture=("c1", 10, 20), proposed=2))
 
     assert toolbox.call("click_point", point_call(capture="c1", x=10, y=20))["ok"]
+
+
+NOT_DELIVERED = {"version": "2.6", "ok": False, "command": "click",
+                 "error": {"code": "ACTION_FAILED", "message": "m",
+                           "disposition": {"delivery": "not_delivered", "retry": "safe"}}}
+UNKNOWN_DELIVERY = {"version": "2.6", "ok": False, "command": "click",
+                    "error": {"code": "ACTION_FAILED", "message": "m",
+                              "disposition": {"delivery": "unknown", "retry": "unsafe"}}}
+NO_DISPOSITION = {"version": "2.6", "ok": False, "command": "click",
+                  "error": {"code": "INTERNAL", "message": "m"}}
+
+
+def test_an_answered_click_that_could_not_take_focus_keeps_the_answer(tmp_path):
+    asker = ScriptedAsker([Answer(text="1번")])
+    toolbox, cli, _ = toolbox_with(tmp_path, asker, scene=TABLE_SCENE)
+    marks = cell_candidates(toolbox)
+    toolbox.call("ask", question(kind="confirm", marks=marks, proposed=1))
+    cell = part_call(mark=marks[0], part="center", expect="content_changed")
+
+    cli.focused = False
+    first = toolbox.call("click_part", cell)
+    assert first["disposition"]["delivery"] == "not_delivered" and "focus" in first["refused"]
+    cli.focused = True
+    second = toolbox.call("click_part", cell)
+
+    assert second["ok"] and "refused_code" not in second
+    assert len(asker.questions) == 1 and cli.command_names().count("mouse-click") == 1
+
+
+def test_a_click_the_cli_did_not_deliver_keeps_the_answer_and_the_ambiguity(tmp_path):
+    toolbox, cli, _ = toolbox_with(tmp_path, ScriptedAsker([Answer(text="1번")]), scene=TABLE_SCENE)
+    toolbox.call("ask", question(kind="confirm", marks=cell_candidates(toolbox), proposed=1))
+
+    cli.action_results["click"] = NOT_DELIVERED
+    assert toolbox.call("click", {"ref": "@s1:e2"})["ok"] is False
+    assert toolbox.call("click", {"ref": "@s1:e3"})["refused_code"] == "needs_confirmation"
+    del cli.action_results["click"]
+    assert toolbox.call("click", {"ref": "@s1:e2"})["ok"]
+    assert toolbox.call("click", {"ref": "@s1:e3"})["ok"]
+
+
+@pytest.mark.parametrize("envelope", [UNKNOWN_DELIVERY, NO_DISPOSITION])
+def test_a_click_that_may_have_been_delivered_uses_the_answer(tmp_path, envelope):
+    toolbox, cli, _ = toolbox_with(tmp_path, ScriptedAsker([Answer(text="1번")]), scene=TABLE_SCENE)
+    marks = cell_candidates(toolbox)
+    toolbox.call("ask", question(kind="confirm", marks=marks, proposed=1))
+
+    cli.action_results["click"] = envelope
+    assert toolbox.call("click", {"ref": "@s1:e2"})["ok"] is False
+    assert toolbox.call("click_part", part_call(mark=marks[1], part="center"))["ok"]
+
+
+def test_a_kept_answer_does_not_let_another_point_through(tmp_path):
+    toolbox, cli, _ = toolbox_with(tmp_path, ScriptedAsker([Answer(text="맞아")]))
+    toolbox.call("look", {"mark": None})
+    click = point_call(capture="c1", x=10, y=20)
+    toolbox.call("ask", question(kind="confirm", capture=("c1", 10, 20), proposed=1))
+
+    cli.focused = False
+    assert toolbox.call("click_point", click)["disposition"]["delivery"] == "not_delivered"
+    cli.focused = True
+    assert toolbox.call("click_point", point_call(capture="c1", x=200, y=20))["refused_code"] == "needs_confirmation"
+    assert toolbox.call("click_point", click)["ok"]
+    assert toolbox.call("click_point", click)["refused_code"] == "needs_confirmation"
+
+
+def test_a_cited_cell_the_cli_did_not_deliver_stays_ambiguous(tmp_path, store):
+    entry = resolution(store)
+    toolbox, cli, _ = toolbox_with(tmp_path, ScriptedAsker([]), knowledge=store, scene=TABLE_SCENE)
+    cell_candidates(toolbox)
+
+    cli.action_results["click"] = NOT_DELIVERED
+    assert toolbox.call("click", {"ref": "@s1:e2", "knowledge_id": entry["id"]})["ok"] is False
+    del cli.action_results["click"]
+    assert toolbox.call("click", {"ref": "@s1:e3"})["refused_code"] == "needs_confirmation"

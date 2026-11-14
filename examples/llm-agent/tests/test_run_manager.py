@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fake_cli import FakeCli
-from test_loop import ScriptedModel, call
+from test_loop import PLAN, ScriptedModel, call
 from test_tools import OBSERVE as SCENE_OBSERVE
 from test_tools import SCENE
 
@@ -29,7 +29,7 @@ class GatedModel:
         self.release = threading.Event()
         self.started = threading.Event()
 
-    def respond(self, instructions, items, tools):
+    def respond(self, instructions, items, tools, effort=None):
         self.started.set()
         if not self.release.wait(timeout=5):
             raise TimeoutError("test never released the model")
@@ -38,7 +38,7 @@ class GatedModel:
 
 
 class BrokenModel:
-    def respond(self, instructions, items, tools):
+    def respond(self, instructions, items, tools, effort=None):
         raise RuntimeError("model service is down")
 
 
@@ -146,6 +146,7 @@ def test_restart_target_is_refused_because_no_terminal_can_confirm(tmp_path):
     model = ScriptedModel(
         [
             [call("launch_target", {"intent": "앱을 연다"})],
+            PLAN,
             [call("restart_target", {"intent": "앱을 다시 켠다"})],
             [call("finish", {"success": False, "evidence": "restart refused"})],
         ]
@@ -274,7 +275,7 @@ def test_runs_started_from_the_viewer_say_so_in_their_meta(tmp_path, monkeypatch
     manager.join(timeout=5)
 
     assert seen == [{"goal": "설정을 열어줘", "exe": str(exe), "model": seen[0]["model"], "permission_level": 3,
-                     "max_steps": 40, "started_by": "viewer", "system": "app", "code": "abc1234"}]
+                     "max_steps": 60, "started_by": "viewer", "system": "app", "code": "abc1234"}]
     assert run_json(tmp_path, run_id)["code"] == "abc1234"
 
 
@@ -287,7 +288,7 @@ def test_a_finished_viewer_run_leaves_its_summary(tmp_path, monkeypatch):
 
     written = (tmp_path / "runs" / run_id / "summary.txt").read_text(encoding="utf-8").splitlines()
     final = run_json(tmp_path, run_id)
-    verdict = f"  판정: {final['status']} · 스텝 {final['steps']}/40 · 토큰 {final['tokens']}"
+    verdict = f"  판정: {final['status']} · 스텝 {final['steps']}/60 · 토큰 {final['tokens']}"
     assert written[:3] == ["요약 (화면 내용 없음)", "  코드: abc1234", verdict]
     assert "설정을 열어줘" not in "\n".join(written)
 
@@ -394,8 +395,8 @@ def test_ask_gate_takes_the_task_timeout(tmp_path, monkeypatch):
     manager, _ = make_manager(tmp_path, model, ask_gate_factory=WatchedAskGate)
     original = manager.build_task
 
-    def slow_to_give_up(goal, exe, level):
-        task = original(goal, exe, level)
+    def slow_to_give_up(goal, exe, level, stage_call_limit=None):
+        task = original(goal, exe, level, stage_call_limit)
         object.__setattr__(task, "ask_timeout_s", 90)
         return task
 
@@ -705,8 +706,8 @@ def test_viewer_meta_carries_the_task_step_limit(tmp_path, monkeypatch):
     run_id = manager.start("열어줘", None, 2)
     manager.join(timeout=5)
 
-    assert [meta["max_steps"] for meta in seen] == [spy.calls[0]["task"].max_steps] == [40]
-    assert run_json(tmp_path, run_id)["max_steps"] == 40
+    assert [meta["max_steps"] for meta in seen] == [spy.calls[0]["task"].max_steps] == [60]
+    assert run_json(tmp_path, run_id)["max_steps"] == 60
 
 
 def test_the_run_list_reads_a_run_json_that_holds_the_step_limit(tmp_path):
@@ -721,3 +722,44 @@ def test_the_run_list_reads_a_run_json_that_holds_the_step_limit(tmp_path):
 
     assert (summary["status"], summary["steps"], summary["model"]) == ("gave_up", 3, "m")
     assert not summary["newer_format"]
+
+
+def recording(manager, model):
+    """Makes the manager hand `model` to every run and keeps each run's task."""
+    tasks = []
+    manager._model_factory = lambda task: tasks.append(task) or model
+    return tasks
+
+
+def test_a_stage_call_limit_from_the_form_reaches_the_task(tmp_path):
+    manager, _ = make_manager(tmp_path, None)
+    tasks = recording(manager, launch_then_finish())
+
+    manager.start("설정을 열어줘", None, 3, stage_call_limit=3)
+    manager.join(timeout=5)
+
+    assert [task.stage_call_limit for task in tasks] == [3]
+
+
+def test_an_empty_stage_call_limit_keeps_the_settings_value_or_the_default(tmp_path):
+    (tmp_path / "plain").mkdir()
+    (tmp_path / "set").mkdir()
+    plain, _ = make_manager(tmp_path / "plain", GatedModel())
+    configured, _ = make_manager(tmp_path / "set", GatedModel(), task_defaults={"stage_call_limit": 5})
+
+    assert plain.build_task("열어줘", None, 3).stage_call_limit == 8
+    assert plain.build_task("열어줘", None, 3, stage_call_limit=None).stage_call_limit == 8
+    assert configured.build_task("열어줘", None, 3).stage_call_limit == 5
+    assert configured.build_task("열어줘", None, 3, stage_call_limit=2).stage_call_limit == 2
+    assert (plain.default_stage_call_limit, configured.default_stage_call_limit) == (8, 5)
+
+
+@pytest.mark.parametrize("value", [0, -1, "8", "", 2.5, True])
+def test_a_bad_stage_call_limit_is_rejected_before_anything_starts(tmp_path, value):
+    manager, _ = make_manager(tmp_path, GatedModel())
+
+    with pytest.raises(InvalidRun, match="단계별 호출 한도"):
+        manager.start("열어줘", None, 3, stage_call_limit=value)
+
+    assert manager.active() is None
+    assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())

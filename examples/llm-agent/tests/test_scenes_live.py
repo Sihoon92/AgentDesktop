@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image, ImageChops
 from virtual_mes_support import (
     LiveApp,
     find_agent_desktop,
@@ -27,9 +28,12 @@ from virtual_mes_support import (
 )
 
 from agent.ask import Answer
+from agent.capture import BOX_COLOR
 from agent.desktop import DesktopClient, start_session
+from agent.frames import frame_origin
 from agent.knowledge import KnowledgeStore
 from agent.loop import run_agent
+from agent.recorder import RunRecorder
 from agent.registration import register_after_run
 from agent.task import Task
 from agent.tools import Toolbox
@@ -74,7 +78,7 @@ class ScriptedModel:
         self.draft_inputs = []
         self.count = 0
 
-    def respond(self, instructions, items, tools):
+    def respond(self, instructions, items, tools, effort=None):
         self.count += 1
         if any(tool.get("name") == "propose_entries" for tool in tools):
             self.draft_inputs.append(list(items))
@@ -127,7 +131,7 @@ class Scene:
         self.folder = Path(folder)
         self.exe, self.app_log = prepare_exe(self.folder, *app_args)
         self.desktop = DesktopClient(str(session.binary), session.id)
-        self.task = Task(goal, str(self.exe), 2, list(require), max_steps=40, image_mode=image_mode,
+        self.task = Task(goal, str(self.exe), 2, list(require), max_steps=40, stage_call_limit=40, image_mode=image_mode,
                          ask_timeout_s=60, system=SYSTEM)
         self.asker = ScriptedAsker(self, answers)
         self.knowledge = knowledge
@@ -303,6 +307,19 @@ def finish(evidence, saved_path=None):
     return "finish", {"success": True, "evidence": evidence, "saved_path": saved_path, "completion_id": None}
 
 
+def planning(s):
+    """A one-stage plan: these scenes test asking and learning, not how the model splits a goal."""
+    return "plan", {"stages": [{"goal": s.task.goal, "done_when": "지시한 결과가 화면에 보인다"}]}
+
+
+def finishing(evidence, saved_path=None):
+    """Closes the one stage with a mark of the latest observation, then claims success."""
+    return [
+        lambda s: ("stage_done", {"marks": [min(s.toolbox._marks)], "capture": None, "note": evidence}),
+        lambda s: finish(evidence, saved_path=saved_path),
+    ]
+
+
 def wait_for(text, timeout_ms=15000):
     return "wait_for_text", {"text": text, "timeout_ms": timeout_ms}
 
@@ -312,6 +329,7 @@ def opening(screen):
     return [
         lambda s: ("launch_target", {}),
         lambda s: ("observe", OBSERVE),
+        planning,
         lambda s: click(s.ref("생산운영", "button"), "window_opened", "생산운영 메뉴 목록을 연다"),
         lambda s: ("observe", {**OBSERVE, "window_id": s.new_window()}),
         lambda s: click(s.ref(screen), "window_closed", f"{screen} 화면을 연다"),
@@ -364,7 +382,7 @@ def period_scene_turns():
         lambda s: ask("stuck", "기간 칸을 눌러도 목록이 열리지 않습니다. 무엇을 눌러야 하나요?",
                       [candidate("기간 칸의 가운데", s.mark("전일")), candidate("기간 칸의 오른쪽 끝 화살표")]),
         lambda s: part(s.mark("전일"), "right", "window_opened", "답대로 칸의 오른쪽 끝 화살표를 누른다"),
-        lambda s: finish("기간 목록이 열렸다"),
+        *finishing("기간 목록이 열렸다"),
     ]
 
 
@@ -377,7 +395,7 @@ def test_scene_1_center_click_fails_then_the_arrow_opens_the_list(scenes):
         lambda s: part(s.row_under("Shop")[2], "center", "window_opened", "Shop 3번째 칸을 눌러 목록을 연다"),
         lambda s: click(s.ref_inside(s.row_under("Shop")[2], "열기"), "window_opened",
                         "목록이 열리지 않아 칸 안의 화살표 버튼을 누른다"),
-        lambda s: finish("Shop 목록이 열렸다"),
+        *finishing("Shop 목록이 열렸다"),
     ])
 
     assert result.status == "verified", result.reason
@@ -453,7 +471,7 @@ def test_scene_2_pin_answer_on_a_pixel_filter(scenes, tmp_path):
                                  xy=s.image_point(capture_id(s), *center(box_on_screen(s))))], proposed=1),
         lambda s: point(capture_id(s), s.image_point(capture_id(s), *arrow_on_screen(s)), "window_opened",
                         "답으로 찍은 지점을 누른다"),
-        lambda s: finish("기간 목록 창이 열렸다"),
+        *finishing("기간 목록 창이 열렸다"),
     ])
 
     assert result.status == "confirmed", result.reason
@@ -473,11 +491,11 @@ def test_scene_3_confirm_among_three_boxes_then_open_the_chosen_one(scenes):
         lambda s: ask("confirm", "Shop 칸이 셋입니다. 어느 칸에서 믹싱을 뺄까요?",
                       [candidate(f"Shop {n}번째 칸", box) for n, box in enumerate(s.row_under("Shop"), 1)],
                       proposed=3, basis=[s.mark("Shop")["mark"]]),
-        lambda s: part(s.row_under("Shop")[2], "center", "window_opened", "답한 3번째 Shop 칸을 연다"),
+        lambda s: part(s.row_under("Shop")[2], "right", "window_opened", "답한 3번째 Shop 칸을 오른쪽 끝 화살표로 연다"),
         lambda s: ("observe", {**OBSERVE, "window_id": s.new_window()}),
         lambda s: part(s.mark("WA0"), "center", None, "WA0 행의 체크를 푼다. 글자만 보여 바뀐 것은 트리에 나오지 않는다"),
         lambda s: part(s.mark("Select"), "center", "window_closed", "Select로 선택을 적용한다"),
-        lambda s: finish("Shop 3번째 칸이 3개로 바뀌었다"),
+        *finishing("Shop 3번째 칸이 3개로 바뀌었다"),
     ])
 
     assert result.status == "verified", result.reason
@@ -506,7 +524,7 @@ def cell_scene_turns():
                       proposed=1, basis=[*candidates(s)[0]["row_marks"], *candidates(s)[0]["column_marks"]]),
         lambda s: part(s.toolbox._marks[candidates(s)[0]["mark"]], "center", "window_opened",
                        "답한 1번 셀을 눌러 상세 팝업을 연다"),
-        lambda s: finish("생산 상세 팝업이 열렸다"),
+        *finishing("생산 상세 팝업이 열렸다"),
     ]
 
 
@@ -549,7 +567,7 @@ def saving_turns(path):
         lambda s: ("type", {"ref": s.ref_by_native(s.memo["dialog"], "1001", "textfield"), "text": str(path),
                             "intent": "저장할 경로를 입력한다", "expect": "value_changed", "knowledge_id": None}),
         lambda s: click(s.ref_by_native(s.memo["dialog"], "1", "button"), "window_closed", "저장 버튼을 누른다"),
-        lambda s: finish("엑셀 파일을 저장했다", saved_path=str(path)),
+        *finishing("엑셀 파일을 저장했다", saved_path=str(path)),
     ]
 
 
@@ -590,7 +608,7 @@ def test_scene_6_second_run_cites_knowledge_and_asks_nothing(scenes, store):
         *opening("전공정 생산현황"),
         lambda s: part(s.mark("전일"), "right", "window_opened", "지난 답대로 칸의 오른쪽 끝 화살표를 누른다",
                        knowledge_id=learned["id"]),
-        lambda s: finish("기간 목록이 열렸다"),
+        *finishing("기간 목록이 열렸다"),
     ], run_id="scene6-second")
 
     assert result.status == "verified", result.reason
@@ -618,7 +636,7 @@ def test_scene_7_wrong_knowledge_is_counted_and_asked_again(scenes, store):
         lambda s: ask("stuck", "지난 답대로 했는데 목록이 열리지 않습니다. 무엇을 눌러야 하나요?",
                       [candidate("기간 칸의 가운데", s.mark("전일")), candidate("기간 칸의 오른쪽 끝 화살표")]),
         lambda s: part(s.mark("전일"), "right", "window_opened", "답대로 칸의 오른쪽 끝 화살표를 누른다"),
-        lambda s: finish("기간 목록이 열렸다"),
+        *finishing("기간 목록이 열렸다"),
     ], drafts=[[fixed]], run_id="scene7")
 
     assert result.status == "verified", result.reason
@@ -661,10 +679,170 @@ def test_image_point_lands_on_the_cell_at_this_dpi(scenes):
                                  xy=s.image_point(s.memo["capture"], *cell_point(s)))], proposed=1),
         lambda s: point(s.memo["capture"], s.image_point(s.memo["capture"], *cell_point(s)), "window_opened",
                         "답한 1번 지점을 누른다"),
-        lambda s: finish("생산 상세 팝업이 열렸다"),
+        *finishing("생산 상세 팝업이 열렸다"),
     ])
 
     assert result.status == "verified", result.reason
     assert scene.tool_events("click_point")[0]["result"]["refused_code"] == "needs_confirmation"
     clicked = wait_for_logged(scene.app_log, "cell_clicked")
     assert clicked["row"] == ["극판", "코팅", "소계"] and clicked["column"] == ["생산", "양품수"]
+
+
+def _same_share(picture, part, offset, drawn=None):
+    """The share of `part`'s pixels that `picture` shows unchanged when `part` sits at `offset`.
+    A capture has mark boxes drawn over it: pixels the picture shows in the `drawn` colour are
+    left out of the count."""
+    left, top = round(offset[0]), round(offset[1])
+    region = picture.crop((left, top, left + part.width, top + part.height)).convert("RGB")
+    differs = ImageChops.difference(region, part.convert("RGB")).convert("L").point(lambda v: 255 if v > 8 else 0)
+    total = part.width * part.height
+    if drawn is not None:
+        boxes = ImageChops.difference(region, Image.new("RGB", region.size, drawn)).convert("L")
+        boxes = boxes.point(lambda v: 255 if v <= 8 else 0)
+        total -= boxes.histogram()[255]
+        differs = ImageChops.subtract(differs, boxes)
+    return (total - differs.histogram()[255]) / total
+
+
+def test_an_open_popup_window_is_in_the_capture_and_in_the_frame(scenes, tmp_path):
+    scene = scenes("popup", (), "생산운영 메뉴 목록을 열어줘", image_mode="user_message",
+                   require=[{"role": "button", "name": "전공정 생산현황"}])
+
+    result = scene.run([
+        lambda s: ("launch_target", {}),
+        lambda s: ("observe", OBSERVE),
+        planning,
+        lambda s: click(s.ref("생산운영", "button"), "window_opened", "생산운영 메뉴 목록을 연다"),
+        lambda s: (s.remember("popup", s.new_window()), ("look", {"mark": None}))[1],
+        *finishing("메뉴 목록이 열렸다"),
+    ])
+
+    assert result.status == "verified", result.reason
+    popup_id = scene.memo["popup"]
+    main = scene.main_window()
+    popup = next(row for row in scene.toolbox._rows() if row["id"] == popup_id)
+    own = tmp_path / "popup-alone.png"
+    assert scene.desktop.run("screenshot", "--window-id", popup_id, str(own)).get("ok")
+    with Image.open(own) as alone:
+        alone = alone.convert("RGB")
+    popup_origin = frame_origin(popup["bounds"], alone.width, alone.height)
+
+    shot = scene.toolbox._captures[scene.tool_events("look")[-1]["result"]["capture"]]
+    assert [window_id for window_id, _ in shot.windows] == [main["id"], popup_id] and shot.missing == 0
+    with Image.open(shot.path) as picture:
+        offset = (popup_origin[0] - shot.origin[0], popup_origin[1] - shot.origin[1])
+        assert shot.drawn and _same_share(picture, alone, offset, drawn=BOX_COLOR) > 0.95
+
+    snapshot = scene.desktop.run("snapshot", "--window-id", main["id"], "--compact", "--include-bounds",
+                                 "--timeout-ms", "8000")
+    recorder = RunRecorder(tmp_path / "runs", scene.desktop, {"goal": "popup"})
+    try:
+        recorder.on_observation(main, snapshot, "t")
+    finally:
+        recorder.close()
+    observation = [json.loads(line) for line in (recorder.path / "events.jsonl").read_text(encoding="utf-8").splitlines()][0]
+    assert recorder.errors == [] and observation["warning"] is None and observation["frame"]
+    item = next(e for e in observation["elements"] if e["name"] == "전공정 생산현황")
+    assert item["rect"] is not None
+    with Image.open(recorder.path / "frames" / observation["frame"]) as frame:
+        assert (frame.width, frame.height) == (observation["image"]["width"], observation["image"]["height"])
+        main_origin = frame_origin(main["bounds"], *_screenshot_size(scene, main["id"], tmp_path))
+        frame_left = main_origin[0] + min(0, round(popup_origin[0] - main_origin[0]))
+        frame_top = main_origin[1] + min(0, round(popup_origin[1] - main_origin[1]))
+        offset = (popup_origin[0] - frame_left, popup_origin[1] - frame_top)
+        assert _same_share(frame, alone, offset) > 0.95
+
+
+def test_a_click_inside_an_open_list_keeps_observing_the_main_window_and_shows_the_list(scenes, tmp_path):
+    scene = scenes("popup-click", ("--profile", "easy", "--combo-open", "arrow"), "Shop 3번째 칸에서 WA0을 골라줘",
+                   image_mode="user_message", require=[{"role": "checkbox", "name": "WA0"}])
+
+    result = scene.run([
+        *opening("전공정 생산현황"),
+        lambda s: click(s.ref_inside(s.row_under("Shop")[2], "열기"), "window_opened", "Shop 3번째 칸의 목록을 연다"),
+        lambda s: (s.remember("popup", s.new_window()),
+                   part(s.mark("WA0"), "center", "value_changed", "목록 안의 WA0을 누른다"))[1],
+        lambda s: ("look", {"mark": None}),
+        *finishing("WA0을 눌렀다"),
+    ])
+
+    assert result.status == "verified", result.reason
+    main, popup_id = scene.main_window(), scene.memo["popup"]
+    popup = next(row for row in scene.toolbox._rows() if row["id"] == popup_id)
+    pressed = scene.tool_events("click_part")[-1]["result"]
+    assert pressed["ok"] and pressed["window_id"] == main["id"], pressed
+    assert "observed_window" not in pressed["effects"] and "WA0" in pressed["observation"], pressed
+    assert pressed["effects"]["removed"]["count"] == 0, pressed["effects"]
+    assert scene.toolbox._marks_view == (main["id"], True)
+
+    own = tmp_path / "list-alone.png"
+    assert scene.desktop.run("screenshot", "--window-id", popup_id, str(own)).get("ok")
+    with Image.open(own) as alone:
+        alone = alone.convert("RGB")
+    popup_origin = frame_origin(popup["bounds"], alone.width, alone.height)
+    shot = scene.toolbox._captures[scene.tool_events("look")[-1]["result"]["capture"]]
+    assert shot.window_id == main["id"] and [window_id for window_id, _ in shot.windows] == [main["id"], popup_id]
+    with Image.open(shot.path) as picture:
+        offset = (popup_origin[0] - shot.origin[0], popup_origin[1] - shot.origin[1])
+        assert _same_share(picture, alone, offset, drawn=BOX_COLOR) > 0.95
+
+    snapshot = scene.desktop.run("snapshot", "--window-id", popup_id, "--compact", "--include-bounds",
+                                 "--timeout-ms", "8000")
+    recorder = RunRecorder(tmp_path / "runs", scene.desktop, {"goal": "popup-click"})
+    try:
+        recorder.on_observation(popup, snapshot, "t")
+    finally:
+        recorder.close()
+    observation = [json.loads(line) for line in (recorder.path / "events.jsonl").read_text(encoding="utf-8").splitlines()][0]
+    assert recorder.errors == [] and observation["frame"]
+    with Image.open(recorder.path / "frames" / observation["frame"]) as frame:
+        main_origin = frame_origin(main["bounds"], *_screenshot_size(scene, main["id"], tmp_path))
+        frame_left = popup_origin[0] + min(0, round(main_origin[0] - popup_origin[0]))
+        frame_top = popup_origin[1] + min(0, round(main_origin[1] - popup_origin[1]))
+        assert _same_share(frame, alone, (popup_origin[0] - frame_left, popup_origin[1] - frame_top)) > 0.95
+
+
+def _unnamed_ref_inside(scene, element):
+    """The ref of an unnamed element inside `element`, such as a filter box's bare arrow."""
+    for ref, inner in scene.toolbox._refs.items():
+        box = inner.get("bounds")
+        if not inner.get("name") and box and _inside(box, element["bounds"]):
+            return ref
+    raise AssertionError(f"no unnamed ref inside {element.get('name')!r}")
+
+
+def test_unchecking_a_list_row_that_shows_no_check_state_is_unconfirmed_not_a_mismatch(scenes):
+    scene = scenes("picture-verdict", ("--combo-open", "arrow"), "Shop 3번째 칸에서 WA2와 WA3을 빼줘",
+                   image_mode="user_message", require=[{"role": "button", "name": "조회(F5)"}])
+
+    result = scene.run([
+        *opening("전공정 생산현황"),
+        lambda s: click(_unnamed_ref_inside(s, s.row_under("Shop")[2]), "window_opened", "Shop 3번째 칸의 목록을 연다"),
+        lambda s: part(s.mark("WA2"), "center", "value_changed", "WA2의 체크를 해제한다"),
+        lambda s: part(s.mark("WA3"), "center", "value_changed", "WA3의 체크를 해제한다"),
+        lambda s: part(s.mark("Select"), "center", "window_closed", "고른 대로 적용하고 목록을 닫는다"),
+        *finishing("WA2와 WA3의 체크를 해제하고 적용했다"),
+    ])
+
+    assert result.status == "verified", result.reason
+    pressed = [event["result"] for event in scene.tool_events("click_part")]
+    assert pressed[2]["expected_met"] is True, pressed[2]
+    for outcome in pressed[:2]:
+        effects = outcome["effects"]
+        assert not (effects["windows_opened"] or effects["windows_closed"] or effects["changed"]), effects
+        assert effects["added"]["count"] == 0 and effects["removed"]["count"] == 0, effects
+        assert outcome["expected_met"] is None and outcome["verdict"] == "unconfirmed", outcome
+        assert outcome["effects"]["picture"]["changed"] is True, outcome["effects"]
+    assert [e["reason"] for e in scene.events_of("capture")].count("unconfirmed") == 2
+    assert scene.asker.questions == []
+    assert not [e for e in scene.tool_events() if (e["result"] or {}).get("refused_code") == "blocked_until_question"]
+    changed = wait_for_logged(scene.app_log, "filter_changed")
+    assert changed["filter"] == "shop-3" and changed["closed_by"] == "select_button", changed
+    assert not {"WA2", "WA3"} & set(changed["value"]), changed
+
+
+def _screenshot_size(scene, window_id, folder):
+    path = folder / f"{window_id}-alone.png"
+    shot = scene.desktop.run("screenshot", "--window-id", window_id, str(path))
+    assert shot.get("ok")
+    return shot["data"]["width"], shot["data"]["height"]

@@ -834,3 +834,104 @@ def test_action_is_reported_before_its_observation(scene):
     assert tool == "click_part" and target["points"] == [[1192, 562]]
     assert result["expected_met"] is True and "observation" not in result
     assert observer.sources[-1][0] == "action"
+
+
+ARROW_Y = 542
+
+
+def _arrow(number, x, native=True):
+    node = {"role": "button", "ref_id": f"@s1:e{number}", "available_actions": ["Click"],
+            "bounds": {"x": x, "y": ARROW_Y, "width": 24, "height": 24}}
+    if native:
+        node["native_id"] = {"kind": "automation_id", "value": str(7000 + number)}
+    return node
+
+
+def nameless_scene(native=True):
+    return {"windows": [MAIN], "tree": {"role": "window", "name": "메인", "bounds": MAIN_BOUNDS, "children": [
+        _arrow(1, 1122, native), _arrow(2, 1272, native), _arrow(3, 1392, native)]}}
+
+
+def click_ref(ref):
+    return {"ref": ref, "intent": "누른다", "knowledge_id": None}
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native_id", "position"])
+def test_three_nameless_buttons_then_the_third_again_does_not_stop_the_run(tmp_path, native):
+    toolbox, cli, _ = toolbox_for(nameless_scene(native), tmp_path)
+
+    for ref in ("@s1:e1", "@s1:e2", "@s1:e3", "@s1:e3"):
+        assert toolbox.call("click", click_ref(ref))["ok"]
+
+    assert cli.command_names().count("click") == 4
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native_id", "position"])
+def test_the_same_nameless_button_a_fourth_time_still_stops_the_run(tmp_path, native):
+    toolbox, _, _ = toolbox_for(nameless_scene(native), tmp_path)
+    for _ in range(3):
+        assert toolbox.call("click", click_ref("@s1:e2"))["ok"]
+
+    with pytest.raises(AgentStopped):
+        toolbox.call("click", click_ref("@s1:e2"))
+
+
+def _shift(scene_tree, dx, dy):
+    if "bounds" in scene_tree:
+        scene_tree["bounds"] = {**scene_tree["bounds"], "x": scene_tree["bounds"]["x"] + dx,
+                                "y": scene_tree["bounds"]["y"] + dy}
+    for child in scene_tree.get("children", []):
+        _shift(child, dx, dy)
+
+
+def test_a_nameless_button_is_the_same_after_the_window_moves(tmp_path):
+    toolbox, cli, _ = toolbox_for(nameless_scene(native=False), tmp_path)
+    for _ in range(3):
+        assert toolbox.call("click", click_ref("@s1:e2"))["ok"]
+    _shift(cli.scene["tree"], 300, 40)
+    cli.scene["windows"][0]["bounds"] = dict(cli.scene["tree"]["bounds"])
+    toolbox.call("observe", OBSERVE)
+
+    with pytest.raises(AgentStopped):
+        toolbox.call("click", click_ref("@s1:e2"))
+
+
+def test_a_nameless_button_that_shifts_a_few_pixels_is_the_same(tmp_path):
+    toolbox, cli, _ = toolbox_for(nameless_scene(native=False), tmp_path)
+    for dx in (0, 5, -4):
+        cli.scene["tree"]["children"][1]["bounds"]["x"] = 1272 + dx
+        toolbox.call("observe", OBSERVE)
+        assert toolbox.call("click", click_ref("@s1:e2"))["ok"]
+    cli.scene["tree"]["children"][1]["bounds"]["x"] = 1272 + 7
+    toolbox.call("observe", OBSERVE)
+
+    with pytest.raises(AgentStopped):
+        toolbox.call("click", click_ref("@s1:e2"))
+
+
+def test_an_unsafe_failure_on_one_nameless_button_does_not_block_another(tmp_path):
+    toolbox, cli, _ = toolbox_for(nameless_scene(native=False), tmp_path)
+    cli.action_results["click"] = {"version": "2.6", "ok": False, "command": "click",
+                                   "error": {"code": "ACTION_FAILED", "message": "m",
+                                             "disposition": {"delivery": "unknown", "retry": "unsafe"}}}
+    assert toolbox.call("click", click_ref("@s1:e1"))["ok"] is False
+    del cli.action_results["click"]
+
+    assert toolbox.call("click", click_ref("@s1:e2"))["ok"]
+    assert "refused" in toolbox.call("click", click_ref("@s1:e1"))
+
+
+def test_nameless_toggles_are_told_apart_by_native_id(tmp_path):
+    toolbox, _, _ = toolbox_for(nameless_scene(native=True), tmp_path)
+
+    assert toolbox.call("toggle", click_ref("@s1:e1"))["ok"]
+    assert toolbox.call("toggle", click_ref("@s1:e2"))["ok"]
+    assert "refused" in toolbox.call("toggle", click_ref("@s1:e1"))
+
+
+def test_a_ref_preview_does_not_carry_the_native_id(tmp_path):
+    toolbox, _, _ = toolbox_for(nameless_scene(native=True), tmp_path)
+
+    target = toolbox.preview("click", click_ref("@s1:e1"))
+
+    assert target["role"] == "button" and "native_id" not in target

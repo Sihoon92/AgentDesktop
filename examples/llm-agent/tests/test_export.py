@@ -245,7 +245,7 @@ def test_export_inlines_every_viewer_script_in_page_order_after_the_record(tmp_p
     html = build_export(copy_questions(tmp_path), REAL_STATIC, NOW)
 
     code = [text for attrs, text in parsed(html).scripts if not attrs]
-    names = ["chat.js", "knowledge.js", "app.js"]
+    names = ["chat.js", "knowledge.js", "stages.js", "app.js"]
     assert [text.strip() for text in code] == [(REAL_STATIC / name).read_text(encoding="utf-8").strip() for name in names]
     record = html.index('<script id="run-export" type="application/json">')
     assert record < html.index("function renderChat") < html.index("function start()")
@@ -260,6 +260,64 @@ def test_export_has_no_answer_form(tmp_path):
     assert "<textarea" not in skeleton
     assert '<div id="chat-composer" class="chat-composer"></div>' in skeleton
     assert "/answer" not in skeleton
+
+
+class Elements(HTMLParser):
+    """Collects every element as (tag, attributes, ids of its open ancestors)."""
+
+    VOID = {"meta", "link", "input", "img", "br", "hr"}
+
+    def __init__(self):
+        super().__init__()
+        self.elements = []
+        self._stack = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        self.elements.append((tag, attrs, [a.get("id") for _, a in self._stack]))
+        if tag not in self.VOID:
+            self._stack.append((tag, attrs))
+
+    def handle_startendtag(self, tag, attrs):
+        self.elements.append((tag, dict(attrs), [a.get("id") for _, a in self._stack]))
+
+    def handle_endtag(self, tag):
+        if all(open_tag != tag for open_tag, _ in self._stack):
+            return
+        while self._stack.pop()[0] != tag:
+            pass
+
+
+def page_elements(html):
+    parser = Elements()
+    parser.feed(html)
+    parser.close()
+    return parser.elements
+
+
+@pytest.mark.parametrize("source", ["page", "export"])
+def test_every_panel_folds_with_a_button_that_names_what_it_folds(tmp_path, source):
+    html = ((REAL_STATIC / "index.html").read_text(encoding="utf-8") if source == "page"
+            else build_export(copy_questions(tmp_path), REAL_STATIC, NOW))
+    elements = page_elements(html)
+    ids = {attrs.get("id") for _, attrs, _ in elements}
+
+    toggles = {attrs["id"]: attrs for tag, attrs, _ in elements if tag == "button" and attrs.get("id", "").startswith("toggle-")
+               and "aria-controls" in attrs}
+    assert {"toggle-runs", "toggle-chat", "toggle-details", "toggle-settings"} <= set(toggles)
+    for attrs in toggles.values():
+        assert attrs["type"] == "button"
+        assert attrs["aria-expanded"] in ("true", "false")
+        assert attrs["aria-controls"] in ids
+
+
+def test_the_chat_is_its_own_column_left_of_the_capture():
+    elements = page_elements((REAL_STATIC / "index.html").read_text(encoding="utf-8"))
+    order = [attrs.get("id") or attrs.get("class") for _, attrs, ancestors in elements if ancestors and ancestors[-1] == "layout"]
+    chat = next(ancestors for _, attrs, ancestors in elements if attrs.get("id") == "chat-composer")
+
+    assert order == ["runs-panel", "chat", "stage-area", "details-panel"]
+    assert "details-panel" not in chat and "chat" in chat
 
 
 def test_a_script_named_in_the_page_but_missing_is_refused(tmp_path):
@@ -281,3 +339,62 @@ def test_extra_scripts_are_inlined_before_the_app(tmp_path):
     code = [text.strip() for attrs, text in parsed(html).scripts if not attrs]
     assert code == ['console.log("extra");', 'console.log("export");']
     assert "/static/" not in html
+
+
+PLAN_EVENTS = [
+    {"type": "plan", "step": 1, "revision": 0,
+     "stages": [{"n": 1, "goal": "첫 화면을 연다", "done_when": "제목이 보인다", "status": "active"},
+                {"n": 2, "goal": "값을 고른다", "done_when": "칸에 값이 보인다", "status": "pending"}]},
+    {"type": "model", "step": 2, "tokens": 900, "call_tokens": 900, "stage": 1, "stage_calls": 1, "stage_limit": 8},
+    {"type": "stage", "step": 2, "n": 1, "status": "done", "calls": 1, "limit": 8, "kind": "text", "note": "제목(표시 1)"},
+    {"type": "stage", "step": 2, "n": 2, "status": "started", "calls": 0, "limit": 8},
+    {"type": "question", "id": "q9", "step": 3, "kind": "stage_limit", "observation": 1, "window_id": "w-1",
+     "text": "한도", "stage": 2, "calls": 8, "intents": ["값을 고른다"], "candidates": [], "proposed": None,
+     "basis": [], "items": []},
+    {"type": "answer", "id": "q9", "text": "", "pin": None, "accepted": True, "items": [], "timed_out": False},
+]
+
+
+def test_export_carries_plan_stage_and_limit_events_and_the_stage_code(tmp_path):
+    run_dir = copy_sample(tmp_path)
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+        for event in PLAN_EVENTS:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    html = build_export(run_dir, REAL_STATIC, NOW)
+
+    events = payload(html)["events"]
+    assert events[-len(PLAN_EVENTS):] == PLAN_EVENTS
+    assert "function renderStageBar" in html and "function lockedLimitAnswer" in html
+    assert html.index('<script id="run-export"') < html.index("function renderStageBar") < html.index("function start()")
+
+
+def page_skeleton(html):
+    for text in [text for attrs, text in parsed(html).scripts]:
+        html = html.replace(text, "")
+    return html
+
+
+@pytest.mark.parametrize("source", ["page", "export"])
+def test_the_stage_bar_sits_hidden_between_the_toolbar_and_the_capture(tmp_path, source):
+    html = ((REAL_STATIC / "index.html").read_text(encoding="utf-8") if source == "page"
+            else build_export(copy_questions(tmp_path), REAL_STATIC, NOW))
+    elements = page_elements(page_skeleton(html))
+    order = [attrs.get("class") for tag, attrs, _ in elements
+             if tag in ("div", "section") and attrs.get("class") in ("stage-toolbar", "stage-bar", "stage-scroll")]
+    bar, bar_ancestors = next((attrs, ancestors) for _, attrs, ancestors in elements if attrs.get("id") == "stage-bar")
+
+    assert order == ["stage-toolbar", "stage-bar", "stage-scroll"]
+    assert bar_ancestors[-2:] == ["layout", None]
+    assert "hidden" in bar and bar.get("aria-label") == "단계"
+    assert {"stage-list", "stage-detail", "stage-detail-toggle"} <= {attrs.get("id") for _, attrs, _ in elements}
+
+
+def test_timeline_cells_are_called_steps_and_plan_parts_stages():
+    page = (REAL_STATIC / "index.html").read_text(encoding="utf-8")
+    app = (REAL_STATIC / "app.js").read_text(encoding="utf-8")
+
+    for old in ("단계 이동", "단계 정보", "단계 타임라인", "단계 뷰어"):
+        assert old not in page and old not in app
+    assert "← → 스텝 이동" in page and "<h2>스텝 정보</h2>" in page and 'aria-label="스텝 타임라인"' in page
+    assert 'details: "스텝 정보"' in app

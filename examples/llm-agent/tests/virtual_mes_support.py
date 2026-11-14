@@ -10,7 +10,10 @@ from xml.etree import ElementTree
 
 import pytest
 
-EXE = Path(__file__).resolve().parents[1] / "virtual-mes" / "build" / "VirtualMes.exe"
+DEFAULT_EXE = Path(__file__).resolve().parents[1] / "virtual-mes" / "build" / "VirtualMes.exe"
+# VIRTUAL_MES_EXE points the tests at another build, such as one made with build.ps1 -OutputDir
+# while the default build is in use.
+EXE = Path(os.environ.get("VIRTUAL_MES_EXE") or DEFAULT_EXE)
 
 requires_exe = pytest.mark.skipif(
     not EXE.exists(), reason="VirtualMes.exe is not built; run virtual-mes/build.ps1"
@@ -223,6 +226,11 @@ class LiveApp:
             if node.get("id") == automation_id:
                 return node
         raise AssertionError(f"no element with id {automation_id!r}")
+
+    def open_box(self, box_id):
+        """Opens a filter box's list the way the app asks for by default: with the arrow button at
+        its right end, which the ref arrow exposure (the easy profile) names `<box id>-arrow`."""
+        return self.click(self.by_id(box_id + "-arrow")["ref"])
 
     def click_outside(self):
         """Presses the real mouse on an empty part of the main window's data panel."""

@@ -487,3 +487,37 @@ def test_messages_have_no_english_sentences(tmp_path):
     with pytest.raises(KnowledgeError) as caught:
         KnowledgeStore(tmp_path, "a/b")
     assert re.search("[가-힣]", str(caught.value))
+
+
+def test_a_source_says_where_an_entry_came_from(tmp_path):
+    store = KnowledgeStore(tmp_path, "mes")
+    asked = store.add({**RESOLUTION, "source": {**RESOLUTION["source"], "origin": "question"}}, today=DAY)
+    found = store.add({**RESOLUTION, "source": {"run_id": "r", "origin": "discovered", "stage": 2,
+                                                 "date": "2026-11-13"}}, today=DAY)
+
+    assert store.get(asked["id"])["source"]["origin"] == "question"
+    assert store.get(found["id"])["source"] == {"run_id": "r", "origin": "discovered", "stage": 2,
+                                                "date": "2026-11-13"}
+
+
+@pytest.mark.parametrize("source", [
+    {"run_id": "r", "origin": "guess"},
+    {"run_id": "r", "origin": None},
+    {"run_id": "r", "origin": "discovered", "stage": 0},
+    {"run_id": "r", "origin": "discovered", "stage": "2"},
+    {"run_id": "r", "origin": "discovered", "stage": True},
+    {"run_id": "r", "origin": "discovered", "stage": None},
+])
+def test_an_odd_origin_or_stage_is_refused(tmp_path, source):
+    with pytest.raises(KnowledgeError):
+        KnowledgeStore(tmp_path, "mes").add({**RESOLUTION, "source": source}, today=DAY)
+
+
+def test_an_old_file_without_an_origin_reads_as_before(tmp_path):
+    content = VALID_YAML + "source:\n  run_id: x\n  question: 무엇을 누르나요?\n  answer: 4번\n  date: 2026-11-13\n"
+    store = store_with_files(tmp_path, good=content)
+    entry = store.entries()[0]
+
+    assert store.warnings == []
+
+    assert entry["source"] == {"run_id": "x", "question": "무엇을 누르나요?", "answer": "4번", "date": "2026-11-13"}

@@ -9,6 +9,7 @@ Precedence where these values are used: command line > task file > settings file
 """
 
 import os
+import re
 from pathlib import Path, PureWindowsPath
 
 import yaml
@@ -19,11 +20,22 @@ from agent.knowledge import KnowledgeError, system_name
 HERE = Path(__file__).resolve().parent.parent
 SETTINGS_ENV = "AGENT_SETTINGS"
 DEFAULT_PATH = HERE / "settings.local.yaml"
-KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system")
+KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
+        "plan_reasoning_effort")
+NUMBER_KEYS = ("stage_call_limit",)
+PATH_KEYS = ("knowledge_dir", "exe")
+QUOTE_HINT = "경로는 따옴표 없이 적거나 작은따옴표로 감싸세요"
+QUOTED_BACKSLASH = re.compile(r'"[^"]*\\')
+CONTROL_CHARACTERS = re.compile("[\x00-\x1f\x7f\x85  ]")
 
 
 class SettingsError(Exception):
-    """The settings file cannot be used; the message says why, in Korean."""
+    """The settings file cannot be used. The message says why in Korean and names the file;
+    reason says why in a few words with no path, no value and no key the user typed."""
+
+    def __init__(self, message, reason=""):
+        super().__init__(message)
+        self.reason = reason
 
 
 def settings_path(path=None, environ=None):
@@ -42,11 +54,11 @@ def load_settings(path=None, environ=None):
     if not target.is_file():
         if named is None:
             return {}
-        raise SettingsError(f"설정 파일이 없습니다: {target}")
+        raise SettingsError(f"설정 파일이 없습니다: {target}", "설정 파일 없음")
     try:
         return _parse(_read(target), target)
     except SettingsError as error:
-        raise SettingsError(f"{error} (설정 파일: {target})") from error
+        raise SettingsError(f"{error} (설정 파일: {target})", error.reason) from error
 
 
 def _named(path, environ):
@@ -60,46 +72,72 @@ def _read(target):
     try:
         text = target.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
-        raise SettingsError("설정 파일은 UTF-8로 저장해야 합니다") from error
+        raise SettingsError("설정 파일은 UTF-8로 저장해야 합니다", "UTF-8이 아님") from error
     except OSError as error:
-        raise SettingsError(f"설정 파일을 읽지 못했습니다: {error.strerror or error}") from error
+        raise SettingsError(f"설정 파일을 읽지 못했습니다: {error.strerror or error}", "파일을 읽지 못함") from error
     try:
         return yaml.safe_load(text)
     except yaml.YAMLError as error:
-        mark = getattr(error, "problem_mark", None)
-        where = f" {mark.line + 1}행" if mark is not None else ""
-        raise SettingsError(f"설정 파일의 YAML 형식이 틀렸습니다:{where}") from error
+        raise _yaml_error(error, text.splitlines()) from error
+
+
+def _yaml_error(error, lines):
+    """Names the line and, when that line holds a backslash inside double quotes, how to write a path.
+    The line itself is never shown."""
+    mark = getattr(error, "problem_mark", None)
+    where = f" {mark.line + 1}행" if mark is not None else ""
+    reason = f"YAML 형식 오류{where}"
+    message = f"설정 파일의 YAML 형식이 틀렸습니다:{where}"
+    if mark is not None and mark.line < len(lines) and QUOTED_BACKSLASH.search(lines[mark.line]):
+        reason += f" · 큰따옴표 안의 역슬래시 · {QUOTE_HINT}"
+        message += f". 큰따옴표 안에서는 역슬래시가 특수 문자입니다. {QUOTE_HINT}"
+    return SettingsError(message, reason)
 
 
 def _parse(raw, target):
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        raise SettingsError("설정 파일은 키와 값의 묶음('키: 값' 줄)이어야 합니다")
+        raise SettingsError("설정 파일은 키와 값의 묶음('키: 값' 줄)이어야 합니다", "'키: 값' 줄이 아님")
     unknown = [str(key) for key in raw if key not in KEYS]
     if unknown:
-        raise SettingsError(f"모르는 키가 있습니다: {', '.join(unknown)}. 쓸 수 있는 키: {', '.join(KEYS)}")
+        raise SettingsError(f"모르는 키가 있습니다: {', '.join(unknown)}. 쓸 수 있는 키: {', '.join(KEYS)}",
+                            f"모르는 키 {len(unknown)}개")
     loaded = {}
     for key in KEYS:
         if raw.get(key) is None:
             continue
+        if key in NUMBER_KEYS:
+            loaded[key] = _number(key, raw[key])
+            continue
         value = "off" if key == "image_mode" and raw[key] is False else raw[key]
         if not isinstance(value, str) or not value.strip():
-            raise SettingsError(f"{key} 값은 비어 있지 않은 글이어야 합니다")
+            raise SettingsError(f"{key} 값은 비어 있지 않은 글이어야 합니다", f"{key} 값이 글이 아님")
         loaded[key] = _checked(key, value.strip(), target)
     return loaded
 
 
+def _number(key, value):
+    if type(value) is not int or value < 1:
+        raise SettingsError(f"{key} 값은 1 이상의 정수여야 합니다", f"{key} 값이 1 이상의 정수가 아님")
+    return value
+
+
 def _checked(key, value, target):
+    if key in PATH_KEYS and CONTROL_CHARACTERS.search(value):
+        raise SettingsError(f"{key} 경로에 제어 문자가 있습니다. 큰따옴표 안의 역슬래시가 특수 문자로 읽혔을 수 있습니다. "
+                            f"{QUOTE_HINT}", f"{key} 경로에 제어 문자 · {QUOTE_HINT}")
     if key == "image_mode" and value not in IMAGE_MODES:
-        raise SettingsError(f"image_mode는 {', '.join(IMAGE_MODES)} 중 하나여야 합니다")
+        raise SettingsError(f"image_mode는 {', '.join(IMAGE_MODES)} 중 하나여야 합니다",
+                            f"image_mode 값이 {', '.join(IMAGE_MODES)} 중 하나가 아님")
     if key == "exe" and not PureWindowsPath(value).is_absolute():
-        raise SettingsError("exe는 절대 경로여야 합니다")
+        raise SettingsError("exe는 절대 경로여야 합니다", "exe가 절대 경로가 아님")
     if key == "system":
         try:
             system_name(value, "")
         except KnowledgeError as error:
-            raise SettingsError("system은 영문, 숫자, 한글, '.', '_', '-'로 64자까지 쓸 수 있습니다") from error
+            raise SettingsError("system은 영문, 숫자, 한글, '.', '_', '-'로 64자까지 쓸 수 있습니다",
+                                "system 이름 규칙에 맞지 않음") from error
     if key == "knowledge_dir":
         return str((target.parent / value).resolve())
     return value

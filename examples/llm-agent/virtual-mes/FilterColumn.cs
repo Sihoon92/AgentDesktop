@@ -230,10 +230,12 @@ namespace VirtualMesApp
         }
 
         /// <summary>
-        /// Makes the box open its list. By default a click anywhere on it opens the list. When
-        /// boxes open by the arrow only, a click on the body puts a text caret in the box and
-        /// opens nothing, and only the arrow square at the right end opens the list. The arrow
-        /// is a part of the box: a child button in the ref exposure, absent from the others.
+        /// Makes the box open its list. By default only the arrow button at the right end opens
+        /// it: a click on the body puts a text caret in the box and opens nothing. The body is
+        /// drawn as an input box and the arrow as a separate button. The arrow is a part of the
+        /// box whose exposure is the arrow region's, so in the accessibility tree it is the
+        /// box's next sibling whatever the filters region shows. With --combo-open anywhere a
+        /// click anywhere on the box opens the list, and the box looks as it always did.
         /// </summary>
         private void WireOpening(SurfaceItem item, string filter, Action open)
         {
@@ -244,17 +246,28 @@ namespace VirtualMesApp
             }
             Rectangle body = item.Bounds;
             string text = item.Text;
+            item.DropArrow = false;
+            item.Paint = delegate(Graphics graphics, Rectangle bounds)
+            {
+                ComboArrow.PaintBody(graphics, item, this.surface.Font);
+            };
             item.Click = delegate
             {
                 this.session.ComboBodyClicked(filter);
                 this.surface.ShowCaret(CaretLine(body, text));
             };
+            Exposure exposure = this.session.ExposureOf(UiRegion.Arrow);
             SurfaceItem arrow = new SurfaceItem();
-            arrow.Id = item.Id + "-arrow";
+            arrow.Id = ComboArrow.ArrowId(item.Id, filter, exposure);
+            arrow.Exposure = exposure;
             arrow.Kind = ItemKind.Button;
             arrow.Name = "열기";
             arrow.Enabled = item.Enabled;
-            arrow.Bounds = new Rectangle(body.Right - body.Height, body.Top, body.Height, body.Height);
+            arrow.Bounds = ComboArrow.ArrowBounds(body);
+            arrow.Paint = delegate(Graphics graphics, Rectangle bounds)
+            {
+                ComboArrow.PaintButton(graphics, bounds, arrow.Enabled, this.surface.Pressed == arrow);
+            };
             arrow.Click = delegate
             {
                 this.session.ComboArrowClicked(filter);

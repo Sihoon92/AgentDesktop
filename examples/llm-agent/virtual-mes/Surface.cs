@@ -51,6 +51,12 @@ namespace VirtualMesApp
             get { return this.exposure; }
         }
 
+        /// <summary>The item the left button went down on, until it comes up.</summary>
+        internal SurfaceItem Pressed
+        {
+            get { return this.pressed; }
+        }
+
         /// <summary>The current items. The array is replaced, never changed in place.</summary>
         internal SurfaceItem[] Items
         {
@@ -118,6 +124,16 @@ namespace VirtualMesApp
                 else
                 {
                     this.PaintDefault(e.Graphics, item);
+                }
+                if (item.Parts != null)
+                {
+                    foreach (SurfaceItem part in item.Parts)
+                    {
+                        if (part.Paint != null)
+                        {
+                            part.Paint(e.Graphics, part.Bounds);
+                        }
+                    }
                 }
             }
             if (this.caretShown && !this.caret.IsEmpty)
@@ -259,6 +275,7 @@ namespace VirtualMesApp
         {
             this.HideCaret();
             this.pressed = this.Find(e.Location);
+            this.InvalidateDrawn(this.pressed);
             base.OnMouseDown(e);
         }
 
@@ -267,6 +284,7 @@ namespace VirtualMesApp
             SurfaceItem target = this.Find(e.Location);
             SurfaceItem wasPressed = this.pressed;
             this.pressed = null;
+            this.InvalidateDrawn(wasPressed);
             base.OnMouseUp(e);
             if (e.Button == MouseButtons.Left)
             {
@@ -289,9 +307,53 @@ namespace VirtualMesApp
             }
         }
 
+        /// <summary>Repaints an item that draws its own pressed look, so the look follows the button.</summary>
+        private void InvalidateDrawn(SurfaceItem item)
+        {
+            if (item != null && item.Paint != null)
+            {
+                this.Invalidate(item.Bounds);
+            }
+        }
+
+        /// <summary>
+        /// True when the accessibility tree has something to show: the region is not pixel, or
+        /// an item or part has its own exposure that is not pixel.
+        /// </summary>
+        private bool ExposesAnything()
+        {
+            if (this.exposure != Exposure.Pixel)
+            {
+                return true;
+            }
+            foreach (SurfaceItem item in this.items)
+            {
+                if (OwnExposure(item))
+                {
+                    return true;
+                }
+                if (item.Parts != null)
+                {
+                    foreach (SurfaceItem part in item.Parts)
+                    {
+                        if (OwnExposure(part))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        private static bool OwnExposure(SurfaceItem item)
+        {
+            return item.Exposure.HasValue && item.Exposure.Value != Exposure.Pixel;
+        }
+
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WmGetObject && m.LParam == UiaRootObjectId && this.exposure != Exposure.Pixel)
+            if (m.Msg == WmGetObject && m.LParam == UiaRootObjectId && this.ExposesAnything())
             {
                 if (this.provider == null)
                 {

@@ -67,9 +67,19 @@ const state = {
   composerKey: null,
   chatShown: null,
   jumpedQuestion: null,
+  revealedQuestion: null,
+  focusedQuestion: null,
   baseTitle: "",
   summaryLines: null,
+  collapsed: { runs: true, chat: false, details: false, settings: true },
+  stageFocus: null,
+  stageDetailOpen: false,
+  stageCache: null,
+  panelPrefs: {},
 };
+const PANEL_KEY = "agent-viewer-panels";
+const FOLDABLE = ["runs", "chat", "details", "settings"];
+const PANEL_NAMES = { runs: "실행 목록", chat: "대화", details: "스텝 정보" };
 const POLL_MS = 1000;
 const LEVEL_LABELS = ["0 · 커서 안 씀", "1 · 값 입력·키", "2 · 마우스·타이핑", "3 · 전체"];
 
@@ -147,6 +157,71 @@ function showBanner(messages) {
   banner.hidden = lines.length === 0;
 }
 
+/* ---------- folding panels ---------- */
+
+function readPanelPrefs() {
+  let data = null;
+  try {
+    data = JSON.parse(localStorage.getItem(PANEL_KEY) || "null");
+  } catch (_) {
+    data = null;
+  }
+  const prefs = {};
+  if (data && typeof data === "object") {
+    for (const name of FOLDABLE) if (typeof data[name] === "boolean") prefs[name] = data[name];
+  }
+  return prefs;
+}
+
+function writePanelPrefs() {
+  try {
+    localStorage.setItem(PANEL_KEY, JSON.stringify(state.panelPrefs));
+  } catch (_) { /* storage may be blocked; the panels still fold on this page */ }
+}
+
+function setCollapsed(name, collapsed, remember = false) {
+  state.collapsed[name] = collapsed;
+  if (remember) {
+    state.panelPrefs[name] = collapsed;
+    writePanelPrefs();
+  }
+  applyCollapsed(name);
+}
+
+function applyCollapsed(name) {
+  const collapsed = state.collapsed[name];
+  if (name === "settings") {
+    $("start-settings").hidden = collapsed;
+    $("toggle-settings").setAttribute("aria-expanded", String(!collapsed));
+    return;
+  }
+  const button = $(`toggle-${name}`);
+  $(button.getAttribute("aria-controls")).hidden = collapsed;
+  button.closest(".panel").classList.toggle("collapsed", collapsed);
+  $("layout").classList.toggle(`${name}-collapsed`, collapsed);
+  button.setAttribute("aria-expanded", String(!collapsed));
+  button.title = `${PANEL_NAMES[name]} ${collapsed ? "펴기" : "접기"}`;
+  button.querySelector(".visually-hidden").textContent = button.title;
+  if (name === "chat") {
+    renderPendingBadge();
+    if (!collapsed) $("chat-log").scrollTop = $("chat-log").scrollHeight;
+  }
+}
+
+function initPanels() {
+  state.panelPrefs = readPanelPrefs();
+  for (const name of FOLDABLE) {
+    if (state.panelPrefs[name] !== undefined) state.collapsed[name] = state.panelPrefs[name];
+    applyCollapsed(name);
+    $(`toggle-${name}`).addEventListener("click", () => setCollapsed(name, !state.collapsed[name], true));
+  }
+}
+
+function openRunsWhenNothingChosen() {
+  if (state.exportMode || state.panelPrefs.runs !== undefined) return;
+  setCollapsed("runs", false);
+}
+
 function buildEntries(events) {
   const observations = new Map();
   const beforeIds = new Set();
@@ -171,9 +246,10 @@ function buildEntries(events) {
   let awaitingNext = null;
   let lastObservation = null;
   let approved = null;
-  for (const event of events) {
+  for (let at = 0; at < events.length; at += 1) {
+    const event = events[at];
     if (event.type === "proposal") {
-      const entry = { kind: "proposal", proposal: event, decision: null, before: lastObservation, absorbed: false };
+      const entry = { kind: "proposal", proposal: event, decision: null, before: lastObservation, absorbed: false, at };
       proposals.set(event.id, entry);
       entries.push(entry);
     } else if (event.type === "decision") {
@@ -184,7 +260,7 @@ function buildEntries(events) {
       }
     } else if (event.type === "question") {
       const observation = observations.get(event.observation) || lastObservation;
-      const entry = { kind: "question", question: event, answer: null, observation };
+      const entry = { kind: "question", question: event, answer: null, observation, at };
       questions.set(event.id, entry);
       entries.push(entry);
     } else if (event.type === "answer") {
@@ -197,16 +273,16 @@ function buildEntries(events) {
         awaitingNext = null;
       }
       if (event.source === "wait_for_text") {
-        entries.push({ kind: "wait", observation: event });
+        entries.push({ kind: "wait", observation: event, at });
       } else if (awaitingAfter && showsActionResult(event)) {
         awaitingAfter.after = event;
         awaitingAfter = null;
       } else if (!beforeIds.has(event.id) && event.source !== "question") {
-        entries.push({ kind: "observation", observation: event });
+        entries.push({ kind: "observation", observation: event, at });
       }
     } else if (event.type === "action") {
       awaitingAfter = {
-        kind: "action", action: event, before: observations.get(event.before) || null, after: null, next: null,
+        kind: "action", action: event, before: observations.get(event.before) || null, after: null, next: null, at,
         knowledgeUsed: knowledgeUsed.get(event.step) || [], knowledgeFailed: knowledgeFailed.get(event.step) || [],
       };
       awaitingNext = awaitingAfter;
@@ -217,7 +293,7 @@ function buildEntries(events) {
       approved = null;
       entries.push(awaitingAfter);
     } else if (event.type === "finish") {
-      entries.push({ kind: "finish", finish: event, observation: lastObservation });
+      entries.push({ kind: "finish", finish: event, observation: lastObservation, at });
     }
   }
   return { entries: entries.filter((entry) => !entry.absorbed), tokensByStep };
@@ -514,13 +590,13 @@ function runTitle(run) {
 
 function runNotices(run) {
   if (!run) return [];
-  if (run.kind === "legacy") return ["옛 로그입니다. 스크린샷 없이 단계마다 도구·인자·결과만 보입니다."];
+  if (run.kind === "legacy") return ["옛 로그입니다. 스크린샷 없이 스텝마다 도구·인자·결과만 보입니다."];
   const notices = [];
   if (run.status === "interrupted") {
     notices.push(`이 실행은 중단됐습니다${run.interrupted_reason ? ` (${run.interrupted_reason})` : ""}. 기록이 여기서 끊겼습니다.`);
   }
-  if (state.exportMode && run.status === "running") notices.push("내보낼 때 실행 중이던 기록입니다. 그 뒤의 단계는 들어 있지 않습니다.");
-  if (run.status === "unreadable") notices.push("run.json을 읽을 수 없습니다(깨졌거나 쓰는 중). 기록된 단계만 보입니다.");
+  if (state.exportMode && run.status === "running") notices.push("내보낼 때 실행 중이던 기록입니다. 그 뒤의 스텝은 들어 있지 않습니다.");
+  if (run.status === "unreadable") notices.push("run.json을 읽을 수 없습니다(깨졌거나 쓰는 중). 기록된 스텝만 보입니다.");
   if (run.newer_format) notices.push(`새 형식${run.format ? `(format ${run.format})` : ""}입니다. 이 뷰어가 아는 부분만 표시합니다.`);
   return notices;
 }
@@ -571,6 +647,7 @@ async function loadRuns() {
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.get("run")) return selectRun(hash.get("run"), "run");
   if (hash.get("legacy")) return selectRun(hash.get("legacy"), "legacy");
+  openRunsWhenNothingChosen();
   if (state.runs[0]) await selectRun(state.runs[0].run_id, state.runs[0].kind);
 }
 
@@ -618,6 +695,8 @@ async function selectRun(runId, kind = "run") {
     state.chatShown = null;
     state.composerKey = null;
     state.summaryLines = null;
+    state.stageFocus = null;
+    state.stageCache = null;
     $("copy-status").textContent = "";
   }
   state.runId = runId;
@@ -798,6 +877,7 @@ async function pollLive() {
 }
 
 function select(index) {
+  state.stageFocus = null;
   if (state.entries.length === 0) {
     state.index = 0;
     render();
@@ -816,6 +896,7 @@ function render() {
   renderRunSummary();
   renderTimeline();
   renderToggles();
+  renderStageBar();
   renderDetails();
   renderStage();
   renderChat();
@@ -853,17 +934,21 @@ function renderTimeline() {
     const bad = (entry.kind === "finish" && entry.finish.status !== "verified")
       || (entry.kind === "proposal" && entry.decision && !entry.decision.approved)
       || (entry.kind === "wait" && !(entry.observation.wait && entry.observation.wait.found))
-      || (entry.kind === "action" && entry.action.expected_met === false)
+      || (entry.kind === "action" && actionOutcome(entry.action).expected_met === false)
       || (entry.kind === "question" && questionState(entry).bad)
       || (entry.kind === "legacy" && entry.step.ok === false) ? " bad" : "";
     const current = index === state.index;
+    const unconfirmed = entry.kind === "action" && isUnconfirmed(actionOutcome(entry.action));
     const button = el("button", { attrs: { type: "button", ...(current ? { "aria-current": "step" } : {}) } }, [
       el("span", { className: "num", text: index + 1 }),
-      el("span", { className: `dot ${entry.kind}${bad}`, attrs: { "aria-hidden": "true" } }),
+      el("span", { className: `dot ${entry.kind}${bad}${unconfirmed ? " unconfirmed" : ""}`, attrs: { "aria-hidden": "true" } }),
       el("span", { text: timelineLabel(entry) }),
+      unconfirmed ? el("span", { className: "visually-hidden", text: " 확인 못 함" }) : null,
     ]);
+    if (unconfirmed) button.title = "확인 못 함: 글은 그대로이고 누른 곳 주변 그림만 바뀜";
     button.addEventListener("click", () => select(index));
-    return el("li", {}, [button]);
+    const tag = state.runKind === "run" ? timelineStageTag(index) : null;
+    return el("li", tag ? { className: "stage-start" } : {}, [tag, button]);
   }));
   const current = list.children[state.index];
   if (current) current.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -909,7 +994,7 @@ function renderDetails() {
   const info = $("step-info");
   const entry = state.entries[state.index];
   if (!entry) {
-    info.replaceChildren(el("p", { className: "empty", text: state.runId ? "이 실행에는 기록된 단계가 없습니다." : "" }));
+    info.replaceChildren(el("p", { className: "empty", text: state.runId ? "이 실행에는 기록된 스텝이 없습니다." : "" }));
     renderObservationText(null);
     return;
   }
@@ -947,6 +1032,7 @@ function actionDetails(entry) {
       ["모델 토큰", state.tokensByStep.get(action.step)],
       ["보는 화면", state.view === "after" ? "동작 후" : "동작 전"],
     ]),
+    ...outcomeNotes(action),
     ...knowledgeNotes(entry),
     el("h3", { text: "인자" }),
     el("pre", { text: JSON.stringify(args, null, 2) }),
@@ -1050,7 +1136,7 @@ function legacyDetails(step) {
       el("span", { className: "kind legacy-kind", text: "옛 로그" }),
     ]),
     factList([
-      ["로그 단계", step.step],
+      ["로그 스텝", step.step],
       ["도구", step.tool],
       ["인자", formatArguments(step.arguments)],
       ["결과", step.summary, failed ? "warn-text" : ""],
@@ -1065,7 +1151,7 @@ function finishDetails(finish) {
     factList([
       ["판정", statusBadge(finish.status)],
       ["이유", finish.reason],
-      ["단계 수", finish.steps],
+      ["스텝 수", finish.steps],
       ["토큰", finish.tokens],
     ]),
   ];
@@ -1125,20 +1211,20 @@ function observationWarnings(observation) {
 function stageNotices(entry, observation) {
   const notices = runNotices(state.run).concat(observationWarnings(observation));
   const pending = pendingProposal();
-  if (pending && pending !== entry) notices.unshift("동작 승인을 기다리고 있습니다. 타임라인의 노란 '대기' 단계에서 승인하거나 거부하세요.");
+  if (pending && pending !== entry) notices.unshift("동작 승인을 기다리고 있습니다. 타임라인의 노란 '대기' 스텝에서 승인하거나 거부하세요.");
   const question = pendingQuestion();
   if (question && !canAnswerHere()) notices.unshift("에이전트가 질문하고 답을 기다립니다. 이 실행은 터미널에서 답합니다.");
-  else if (question && question !== entry) notices.unshift("에이전트가 질문하고 답을 기다립니다. 타임라인의 질문 단계를 보면서 오른쪽 대화 칸에서 답하세요.");
+  else if (question && question !== entry) notices.unshift("에이전트가 질문하고 답을 기다립니다. 타임라인의 질문 스텝을 보면서 대화 칸에서 답하세요.");
   return notices;
 }
 
 function emptyStageText(entry, observation) {
   if (!state.runId) return "왼쪽에서 실행을 고르세요.";
-  if (!entry) return "이 실행에는 기록된 단계가 없습니다.";
+  if (!entry) return "이 실행에는 기록된 스텝이 없습니다.";
   if (entry.kind === "legacy") return "옛 로그에는 스크린샷이 없습니다. 오른쪽에서 도구·인자·결과를 보세요.";
   if (observation) return "표시할 스크린샷이 없습니다.";
   if (entry.kind === "action") return state.view === "after" ? "이 동작 뒤에 기록된 관찰이 없습니다." : "이 동작 전에는 기록된 관찰이 없습니다.";
-  return "이 단계에는 연결된 관찰이 없습니다.";
+  return "이 스텝에는 연결된 관찰이 없습니다.";
 }
 
 async function renderStage() {
@@ -1362,10 +1448,46 @@ function renderStartForm() {
   $("exe").placeholder = status.default_exe || "실행 파일의 절대 경로";
   $("exe").required = !status.default_exe;
   $("system").placeholder = status.default_system ? `비우면 ${status.default_system} (설정 파일)` : "비우면 실행 파일 이름";
+  $("stage-call-limit").placeholder = Number.isInteger(status.default_stage_call_limit) ? `비우면 ${status.default_stage_call_limit}` : "비우면 기본값";
+  renderSettingsSummary();
   const busy = Boolean(status.active);
   $("start-run").disabled = busy;
   if (busy) $("start-status").textContent = `실행 중: ${status.active}`;
   else if ($("start-status").dataset.kind !== "error") $("start-status").textContent = "";
+}
+
+function renderSettingsSummary() {
+  const exe = $("exe").value.trim() || (state.status && state.status.default_exe) || "";
+  const system = $("system").value.trim();
+  const parts = [
+    exe ? exe.split(/[\\/]/).pop() : "실행 파일을 정하세요",
+    system ? `시스템 ${system}` : null,
+    `권한 ${$("level").value}`,
+    stageLimitSummary(),
+    $("approve").checked ? "동작 전 승인" : null,
+  ];
+  $("settings-summary").textContent = parts.filter(Boolean).join(" · ");
+}
+
+/* The form's stage call limit as the start request sends it: absent when empty, a number when it
+   reads as a whole number (the server refuses 0 and negatives), otherwise the text itself, which
+   the server refuses with its message like any other bad value. */
+function stageLimitValue() {
+  const text = $("stage-call-limit").value.trim();
+  if (!text) return undefined;
+  return /^-?\d+$/.test(text) ? Number(text) : text;
+}
+
+function stageLimitSummary() {
+  const value = stageLimitValue();
+  if (value !== undefined) return `단계 한도 ${value}`;
+  const fallback = state.status && state.status.default_stage_call_limit;
+  return Number.isInteger(fallback) ? `단계 한도 ${fallback}(기본)` : null;
+}
+
+function watchSettings() {
+  for (const id of ["exe", "system", "stage-call-limit"]) $(id).addEventListener("input", renderSettingsSummary);
+  for (const id of ["level", "approve"]) $(id).addEventListener("change", renderSettingsSummary);
 }
 
 function setStartMessage(text, kind) {
@@ -1382,11 +1504,19 @@ async function submitRun(event) {
     $("goal").focus();
     return;
   }
-  const payload = { goal, level: Number($("level").value), approve: $("approve").checked };
   const exe = $("exe").value.trim();
+  if ($("exe").required && !exe) {
+    setCollapsed("settings", false);
+    setStartMessage("실행 파일의 절대 경로를 입력해 주세요.", "error");
+    $("exe").focus();
+    return;
+  }
+  const payload = { goal, level: Number($("level").value), approve: $("approve").checked };
   if (exe) payload.exe = exe;
   const system = $("system").value.trim();
   if (system) payload.system = system;
+  const stageLimit = stageLimitValue();
+  if (stageLimit !== undefined) payload.stage_call_limit = stageLimit;
   $("start-run").disabled = true;
   setStartMessage("시작하는 중…");
   let response;
@@ -1604,9 +1734,12 @@ function start() {
   $("start-form").addEventListener("submit", submitRun);
   $("toggle-summary").addEventListener("click", toggleSummary);
   $("copy-summary").addEventListener("click", copySummary);
+  $("stage-detail-toggle").addEventListener("click", toggleStageDetail);
   document.addEventListener("keydown", onKey);
   new ResizeObserver(positionLabels).observe($("stage"));
   fillLevels();
+  watchSettings();
+  initPanels();
   if (exported) {
     startExport(exported);
     return;

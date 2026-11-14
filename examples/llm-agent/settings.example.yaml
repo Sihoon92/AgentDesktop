@@ -20,10 +20,20 @@
 
 # 시스템별 지식을 쌓는 폴더. 상대 경로는 이 파일이 있는 폴더를 기준으로 합니다.
 # 환경변수 AGENT_KNOWLEDGE_DIR보다 이 값이 앞섭니다.
+# 따옴표 없이 적습니다. 큰따옴표 안에서는 역슬래시가 특수 문자입니다(작은따옴표는 괜찮습니다).
+#   예) knowledge_dir: D:\Example\knowledge
 # knowledge_dir:
 
 # 대상 앱 실행 파일의 절대 경로. run.py --goal과 view.py에서 --exe가 없을 때 씁니다.
+# 따옴표 없이 적습니다. 큰따옴표 안에서는 역슬래시가 특수 문자입니다(작은따옴표는 괜찮습니다).
+#   예) exe: C:\Example\App\Example.exe
 # exe:
 
 # 지식의 시스템 이름(영문, 숫자, 한글, '.', '_', '-', 64자까지). 비우면 실행 파일 이름을 씁니다.
 # system:
+
+# 단계마다 쓸 수 있는 모델 호출 수(1 이상의 정수, 기본 8). 다 쓰면 계속할지 사람에게 묻습니다.
+# stage_call_limit:
+
+# 계획을 세우기 전 호출의 추론 노력(기본 medium). 계획이 생긴 뒤에는 reasoning_effort를 씁니다.
+# plan_reasoning_effort:

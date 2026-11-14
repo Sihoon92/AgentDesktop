@@ -1,5 +1,7 @@
 """Tests that open the real VirtualMes window. They run only with VIRTUAL_MES_LIVE=1."""
 
+import pytest
+
 from virtual_mes_support import LiveApp, export, live, read_xlsx, requires_exe
 
 pytestmark = [requires_exe, live]
@@ -71,7 +73,7 @@ def last(app, event):
 def test_single_select_changes_on_item_click(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy") as app:
         open_front(app)
-        app.click(app.by_id("filter-process")["ref"])
+        app.open_box("filter-process")
         app.click(app.find("권취")["ref"])
         changed = last(app, "filter_changed")
         assert (changed["filter"], changed["value"], changed["closed_by"]) == ("process", "권취", "item_click")
@@ -81,7 +83,7 @@ def test_period_enables_the_date_inputs(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy") as app:
         open_front(app)
         assert "disabled" in app.find("시작일").get("states", [])
-        app.click(app.by_id("filter-period")["ref"])
+        app.open_box("filter-period")
         app.click(app.by_id("option-3")["ref"])
         assert "disabled" not in app.find("시작일").get("states", [])
         assert last(app, "filter_changed")["value"] == "기간"
@@ -90,19 +92,19 @@ def test_period_enables_the_date_inputs(tmp_path):
 def test_multi_select_applies_with_select_and_with_an_outside_click(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy") as app:
         open_front(app)
-        app.click(app.by_id("filter-shop-3")["ref"])
+        app.open_box("filter-shop-3")
         for code in ("WA0", "WA1", "WA3"):
             app.click(app.by_id(f"row-{code}")["ref"])
         app.click(app.by_id("multi-select")["ref"])
         assert last(app, "filter_changed")["value"] == ["WA2"]
         assert last(app, "filter_changed")["closed_by"] == "select_button"
         assert app.by_id("filter-shop-3")["name"] == "#울산 조립"
-        app.click(app.by_id("filter-shop-3")["ref"])
+        app.open_box("filter-shop-3")
         app.click(app.by_id("multi-all")["ref"])
         app.click_outside()
         assert last(app, "filter_changed")["value"] == ["WA0", "WA1", "WA2", "WA3"]
         assert last(app, "filter_changed")["closed_by"] == "outside_click"
-        app.click(app.by_id("filter-shop-3")["ref"])
+        app.open_box("filter-shop-3")
         for code in ("WA0", "WA1", "WA2", "WA3"):
             app.click(app.by_id(f"row-{code}")["ref"])
         app.click(app.by_id("multi-select")["ref"])
@@ -166,7 +168,7 @@ def test_default_delays_repeat_with_the_same_seed(tmp_path):
 def test_custom_period_without_dates_is_rejected(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy", "--delay-ms", "200") as app:
         open_front(app)
-        app.click(app.by_id("filter-period")["ref"])
+        app.open_box("filter-period")
         app.click(app.by_id("option-3")["ref"])
         app.click(app.by_id("query-button")["ref"])
         app.wait_for_event("query_rejected")
@@ -364,8 +366,16 @@ def test_mes_like_profile_matches_what_the_user_saw(tmp_path):
             assert "ref" not in node and node.get("bounds"), text
         assert not [n for n in nodes if n.get("name") == "엑셀 저장"]
         assert app.find("조회(F5)", role="button").get("ref")
+        period = next(n for n in nodes if n.get("name") == "전일")
         app.focus(main)
-        app.click_at_center(next(n for n in nodes if n.get("name") == "전일"))
+        app.click_at_center(period)
+        app.wait_for_event("combo_body_clicked")
+        assert not [w for w in app.windows() if w["title"] == "목록"]
+        arrow = next(n for n in nodes if n.get("id") == "7007")
+        assert arrow["role"] == "button" and "name" not in arrow and arrow.get("ref")
+        assert right_end(period["bounds"]) == right_end_of_arrow(arrow["bounds"])
+        app.click(arrow["ref"])
+        assert app.wait_for_event("combo_arrow_clicked")["filter"] == "period"
         app.wait_for_node(lambda n: n.get("name") == "전주", "the open period list")
         places = {(n["bounds"]["x"], n["bounds"]["y"]) for n in app.all_nodes() if n.get("name") == "기간"}
         assert len(places) == 2, places
@@ -428,7 +438,7 @@ def test_outside_click_does_not_reach_the_control_underneath(tmp_path):
         open_front(app)
         query(app)
         cell = app.by_id("cell-12-5")
-        app.click(app.by_id("filter-shop-3")["ref"])
+        app.open_box("filter-shop-3")
         app.click(app.wait_for_node(lambda n: n.get("id") == "row-WA0", "the WA0 row")["ref"])
         app.right_click_at_center(cell)
         app.wait_for_event("filter_changed")
@@ -440,11 +450,11 @@ def test_outside_click_does_not_reach_the_control_underneath(tmp_path):
 def test_click_after_an_outside_click_is_not_lost(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy") as app:
         open_front(app)
-        app.click(app.by_id("filter-period")["ref"])
+        app.open_box("filter-period")
         app.wait_for_windows(2)
         app.click_outside()
         app.wait_for_windows(1)
-        app.click(app.by_id("filter-period")["ref"])
+        app.open_box("filter-period")
         app.click_at_center(app.wait_for_node(lambda n: n.get("name") == "전주", "the 전주 entry"))
         assert app.wait_for_event("filter_changed")["value"] == "전주"
 
@@ -468,7 +478,7 @@ def test_cell_popup_uses_the_filters_the_table_was_queried_with(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy", "--delay-ms", "200") as app:
         open_defects(app)
         query(app)
-        app.click(app.by_id("filter-period")["ref"])
+        app.open_box("filter-period")
         app.click(app.wait_for_node(lambda n: n.get("id") == "option-3", "the 기간 entry")["ref"])
         app.wait_for_event("filter_changed")
         app.click(app.by_id("cell-3-2")["ref"])
@@ -480,7 +490,7 @@ def test_export_records_the_filters_the_table_was_queried_with(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy", "--delay-ms", "200") as app:
         open_front(app)
         query(app)
-        app.click(app.by_id("filter-process")["ref"])
+        app.open_box("filter-process")
         app.click(app.wait_for_node(lambda n: n.get("name") == "권취", "the 권취 entry")["ref"])
         app.wait_for_event("filter_changed")
         app.click(app.by_id("excel-icon")["ref"])
@@ -493,7 +503,7 @@ def test_export_records_the_filters_the_table_was_queried_with(tmp_path):
 def test_cells_scrolled_out_of_view_are_reported_offscreen(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy", "--delay-ms", "200") as app:
         open_front(app)
-        app.click(app.by_id("filter-period")["ref"])
+        app.open_box("filter-period")
         app.click(app.wait_for_node(lambda n: n.get("name") == "전주", "the 전주 entry")["ref"])
         app.wait_for_event("filter_changed")
         query(app)
@@ -516,7 +526,7 @@ def test_multi_select_applies_when_another_app_takes_focus(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy") as app:
         open_front(app)
         app.focus(app.main())
-        app.click(app.by_id("filter-shop-3")["ref"])
+        app.open_box("filter-shop-3")
         app.click(app.wait_for_node(lambda n: n.get("id") == "row-WA0", "the WA0 row")["ref"])
         app.focus_elsewhere()
         changed = app.wait_for_event("filter_changed")
@@ -537,7 +547,7 @@ def test_radial_closes_when_another_app_takes_focus(tmp_path):
 def test_typed_dates_filter_the_query(tmp_path):
     with LiveApp(tmp_path, "--profile", "easy", "--delay-ms", "200") as app:
         open_front(app)
-        app.click(app.by_id("filter-period")["ref"])
+        app.open_box("filter-period")
         app.click(app.wait_for_node(lambda n: n.get("id") == "option-3", "the 기간 entry")["ref"])
         app.wait_for_event("filter_changed")
         app.cli("set-value", app.find("시작일")["ref"], "2026-11-03")
@@ -554,7 +564,7 @@ def test_empty_selection_queries_and_saves_zero_rows(tmp_path):
     target = tmp_path / "empty.xlsx"
     with LiveApp(tmp_path, "--profile", "easy", "--delay-ms", "200") as app:
         open_front(app)
-        app.click(app.by_id("filter-shop-3")["ref"])
+        app.open_box("filter-shop-3")
         for code in ("WA0", "WA1", "WA2", "WA3"):
             app.click(app.wait_for_node(lambda n, c=code: n.get("id") == f"row-{c}", "a shop row")["ref"])
         app.click(app.by_id("multi-select")["ref"])
@@ -608,7 +618,7 @@ def test_arrow_mode_arrow_click_opens_the_list(tmp_path):
         open_front(app)
         app.wait_for_event("screen_opened")
         before = len(app.windows())
-        app.click(app.by_id("filter-shop-3-arrow")["ref"])
+        app.open_box("filter-shop-3")
         arrow = app.wait_for_event("combo_arrow_clicked")
         assert (arrow["screen"], arrow["filter"]) == ("front-process", "shop-3")
         assert [w["title"] for w in app.wait_for_windows(before + 1)].count("목록") == 1
@@ -631,22 +641,102 @@ def test_arrow_mode_text_filters_open_only_at_the_right_end(tmp_path):
         app.wait_for_node(lambda n: n.get("name") == "전주", "the open period list")
 
 
-def test_arrow_is_a_child_button_only_in_ref_mode(tmp_path):
-    with LiveApp(tmp_path, "--profile", "easy", "--combo-open", "arrow") as app:
+def siblings_of(app, window, automation_id):
+    """The children of the node that holds the element with this automation id."""
+    def visit(node):
+        children = node.get("children") or []
+        if any((child.get("native_id") or {}).get("value") == automation_id for child in children):
+            return children
+        for child in children:
+            found = visit(child)
+            if found is not None:
+                return found
+        return None
+
+    return visit(app.snapshot(window)["tree"])
+
+
+def right_end_of_arrow(bounds):
+    return int(bounds["x"] + bounds["width"] / 2), int(bounds["y"] + bounds["height"] / 2)
+
+
+BARE_ARROW_IDS = {str(number) for number in range(7001, 7008)}
+FRONT_BARE_ARROW_IDS = ["7001", "7002", "7003", "7004", "7005", "7007"]
+
+
+def test_ref_arrow_is_a_named_button_right_after_its_box(tmp_path):
+    with LiveApp(tmp_path, "--profile", "easy") as app:
         open_front(app)
         app.wait_for_event("screen_opened")
         box = tree_node(app, app.main(), "filter-shop-3")
-        children = [child for child in box.get("children") or []
-                    if (child.get("native_id") or {}).get("value") == "filter-shop-3-arrow"]
-        assert len(children) == 1
-        assert children[0]["role"] == "button" and children[0]["name"] == "열기" and children[0].get("ref_id")
-        arrow, body = children[0]["bounds"], box["bounds"]
-        assert arrow["x"] + arrow["width"] == body["x"] + body["width"] and arrow["width"] == body["height"]
-    for options in (("--combo-open", "arrow"), ("--expose", "filters=pixel", "--combo-open", "arrow")):
-        with LiveApp(tmp_path / options[1].replace("=", "-"), *options) as app:
+        assert not [c for c in box.get("children") or [] if (c.get("native_id") or {}).get("value", "").endswith("-arrow")]
+        siblings = siblings_of(app, app.main(), "filter-shop-3-arrow")
+        ids = [(c.get("native_id") or {}).get("value") for c in siblings]
+        assert ids.index("filter-shop-3-arrow") == ids.index("filter-shop-3") + 1
+        arrow = siblings[ids.index("filter-shop-3-arrow")]
+        assert arrow["role"] == "button" and arrow["name"] == "열기" and arrow.get("ref_id")
+        body = box["bounds"]
+        assert arrow["bounds"]["x"] + arrow["bounds"]["width"] == body["x"] + body["width"]
+        assert arrow["bounds"]["width"] == body["height"]
+
+
+def test_bare_arrows_are_nameless_buttons_with_fixed_numeric_ids(tmp_path):
+    seen = []
+    for run in ("first", "second"):
+        with LiveApp(tmp_path / run) as app:
             open_front(app)
             app.wait_for_event("screen_opened")
-            assert not [n for n in app.all_nodes() if n.get("name") == "열기"]
+            nodes = app.nodes(app.main())
+            arrows = [n for n in nodes if n.get("id") in BARE_ARROW_IDS]
+            assert all(n["role"] == "button" and "name" not in n and n.get("ref") for n in arrows)
+            seen.append([(n["id"], n["bounds"]["x"], n["bounds"]["y"]) for n in arrows])
+            texts = [n for n in nodes if n.get("role") == "statictext" and n.get("name") == "전일"]
+            assert len(texts) == 1 and "ref" not in texts[0]
+    assert [entry[0] for entry in seen[0]] == FRONT_BARE_ARROW_IDS
+    assert seen[0] == seen[1]
+
+
+def test_bare_arrow_invoke_opens_the_list(tmp_path):
+    with LiveApp(tmp_path) as app:
+        open_front(app)
+        app.wait_for_event("screen_opened")
+        before = len(app.windows())
+        app.click(app.by_id("7003")["ref"])
+        assert app.wait_for_event("combo_arrow_clicked")["filter"] == "shop-3"
+        assert [w["title"] for w in app.wait_for_windows(before + 1)].count("목록") == 1
+
+
+def test_arrow_shows_even_when_the_boxes_are_pixels(tmp_path):
+    with LiveApp(tmp_path, "--expose", "filters=pixel,arrow=ref") as app:
+        open_front(app)
+        app.wait_for_event("screen_opened")
+        nodes = app.nodes(app.main())
+        assert not [n for n in nodes if n.get("name") in ("전일", "Shop")]
+        arrow = next(n for n in nodes if n.get("id") == "filter-period-arrow")
+        assert arrow["role"] == "button" and arrow["name"] == "열기" and arrow.get("ref")
+        app.click(arrow["ref"])
+        assert app.wait_for_event("combo_arrow_clicked")["filter"] == "period"
+
+
+def test_pixel_arrows_are_not_elements(tmp_path):
+    for name, options in (("mes-like", ("--expose", "arrow=pixel")), ("hard", ("--profile", "hard"))):
+        with LiveApp(tmp_path / name, *options) as app:
+            if name == "hard":
+                open_front_by_pixels(app)
+            else:
+                open_front(app)
+            app.wait_for_event("screen_opened")
+            nodes = app.all_nodes()
+            assert not [n for n in nodes if n.get("name") == "열기" or n.get("id") in BARE_ARROW_IDS]
+            assert not [n for n in nodes if (n.get("id") or "").endswith("-arrow")]
+
+
+def open_front_by_pixels(app):
+    """Opens 전공정 생산현황 when the menu is text only, by clicking at the centers of the texts."""
+    main = app.main()
+    app.focus(main)
+    app.click_at_center(next(n for n in app.nodes(main) if n.get("name") == "생산운영"))
+    app.click_at_center(app.wait_for_node(lambda n: n.get("name") == "전공정 생산현황", "the list entry"))
 
 
 def test_arrow_mode_disabled_boxes_do_not_react(tmp_path):
@@ -654,6 +744,7 @@ def test_arrow_mode_disabled_boxes_do_not_react(tmp_path):
         open_roller(app)
         app.wait_for_event("screen_opened")
         assert "disabled" in app.by_id("filter-shop-1-arrow").get("states", [])
+        assert "disabled" not in app.by_id("filter-shop-3-arrow").get("states", [])
         before = len(app.windows())
         app.click_at_center(app.by_id("filter-shop-1"))
         x, y = right_end(app.by_id("filter-shop-1")["bounds"])
@@ -661,8 +752,16 @@ def test_arrow_mode_disabled_boxes_do_not_react(tmp_path):
         assert len(app.windows()) == before and combo_events(app) == []
 
 
+def test_bare_arrow_of_a_disabled_box_is_disabled(tmp_path):
+    with LiveApp(tmp_path) as app:
+        open_roller(app)
+        app.wait_for_event("screen_opened")
+        assert "disabled" in app.by_id("7001").get("states", [])
+        assert "disabled" not in app.by_id("7003").get("states", [])
+
+
 def test_anywhere_mode_still_opens_on_a_body_click(tmp_path):
-    with LiveApp(tmp_path, "--profile", "easy") as app:
+    with LiveApp(tmp_path, "--profile", "easy", "--combo-open", "anywhere") as app:
         open_front(app)
         app.wait_for_event("screen_opened")
         assert app.events()[0]["combo_open"] == "anywhere"
@@ -671,6 +770,16 @@ def test_anywhere_mode_still_opens_on_a_body_click(tmp_path):
         app.wait_for_windows(before + 1)
         assert not [n for n in app.all_nodes() if n.get("id") == "filter-shop-3-arrow"]
         assert combo_events(app) == []
+
+
+@pytest.mark.parametrize("profile", ["easy", "mes-like"])
+def test_anywhere_mode_has_no_arrow_element_whatever_the_arrow_exposure(tmp_path, profile):
+    with LiveApp(tmp_path, "--profile", profile, "--combo-open", "anywhere") as app:
+        open_front(app)
+        app.wait_for_event("screen_opened")
+        nodes = app.nodes(app.main())
+        assert not [n for n in nodes if (n.get("id") or "").endswith("-arrow") or n.get("id") in BARE_ARROW_IDS]
+        assert not [n for n in nodes if n.get("name") == "열기"]
 
 
 def open_summary(app):

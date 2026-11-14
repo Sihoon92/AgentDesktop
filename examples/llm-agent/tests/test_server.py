@@ -394,7 +394,7 @@ def test_status_reports_the_active_run_and_default_exe(tmp_path):
         manager.join(timeout=5)
 
     assert json.loads(idle) == {"can_start": True, "active": None, "default_exe": str(exe),
-                                 "can_answer": False, "default_system": None}
+                                 "can_answer": False, "default_system": None, "default_stage_call_limit": 8}
     assert json.loads(busy)["active"] == started["run_id"]
 
 
@@ -405,7 +405,7 @@ def test_status_without_a_run_manager_says_runs_cannot_start(server):
 
     assert status == 200
     assert json.loads(body) == {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
-                                "default_system": None}
+                                "default_system": None, "default_stage_call_limit": None}
 
 
 def test_favicon_request_is_answered_without_a_404(server):
@@ -428,7 +428,7 @@ class PausingModel:
             [call("observe", OBSERVE)],
         ]
 
-    def respond(self, instructions, items, tools):
+    def respond(self, instructions, items, tools, effort=None):
         if self.turns:
             output = self.turns.pop(0)
         else:
@@ -1708,9 +1708,9 @@ def test_post_runs_passes_the_system_and_rejects_an_odd_one(tmp_path):
     manager, _ = make_manager(tmp_path, finishing_model())
     original = manager.start
 
-    def watched(goal, exe=None, level=3, approve=False, system=None):
+    def watched(goal, exe=None, level=3, approve=False, system=None, stage_call_limit=None):
         seen.append(system)
-        return original(goal, exe, level, approve, system=system)
+        return original(goal, exe, level, approve, system=system, stage_call_limit=stage_call_limit)
 
     manager.start = watched
     with serving(tmp_path / "runs", manager) as instance:
@@ -1722,3 +1722,28 @@ def test_post_runs_passes_the_system_and_rejects_an_odd_one(tmp_path):
     assert json.loads((tmp_path / "runs" / body["run_id"] / "run.json").read_text(encoding="utf-8"))["system"] == "mes"
     assert odd == 400 and "시스템 이름" in error["error"]
     assert len(runs_created(tmp_path)) == 1
+
+
+def test_post_runs_passes_the_stage_call_limit_and_an_absent_one_is_the_default(tmp_path):
+    manager, _ = make_manager(tmp_path, None)
+    tasks = []
+    manager._model_factory = lambda task: tasks.append(task) or finishing_model()
+    with serving(tmp_path / "runs", manager) as instance:
+        with_limit, _ = post_json(instance, "/api/runs", {"goal": "설정을 열어줘", "stage_call_limit": 4})
+        manager.join(timeout=5)
+        without, _ = post_json(instance, "/api/runs", {"goal": "설정을 열어줘", "stage_call_limit": None})
+        manager.join(timeout=5)
+
+    assert (with_limit, without) == (201, 201)
+    assert [task.stage_call_limit for task in tasks] == [4, 8]
+
+
+@pytest.mark.parametrize("value", [0, -2, "여덟", 1.5, False])
+def test_post_runs_with_a_bad_stage_call_limit_is_400(tmp_path, value):
+    manager, _ = make_manager(tmp_path, finishing_model())
+    with serving(tmp_path / "runs", manager) as instance:
+        status, body = post_json(instance, "/api/runs", {"goal": "g", "stage_call_limit": value})
+
+    assert status == 400
+    assert "단계별 호출 한도" in body["error"]
+    assert runs_created(tmp_path) == []

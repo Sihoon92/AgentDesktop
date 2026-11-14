@@ -323,3 +323,50 @@ def test_terminal_eof_in_the_middle_of_registration_is_no_answer():
 
 def test_no_asker_never_answers():
     assert NoAsker().ask({"id": "q1"}) is NO_ANSWER
+
+
+STAGE_LIMIT = {"id": "q5", "kind": "stage_limit", "text": "이 단계에서 호출을 다 썼습니다. 계속할까요?", "stage": 2,
+               "calls": 8, "intents": ["목록을 연다", None, "두 번째 칸을 누른다"]}
+PLAN_LIMIT = {"id": "q6", "kind": "plan_limit", "text": "계획을 여러 번 고쳤습니다. 계속할까요?", "stage": 3,
+              "revisions": 3}
+
+
+@pytest.mark.parametrize(("typed", "expected"), [
+    ("", Answer(text="", accepted=True)),
+    ("   ", Answer(text="", accepted=True)),
+    ("q", Answer(text="", accepted=False)),
+    (" Q ", Answer(text="", accepted=False)),
+    ("가운데 칸의 화살표를 누르세요", Answer(text="가운데 칸의 화살표를 누르세요", accepted=True)),
+])
+def test_the_terminal_asks_at_a_stage_limit(typed, expected):
+    shown = []
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return typed
+
+    answer = TerminalAsker(ask=ask, show=shown.append).ask(STAGE_LIMIT)
+
+    assert answer == expected
+    screen = "\n".join(shown)
+    for text in (STAGE_LIMIT["text"], "단계 2", "호출 8", "목록을 연다", "두 번째 칸을 누른다"):
+        assert text in screen, text
+    assert "None" not in screen
+    assert "q" in prompts[0]
+
+
+@pytest.mark.parametrize(("typed", "accepted"), [("", True), ("q", False), ("다시 나눠", True)])
+def test_the_terminal_asks_at_the_plan_limit(typed, accepted):
+    shown = []
+
+    answer = TerminalAsker(ask=lambda _prompt: typed, show=shown.append).ask(PLAN_LIMIT)
+
+    assert answer.accepted is accepted
+    screen = "\n".join(shown)
+    assert PLAN_LIMIT["text"] in screen and "단계 3" in screen and "고친 횟수 3" in screen
+
+
+@pytest.mark.parametrize("question", [STAGE_LIMIT, PLAN_LIMIT])
+def test_terminal_eof_at_a_limit_is_no_answer(question):
+    assert TerminalAsker(ask=closed, show=lambda _line: None).ask(question) is NO_ANSWER

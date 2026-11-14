@@ -5,7 +5,7 @@
  "data": {
   "app": "VirtualMes.exe",
   "complete": true,
-  "ref_count": 16,
+  "ref_count": 22,
   "snapshot_id": "sfixture0",
   "tree": {
    "role": "window",
@@ -102,8 +102,26 @@
         },
         {
          "role": "button",
-         "name": "전체",
+         "name": "열기",
          "ref_id": "@sfixture0:e4",
+         "bounds": {
+          "x": 122.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-shop-1-arrow"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
+         "name": "전체",
+         "ref_id": "@sfixture0:e5",
          "bounds": {
           "x": 150.0,
           "y": 42.0,
@@ -120,8 +138,26 @@
         },
         {
          "role": "button",
+         "name": "열기",
+         "ref_id": "@sfixture0:e6",
+         "bounds": {
+          "x": 272.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-shop-2-arrow"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
          "name": "전체",
-         "ref_id": "@sfixture0:e5",
+         "ref_id": "@sfixture0:e7",
          "bounds": {
           "x": 300.0,
           "y": 42.0,
@@ -138,8 +174,26 @@
         },
         {
          "role": "button",
+         "name": "열기",
+         "ref_id": "@sfixture0:e8",
+         "bounds": {
+          "x": 422.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-shop-3-arrow"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
          "name": "전체",
-         "ref_id": "@sfixture0:e6",
+         "ref_id": "@sfixture0:e9",
          "bounds": {
           "x": 450.0,
           "y": 42.0,
@@ -156,8 +210,26 @@
         },
         {
          "role": "button",
+         "name": "열기",
+         "ref_id": "@sfixture0:e10",
+         "bounds": {
+          "x": 572.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-process-arrow"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
          "name": "전체",
-         "ref_id": "@sfixture0:e7",
+         "ref_id": "@sfixture0:e11",
          "bounds": {
           "x": 600.0,
           "y": 42.0,
@@ -174,8 +246,26 @@
         },
         {
          "role": "button",
+         "name": "열기",
+         "ref_id": "@sfixture0:e12",
+         "bounds": {
+          "x": 722.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-product-arrow"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
          "name": "전일",
-         "ref_id": "@sfixture0:e8",
+         "ref_id": "@sfixture0:e13",
          "bounds": {
           "x": 750.0,
           "y": 42.0,
@@ -185,6 +275,24 @@
          "native_id": {
           "kind": "automation_id",
           "value": "filter-period"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
+         "role": "button",
+         "name": "열기",
+         "ref_id": "@sfixture0:e14",
+         "bounds": {
+          "x": 872.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "filter-period-arrow"
          },
          "available_actions": [
           "Click"
@@ -204,7 +312,7 @@
         {
          "role": "button",
          "name": "조회(F5)",
-         "ref_id": "@sfixture0:e9",
+         "ref_id": "@sfixture0:e15",
          "bounds": {
           "x": 700.0,
           "y": 82.0,
@@ -221,7 +329,7 @@
         },
         {
          "role": "edit",
-         "ref_id": "@sfixture0:e10",
+         "ref_id": "@sfixture0:e16",
          "bounds": {
           "x": 400.0,
           "y": 82.0,
@@ -238,7 +346,7 @@
         },
         {
          "role": "edit",
-         "ref_id": "@sfixture0:e11",
+         "ref_id": "@sfixture0:e17",
          "bounds": {
           "x": 540.0,
           "y": 82.0,
@@ -267,7 +375,7 @@
         {
          "role": "button",
          "name": "엑셀",
-         "ref_id": "@sfixture0:e12",
+         "ref_id": "@sfixture0:e18",
          "bounds": {
           "x": 860.0,
           "y": 92.0,
@@ -316,7 +424,7 @@
         {
          "role": "cell",
          "name": "극판",
-         "ref_id": "@sfixture0:e13",
+         "ref_id": "@sfixture0:e19",
          "bounds": {
           "x": 300.0,
           "y": 122.0,
@@ -334,7 +442,7 @@
         {
          "role": "cell",
          "name": "206",
-         "ref_id": "@sfixture0:e14",
+         "ref_id": "@sfixture0:e20",
          "bounds": {
           "x": 450.0,
           "y": 122.0,
@@ -352,7 +460,7 @@
         {
          "role": "cell",
          "name": "조립",
-         "ref_id": "@sfixture0:e15",
+         "ref_id": "@sfixture0:e21",
          "bounds": {
           "x": 600.0,
           "y": 122.0,
@@ -370,7 +478,7 @@
         {
          "role": "cell",
          "name": "311",
-         "ref_id": "@sfixture0:e16",
+         "ref_id": "@sfixture0:e22",
          "bounds": {
           "x": 750.0,
           "y": 122.0,

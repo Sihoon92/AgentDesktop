@@ -5,9 +5,11 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from fake_cli import FakeCli
+from fake_cli import FakeCli, scene_window
+from PIL import Image
 from test_loop import OBSERVE, ScriptedModel, call, settings_call
 
+from agent import capture
 from agent.desktop import DesktopClient
 from agent.loop import RunResult, run_agent
 from agent.process_identity import process_started_at
@@ -89,8 +91,10 @@ def full_run_model():
     return ScriptedModel(
         [
             [call("launch_target", {"intent": "앱을 연다"})],
+            [call("plan", {"stages": [{"goal": "설정 패널이 열려 있다", "done_when": "지표가 보인다"}]})],
             [call("observe", OBSERVE)],
             settings_call,
+            [call("stage_done", {"marks": [1], "capture": None, "note": "패널이 보인다"})],
             [call("finish", {"success": True, "evidence": "opened"})],
         ]
     )
@@ -200,12 +204,13 @@ def test_run_json_reflects_final_status(tmp_path):
 
     final = run_json(recorder)
     assert final["status"] == "verified"
-    assert final["steps"] == 4
-    assert final["tokens"] == 400
+    assert final["steps"] == 6
+    assert final["tokens"] == 600
     assert final["reason"] == "opened"
-    assert events(recorder)[-1] == {"type": "finish", "status": "verified", "steps": 4,
-                                    "reason": "opened", "tokens": 400}
-    assert [e["step"] for e in events(recorder) if e["type"] == "model"] == [1, 2, 3, 4]
+    assert (final["stages"]["stage_count"], final["stages"]["stages_done"]) == (1, 1)
+    assert events(recorder)[-1] == {"type": "finish", "status": "verified", "steps": 6,
+                                    "reason": "opened", "tokens": 600}
+    assert [e["step"] for e in events(recorder) if e["type"] == "model"] == [1, 2, 3, 4, 5, 6]
 
 
 def test_two_runs_in_the_same_second_get_distinct_ids(tmp_path):
@@ -697,3 +702,226 @@ def test_confirmed_status_and_a_warning_are_recorded(tmp_path):
     recorder.finish(RunResult("confirmed", 2, "사람이 확인함", 30))
     assert run_json(recorder)["status"] == "confirmed"
     assert events(recorder)[-2] == {"type": "warning", "message": "등록 중 오류: RuntimeError: x"}
+
+
+SCENE_MAIN_BOUNDS = {"x": 1000, "y": 500, "width": 416, "height": 308}
+SCENE_LIST_BOUNDS = {"x": 1100, "y": 650, "width": 216, "height": 258}
+ITEM_BOUNDS = {"x": 1150, "y": 820, "width": 40, "height": 20}
+QUERY_BOUNDS = {"x": 1010, "y": 510, "width": 80, "height": 24}
+MAIN_PIXELS, LIST_PIXELS = (200, 220, 240), (10, 120, 30)
+SCENE_OBSERVE = {"window_id": None, "root_ref": None, "surface": None, "include_bounds": False}
+
+
+def popup_scene(list_bounds=SCENE_LIST_BOUNDS, with_list=True):
+    main = scene_window("w-1", "메인", SCENE_MAIN_BOUNDS)
+    listed = scene_window("w-2", "", list_bounds)
+    tree = {"role": "window", "name": "메인", "bounds": SCENE_MAIN_BOUNDS, "children": [
+        {"role": "button", "name": "조회", "ref_id": "@s1:e1", "bounds": QUERY_BOUNDS},
+        {"role": "listitem", "name": "항목", "ref_id": "@s1:e2", "bounds": ITEM_BOUNDS},
+    ]}
+    cli = FakeCli(scene={"windows": [main, listed] if with_list else [main], "tree": tree})
+    cli.screenshot_colors = {"w-1": MAIN_PIXELS, "w-2": LIST_PIXELS}
+    return cli
+
+
+def observed_scene(tmp_path, cli):
+    recorder, toolbox, _ = recorded(tmp_path, cli)
+    toolbox.call("launch_target", {"intent": "앱을 연다"})
+    toolbox.call("observe", SCENE_OBSERVE)
+    return recorder, toolbox, [e for e in events(recorder) if e["type"] == "observation"][-1]
+
+
+def element(observation, name):
+    return next(e for e in observation["elements"] if e["name"] == name)
+
+
+def frame_pixel(recorder, observation, x, y):
+    with Image.open(recorder.path / "frames" / observation["frame"]) as image:
+        return image.convert("RGB").getpixel((x, y))
+
+
+def test_a_popup_window_is_in_the_frame_and_its_elements_land_on_it(tmp_path):
+    recorder, _, observation = observed_scene(tmp_path, popup_scene())
+
+    assert observation["image"] == {"width": 400, "height": 400}
+    assert observation["warning"] is None
+    assert element(observation, "항목")["rect"] == {"x": 142, "y": 320, "width": 40, "height": 20}
+    assert element(observation, "조회")["rect"] == {"x": 2, "y": 10, "width": 80, "height": 24}
+    assert frame_pixel(recorder, observation, 150, 330) == LIST_PIXELS
+    assert frame_pixel(recorder, observation, 10, 10) == MAIN_PIXELS
+    assert frame_pixel(recorder, observation, 50, 350) == capture.FILL_COLOR
+
+
+def test_a_popup_adds_one_screenshot_and_no_window_listing(tmp_path):
+    _, _, _ = observed_scene(tmp_path / "one", single := popup_scene(with_list=False))
+    _, _, _ = observed_scene(tmp_path / "two", double := popup_scene())
+
+    assert double.command_names().count("list-windows") == single.command_names().count("list-windows")
+    assert double.command_names().count("screenshot") == single.command_names().count("screenshot") + 1
+
+
+def test_a_popup_above_and_left_moves_the_boxes_of_the_main_window(tmp_path):
+    _, _, observation = observed_scene(tmp_path, popup_scene({"x": 920, "y": 420, "width": 216, "height": 208}))
+
+    assert observation["image"] == {"width": 480, "height": 380}
+    assert element(observation, "조회")["rect"] == {"x": 82, "y": 90, "width": 80, "height": 24}
+
+
+def test_a_failed_popup_screenshot_leaves_it_out_and_says_how_many(tmp_path):
+    cli = popup_scene()
+    cli.failing_screenshots = {"w-2"}
+
+    recorder, _, observation = observed_scene(tmp_path, cli)
+
+    assert observation["image"] == {"width": 400, "height": 300}
+    assert "1개" in observation["warning"]
+    assert element(observation, "조회")["rect"] == {"x": 2, "y": 10, "width": 80, "height": 24}
+    assert element(observation, "항목")["rect"] is None
+    assert sorted(p.name for p in (recorder.path / "frames").iterdir()) == ["0001.png"]
+
+
+def test_a_failed_main_screenshot_still_gives_no_frame(tmp_path):
+    cli = popup_scene()
+    cli.failing_screenshots = {"w-1"}
+
+    _, _, observation = observed_scene(tmp_path, cli)
+
+    assert observation["frame"] is None and "WINDOW_NOT_FOUND" in observation["warning"]
+    assert cli.command_names().count("screenshot") == 1
+
+
+def test_a_point_on_the_popup_window_gets_its_image_point(tmp_path):
+    recorder, toolbox, _ = observed_scene(tmp_path, popup_scene())
+
+    toolbox.call("mouse_click", {"window_id": "w-2", "x": 1150, "y": 850, "button": "left", "intent": "누른다"})
+
+    click = [e for e in events(recorder) if e["type"] == "action"][-1]
+    assert click["target"]["image_points"] == [[142, 350]]
+
+
+def test_a_point_on_a_window_left_out_of_the_frame_gets_no_image_point(tmp_path):
+    barely = {"x": 1300, "y": 790, "width": 400, "height": 300}
+    recorder, toolbox, observation = observed_scene(tmp_path, popup_scene(barely))
+    assert observation["image"] == {"width": 400, "height": 300}
+
+    toolbox.call("mouse_click", {"window_id": "w-2", "x": 1350, "y": 795, "button": "left", "intent": "누른다"})
+
+    click = [e for e in events(recorder) if e["type"] == "action"][-1]
+    assert click["target"]["image_points"] == [None]
+
+
+def test_the_frame_of_an_observed_popup_shows_it_over_the_window_listed_under_it(tmp_path):
+    cli = popup_scene()
+    recorder, toolbox, _ = recorded(tmp_path, cli)
+    toolbox.call("launch_target", {"intent": "앱을 연다"})
+    cli.scene["windows"].reverse()
+
+    toolbox.call("observe", {**SCENE_OBSERVE, "window_id": "w-2"})
+
+    observation = [e for e in events(recorder) if e["type"] == "observation"][-1]
+    assert observation["window"]["id"] == "w-2" and observation["image"] == {"width": 400, "height": 400}
+    assert frame_pixel(recorder, observation, 1150 - 1008, 700 - 500) == LIST_PIXELS
+    assert frame_pixel(recorder, observation, 10, 10) == MAIN_PIXELS
+
+
+MARK = "ZQX-단계글-7781"
+STAGE_STATS = {"stage_count": 2, "stages_done": 1, "stage_calls": [3, 8], "limit_questions": 1,
+               "plan_revisions": 1, "max_call_tokens": 9120}
+
+
+def staged_events(recorder):
+    recorder.on_event({"type": "model", "step": 1, "tokens": 100, "call_tokens": 100})
+    recorder.on_event({"type": "plan", "step": 1, "revision": 0, "stages": [
+        {"n": 1, "goal": f"{MARK} 목표", "done_when": f"{MARK} 확인", "status": "active"},
+        {"n": 2, "goal": f"{MARK} 둘째", "done_when": f"{MARK} 둘째 확인", "status": "pending"}]})
+    recorder.on_event({"type": "model", "step": 2, "tokens": 300, "call_tokens": 200, "stage": 1, "stage_calls": 1,
+                       "stage_limit": 8})
+    recorder.on_event({"type": "stage", "step": 2, "n": 1, "status": "done", "calls": 3, "limit": 8, "kind": "text",
+                       "note": f"{MARK} 메모"})
+    recorder.on_event({"type": "stage", "step": 2, "n": 2, "status": "started", "calls": 0, "limit": 8})
+
+
+def test_plan_and_stage_events_are_kept(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    staged_events(recorder)
+
+    kept = [event for event in events(recorder) if event["type"] in ("plan", "stage")]
+    assert [(event["type"], event.get("status")) for event in kept] == [("plan", None), ("stage", "done"),
+                                                                       ("stage", "started")]
+    assert kept[0]["stages"][0]["goal"] == f"{MARK} 목표"
+    assert kept[1]["note"] == f"{MARK} 메모"
+
+
+def test_model_events_keep_call_and_stage_counts(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_event({"type": "model", "step": 1, "tokens": 100})
+    recorder.on_event({"type": "model", "step": 2, "tokens": 300, "call_tokens": 200, "stage": 1, "stage_calls": 2,
+                       "stage_limit": 8, "extra": "버림"})
+
+    models = [event for event in events(recorder) if event["type"] == "model"]
+    assert models == [
+        {"type": "model", "step": 1, "tokens": 100},
+        {"type": "model", "step": 2, "tokens": 300, "call_tokens": 200, "stage": 1, "stage_calls": 2, "stage_limit": 8},
+    ]
+
+
+def test_run_json_holds_stage_numbers_only(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.finish(RunResult("verified", 4, "opened", 400, stats={**STAGE_STATS, "note": MARK,
+                                                                   "stage_calls_text": ["가"]}))
+
+    assert run_json(recorder)["stages"] == STAGE_STATS
+
+
+@pytest.mark.parametrize("stats", [{"stage_count": "2", "stage_calls": [1, "x"], "stages_done": True}])
+def test_odd_stage_values_are_left_out_of_run_json(tmp_path, stats):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.finish(RunResult("verified", 4, "opened", 400, stats=stats))
+
+    assert run_json(recorder)["stages"] == {}
+
+
+def test_a_result_without_stats_leaves_no_stages(tmp_path):
+    from types import SimpleNamespace
+
+    first, _, _ = recorded(tmp_path / "a")
+    first.finish(RunResult("verified", 4, "opened", 400))
+    second, _, _ = recorded(tmp_path / "b")
+    second.finish(SimpleNamespace(status="stopped", steps=1, reason="old shape", tokens=5))
+
+    assert "stages" not in run_json(first)
+    assert "stages" not in run_json(second) and run_json(second)["status"] == "stopped"
+    assert first.errors == [] and second.errors == []
+
+
+def test_an_unconfirmed_verdict_is_recorded(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_action("click", {"intent": "체크한다"}, None,
+                       {"ok": True, "expect": "value_changed", "expected_met": None, "verdict": "unconfirmed",
+                        "effects": {"none": True, "picture": {"changed": True, "pixels": 71}}})
+
+    result = [event for event in events(recorder) if event["type"] == "action"][0]["result"]
+    assert result["verdict"] == "unconfirmed" and result["expected_met"] is None
+
+
+def test_stage_texts_never_reach_run_json_or_the_summary(tmp_path):
+    from agent.summary import summary_of
+
+    recorder, _, _ = recorded(tmp_path)
+    staged_events(recorder)
+    recorder.on_event({"type": "question", "id": "q1", "kind": "stage_limit", "text": f"{MARK} 질문", "stage": 1,
+                       "calls": 8, "intents": [f"{MARK} 의도"]})
+    recorder.on_event({"type": "answer", "id": "q1", "text": f"{MARK} 답", "accepted": True, "timed_out": False})
+    recorder.finish(RunResult("verified", 2, "opened", 300, stats={**STAGE_STATS, "goal": f"{MARK} 목표"}))
+
+    assert MARK in (recorder.path / "events.jsonl").read_text(encoding="utf-8")
+    assert MARK not in (recorder.path / "run.json").read_text(encoding="utf-8")
+    summary = "\n".join(summary_of(recorder.path))
+    assert MARK not in summary
+    assert "단계: 2 · 완료 1 · 단계별 호출 3/8 · 한도 질문 1 · 계획 고침 1" in summary
+    assert "호출당 토큰 최대: 9120" in summary

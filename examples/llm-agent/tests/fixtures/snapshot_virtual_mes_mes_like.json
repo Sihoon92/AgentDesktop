@@ -5,7 +5,7 @@
  "data": {
   "app": "VirtualMes.exe",
   "complete": true,
-  "ref_count": 5,
+  "ref_count": 11,
   "snapshot_id": "sfixture0",
   "tree": {
    "role": "window",
@@ -93,6 +93,23 @@
          }
         },
         {
+         "role": "button",
+         "ref_id": "@sfixture0:e3",
+         "bounds": {
+          "x": 122.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "7001"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
          "role": "statictext",
          "name": "전체",
          "bounds": {
@@ -101,6 +118,23 @@
           "width": 146.0,
           "height": 24.0
          }
+        },
+        {
+         "role": "button",
+         "ref_id": "@sfixture0:e4",
+         "bounds": {
+          "x": 272.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "7002"
+         },
+         "available_actions": [
+          "Click"
+         ]
         },
         {
          "role": "statictext",
@@ -113,6 +147,23 @@
          }
         },
         {
+         "role": "button",
+         "ref_id": "@sfixture0:e5",
+         "bounds": {
+          "x": 422.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "7003"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
          "role": "statictext",
          "name": "전체",
          "bounds": {
@@ -121,6 +172,23 @@
           "width": 146.0,
           "height": 24.0
          }
+        },
+        {
+         "role": "button",
+         "ref_id": "@sfixture0:e6",
+         "bounds": {
+          "x": 572.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "7004"
+         },
+         "available_actions": [
+          "Click"
+         ]
         },
         {
          "role": "statictext",
@@ -133,6 +201,23 @@
          }
         },
         {
+         "role": "button",
+         "ref_id": "@sfixture0:e7",
+         "bounds": {
+          "x": 722.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "7005"
+         },
+         "available_actions": [
+          "Click"
+         ]
+        },
+        {
          "role": "statictext",
          "name": "전일",
          "bounds": {
@@ -141,6 +226,23 @@
           "width": 146.0,
           "height": 24.0
          }
+        },
+        {
+         "role": "button",
+         "ref_id": "@sfixture0:e8",
+         "bounds": {
+          "x": 872.0,
+          "y": 42.0,
+          "width": 24.0,
+          "height": 24.0
+         },
+         "native_id": {
+          "kind": "automation_id",
+          "value": "7007"
+         },
+         "available_actions": [
+          "Click"
+         ]
         }
        ]
       },
@@ -156,7 +258,7 @@
         {
          "role": "button",
          "name": "조회(F5)",
-         "ref_id": "@sfixture0:e3",
+         "ref_id": "@sfixture0:e9",
          "bounds": {
           "x": 700.0,
           "y": 82.0,
@@ -173,7 +275,7 @@
         },
         {
          "role": "edit",
-         "ref_id": "@sfixture0:e4",
+         "ref_id": "@sfixture0:e10",
          "bounds": {
           "x": 400.0,
           "y": 82.0,
@@ -190,7 +292,7 @@
         },
         {
          "role": "edit",
-         "ref_id": "@sfixture0:e5",
+         "ref_id": "@sfixture0:e11",
          "bounds": {
           "x": 540.0,
           "y": 82.0,

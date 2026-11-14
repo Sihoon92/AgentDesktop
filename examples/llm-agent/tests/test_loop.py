@@ -45,9 +45,11 @@ class ScriptedModel:
         self.turns = list(turns)
         self.tokens = tokens_per_turn
         self.inputs = []
+        self.efforts = []
 
-    def respond(self, instructions, items, tools):
+    def respond(self, instructions, items, tools, effort=None):
         self.inputs.append(list(items))
+        self.efforts.append(effort)
         self.instructions = instructions
         self.tools = tools
         turn = self.turns.pop(0)
@@ -58,6 +60,10 @@ class ScriptedModel:
 def last_output(items):
     outputs = [i for i in items if isinstance(i, dict) and i.get("type") == "function_call_output"]
     return json.loads(outputs[-1]["output"])
+
+
+PLAN = [call("plan", {"stages": [{"goal": "설정 패널이 열려 있다", "done_when": "지표가 보인다"}]})]
+STAGE_DONE = [call("stage_done", {"marks": [1], "capture": None, "note": "설정 패널이 열림"})]
 
 
 def settings_call(items):
@@ -80,8 +86,10 @@ def test_full_run_opens_the_panel_and_is_verified_by_the_harness():
     model = ScriptedModel(
         [
             [call("launch_target", {})],
+            PLAN,
             [call("observe", OBSERVE)],
             settings_call,
+            STAGE_DONE,
             [call("finish", {"success": True, "evidence": "opened"})],
         ]
     )
@@ -89,7 +97,7 @@ def test_full_run_opens_the_panel_and_is_verified_by_the_harness():
     result = run_agent(model, toolbox, task)
 
     assert result.status == "verified"
-    assert result.steps == 4
+    assert result.steps == 6
     assert "check" in cli.command_names()
 
 
@@ -150,7 +158,8 @@ def test_step_limit_stops_the_run():
     result = run_agent(model, toolbox, task)
 
     assert result.status == "stopped"
-    assert result.steps == 2
+    assert result.steps == 3
+    assert [tool["name"] for tool in model.tools] == ["finish"]
 
 
 def test_token_budget_stops_the_run():
@@ -160,7 +169,8 @@ def test_token_budget_stops_the_run():
     result = run_agent(model, toolbox, task)
 
     assert result.status == "stopped"
-    assert result.steps == 2
+    assert result.steps == 3
+    assert [tool["name"] for tool in model.tools] == ["finish"]
 
 
 def test_reply_without_a_tool_call_stops_the_run():
@@ -198,7 +208,7 @@ def test_repeating_the_same_action_stops_the_run():
         return [call("click", {"ref": ref})]
 
     model = ScriptedModel(
-        [[call("launch_target", {})], [call("observe", OBSERVE)]] + [click_settings] * 8
+        [[call("launch_target", {})], PLAN, [call("observe", OBSERVE)]] + [click_settings] * 8
     )
 
     result = run_agent(model, toolbox, task)
@@ -235,6 +245,17 @@ def test_responder_sends_the_conversation_with_one_tool_call_per_turn():
     assert sent["tools"] == [{"name": "t"}]
     assert sent["parallel_tool_calls"] is False
     assert sent["reasoning"] == {"effort": "low"}
+
+
+def test_responder_uses_a_given_effort_for_that_call_only():
+    sent = []
+    client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: sent.append(kwargs["reasoning"])))
+    responder = OpenAIResponder("gpt-6.1-terra", "low", client=client)
+
+    responder.respond("rules", [], [], effort="medium")
+    responder.respond("rules", [], [])
+
+    assert sent == [{"effort": "medium"}, {"effort": "low"}]
 
 
 def test_baseline_opens_the_panel_without_a_model():
@@ -489,7 +510,8 @@ def test_no_one_to_ask_stays_claimed(tmp_path):
 
 def test_task_requirements_still_decide_first():
     task, toolbox, _ = setup()
-    model = ScriptedModel([[call("launch_target", {})], [call("observe", OBSERVE)], settings_call,
+    model = ScriptedModel([[call("launch_target", {})], PLAN, [call("observe", OBSERVE)], settings_call,
+                           STAGE_DONE,
                            [call("finish", {"success": True, "evidence": "opened", "saved_path": None,
                                             "completion_id": "c-unknown"})]])
     assert run_agent(model, toolbox, task).status == "verified"
@@ -540,7 +562,7 @@ def test_policy_refusal_comes_before_the_approval_prompt(tmp_path):
     gate = RecordingGate(approve=True)
     click = {"window_id": "w-1", "x": 1050, "y": 600, "button": "left", "intent": "누른다",
              "expect": "any", "knowledge_id": None}
-    model = ScriptedModel([[call("launch_target", {})], [call("mouse_click", click)], GIVE_UP])
+    model = ScriptedModel([[call("launch_target", {})], PLAN, [call("mouse_click", click)], GIVE_UP])
 
     run_agent(model, scene_toolbox(tmp_path, ScriptedAsker([])), free_task(), gate=gate)
 
@@ -554,7 +576,7 @@ def test_confirmed_action_still_goes_through_approval(tmp_path):
                "candidates": [{"label": "찍은 곳", "mark": None, "capture": "c1", "x": 10, "y": 20}]}
     click = {"capture": "c1", "x": 10, "y": 20, "action": "click", "intent": "누른다", "expect": "any",
              "knowledge_id": None}
-    model = ScriptedModel([[call("launch_target", {})], [call("observe", OBSERVE_SCENE)],
+    model = ScriptedModel([[call("launch_target", {})], [call("observe", OBSERVE_SCENE)], PLAN,
                            [call("look", {"mark": None})], [call("ask", confirm)],
                            [call("click_point", click)], GIVE_UP])
 
@@ -591,7 +613,7 @@ def test_task_requirements_leave_a_completion_event():
     task, toolbox, _ = setup()
     log = []
     model = ScriptedModel([[call("launch_target", {})], [call("finish", {"success": True, "evidence": "early"})],
-                           [call("observe", OBSERVE)], settings_call,
+                           PLAN, [call("observe", OBSERVE)], settings_call, STAGE_DONE,
                            [call("finish", {"success": True, "evidence": "opened"})]])
 
     assert run_agent(model, toolbox, task, log=log.append).status == "verified"

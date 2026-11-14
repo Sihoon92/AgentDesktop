@@ -30,8 +30,11 @@ namespace VirtualMesApp
         internal string[] Headless;
         internal bool ParseOnly;
 
-        /// <summary>Where a filter box opens its list: anywhere on the box, or only on its arrow.</summary>
-        internal string ComboOpen = ComboAnywhere;
+        /// <summary>
+        /// Where a filter box opens its list: only on its arrow (the default, as in the real
+        /// MES), or anywhere on the box (the behaviour before the arrow became the default).
+        /// </summary>
+        internal string ComboOpen = ComboArrow;
 
         /// <summary>
         /// Parses the command line. With no arguments at all, the first line of
@@ -181,11 +184,11 @@ namespace VirtualMesApp
                 if (!Exposures.TryParseRegion(parts[0], out region))
                 {
                     throw new OptionsException(
-                        "Unknown region: " + parts[0] + ". Use menu, filters, grid, icon or radial.");
+                        "Unknown region: " + parts[0] + ". Use menu, filters, grid, icon, radial or arrow.");
                 }
                 if (!Exposures.TryParseExposure(parts[1], out exposure))
                 {
-                    throw new OptionsException("Unknown mode: " + parts[1] + ". Use ref, text or pixel.");
+                    throw new OptionsException("Unknown mode: " + parts[1] + ". Use ref, text, bare or pixel.");
                 }
                 if (!Exposures.IsAllowed(region, exposure))
                 {

@@ -23,10 +23,10 @@ powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1
 | 옵션 | 뜻 |
 | --- | --- |
 | `--profile mes-like\|easy\|hard` | 영역별 노출 방식 묶음. 기본 `mes-like` |
-| `--expose <영역>=<방식>[,...]` | 프로파일 위에 영역별로 덮어씀. 영역은 `menu`, `filters`, `grid`, `icon`, `radial`, 방식은 `ref`, `text`, `pixel`. `icon`은 `text`를 받지 않음 |
+| `--expose <영역>=<방식>[,...]` | 프로파일 위에 영역별로 덮어씀. 영역은 `menu`, `filters`, `grid`, `icon`, `radial`, `arrow`, 방식은 `ref`, `text`, `bare`, `pixel`. `icon`은 `text`를 받지 않음. `arrow`는 `ref`, `bare`, `pixel`만 받고, `bare`는 `arrow`만 받음 |
 | `--delay-ms <N>` | 조회 대기 시간을 N밀리초로 고정. 없으면 조회마다 1000~4000 |
 | `--seed <N>` | 대기 시간 순서의 시드. 기본 `20261112`. 같은 시드면 같은 순서 |
-| `--combo-open anywhere\|arrow` | 필터 칸이 목록을 여는 방식. 기본 `anywhere`(칸 어디를 눌러도 열림). `arrow`는 칸 오른쪽 끝의 화살표로만 열림(아래 "선택 칸 여는 방식") |
+| `--combo-open arrow\|anywhere` | 필터 칸이 목록을 여는 방식. 기본 `arrow`(칸 오른쪽 끝의 화살표 버튼으로만 열림, 아래 "선택 칸 여는 방식"). `anywhere`는 칸 어디를 눌러도 열리는 옛 동작으로, 비교할 때만 씀 |
 | `--log <경로>` | 이벤트 기록을 이 파일에 덧붙임 |
 | `--export-headless <화면> <필터 JSON> <출력 .xlsx>` | 창 없이 그 화면의 조회 결과를 저장하고 끝남 |
 | `--parse-only` | 테스트용. 옵션을 해석한 결과를 JSON 한 줄로 출력하고 끝남 |
@@ -41,35 +41,46 @@ Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' 
 
 ## 노출 방식
 
-화면 모양은 세 방식에서 완전히 같습니다. 접근성 트리에 내보내는 것만 다릅니다.
+화면 모양은 모든 방식에서 완전히 같습니다. 접근성 트리에 내보내는 것만 다릅니다.
 
 | 방식 | `agent-desktop snapshot`에 보이는 것 |
 | --- | --- |
 | `ref` | 이름, ref, `AutomationId`가 있는 `button`, `checkbox`, `cell`. 조작 대상이 아닌 글자는 `statictext` |
 | `text` | 이름과 위치가 있는 `statictext`. ref 없음. 체크박스의 체크 표시와 상태는 나오지 않음 |
+| `bare` | 이름 없는 `button`. ref와 숫자 `AutomationId`가 있음. `arrow` 영역만 받음 |
 | `pixel` | 이름 없는 `group` 하나. 안의 글자는 나오지 않음 |
 
-| 프로파일 | menu | filters | grid | icon | radial |
-| --- | --- | --- | --- | --- | --- |
-| `mes-like` | ref | text | text | pixel | pixel |
-| `easy` | ref | ref | ref | ref | ref |
-| `hard` | text | pixel | pixel | pixel | pixel |
+| 프로파일 | menu | filters | grid | icon | radial | arrow |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mes-like` | ref | text | text | pixel | pixel | bare |
+| `easy` | ref | ref | ref | ref | ref | ref |
+| `hard` | text | pixel | pixel | pixel | pixel | pixel |
+
+`mes-like`의 `arrow`가 `bare`인 것은 가정입니다. 실제 MES에서 화살표가 어떻게 보이는지 확인되면 맞춥니다.
 
 `grid`에는 표, 화면 이름 탭, 데이터 패널의 화면 이름, 상태 줄, 불량 상세 팝업의 표가 들어갑니다. "조회(F5)" 버튼, 날짜 입력 칸, "저장 | 열기 | 취소" 버튼, 로딩 팝업의 안내 글, 알림 창, 저장 대화상자는 표준 컨트롤이라 어느 프로파일에서도 보입니다.
 
 ### 선택 칸 여는 방식
 
-`--combo-open arrow`를 주면 모든 필터 칸(Shop 세 칸, 공정, 제품, 설비, 기간)이 오른쪽 끝의 화살표로만 열립니다. 화살표 영역은 칸 오른쪽 끝에 있는, 칸 높이만 한 정사각형입니다. 칸의 나머지(몸통)를 누르면 글자 뒤에 깜빡이는 입력 커서만 그려지고 목록은 열리지 않습니다. 화면 모양은 `anywhere`와 같습니다. 화살표 모양도 같고, 커서는 그림으로만 그려져 접근성 트리에 나오지 않습니다.
+기본(`--combo-open arrow`)에서는 모든 필터 칸(Shop 세 칸, 공정, 제품, 설비, 기간)이 오른쪽 끝의 화살표 버튼으로만 열립니다. 실제 MES가 그렇습니다. 화살표 버튼은 칸 오른쪽 끝에 있는, 칸 높이만 한 정사각형이고, 테두리와 버튼 바탕색으로 칸과 구분되며 누르는 동안 눌림 표시가 됩니다. 칸의 나머지(몸통)는 흰 입력 칸처럼 그려집니다. 몸통을 누르면 글자 뒤에 깜빡이는 입력 커서만 그려지고 목록은 열리지 않습니다. 커서는 그림으로만 그려져 접근성 트리에 나오지 않습니다.
 
-화살표가 접근성 트리에 보이는 방식은 `filters` 영역의 노출 방식을 따릅니다.
+화살표가 접근성 트리에 보이는 방식은 `arrow` 영역이 정하며 `filters`와 따로 고릅니다. 화살표는 칸의 자식이 아니라 필터 열(칸들이 있는 `group`)의 자식이고, 자기 칸 바로 다음에 옵니다. 그래서 `filters`가 `text`나 `pixel`이라 칸이 글자이거나 아예 보이지 않아도 화살표는 버튼으로 나올 수 있습니다.
 
-| `filters` | 화살표 |
+| `arrow` | 화살표 |
 | --- | --- |
-| `ref` | 칸의 자식 `button`. 이름 `열기`, `AutomationId` `<칸 id>-arrow`(예: `filter-shop-3-arrow`). 칸 자체의 Invoke는 몸통 클릭과 같아서 목록을 열지 않음 |
-| `text` | 없음. 칸의 글자와 위치만 나옴 |
-| `pixel` | 없음 |
+| `ref` | 이름 `열기`인 `button`. `AutomationId` `<칸 id>-arrow`(예: `filter-shop-3-arrow`) |
+| `bare` | 이름 없는 `button`. `AutomationId`는 칸마다 고정된 숫자(아래 표). 캡처의 번호나 id로만 구분됨 |
+| `pixel` | 없음. 칸의 오른쪽 끝 위치를 눌러야 함 |
 
-비활성 칸은 몸통도 화살표도 반응하지 않습니다. `anywhere`에서는 칸에 자식 요소가 없고 접근성 트리가 이 옵션이 생기기 전과 같습니다.
+`bare`의 숫자는 `7001`에 아래 순서의 자리(0부터)를 더한 값입니다. 화면이 달라도, 앱을 다시 켜도 같은 칸은 같은 숫자입니다(`ComboArrow.cs`의 `Keys`).
+
+| 칸 | `shop-1` | `shop-2` | `shop-3` | `process` | `product` | `equipment` | `period` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `AutomationId` | 7001 | 7002 | 7003 | 7004 | 7005 | 7006 | 7007 |
+
+화살표 버튼의 Invoke는 화살표 클릭과 같습니다(`combo_arrow_clicked` 뒤 목록이 열림). `filters`가 `ref`일 때 칸 자체의 Invoke는 몸통 클릭과 같아서 목록을 열지 않습니다. 비활성 칸은 몸통도 화살표도 반응하지 않고, 화살표 버튼은 `disabled`입니다.
+
+`--combo-open anywhere`에서는 칸 어디를 눌러도 목록이 열리고, 화면 모양과 접근성 트리가 화살표가 기본이 되기 전과 같습니다. `arrow` 영역의 설정과 무관하게 화살표 요소가 없습니다.
 
 메뉴 목록, 드롭다운 목록, 원형 메뉴는 본 창과 별개의 창이며 `list-windows`에 나옵니다. 창 제목은 내용을 드러내지 않습니다(`메뉴 목록`, `목록`, `메뉴`).
 
@@ -104,8 +115,8 @@ Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' 
 | `menu_opened` | `category` |
 | `screen_opened` | `screen`, `title` |
 | `filter_changed` | `screen`, `filter`, `value`, `closed_by`(`item_click`, `select_button`, `outside_click`, `deactivated`, `typed`) |
-| `combo_body_clicked` | `screen`, `filter`. `--combo-open arrow`에서 칸의 몸통을 눌렀을 때 |
-| `combo_arrow_clicked` | `screen`, `filter`. `--combo-open arrow`에서 화살표를 눌렀을 때. 이어서 목록이 열림 |
+| `combo_body_clicked` | `screen`, `filter`. 기본(`--combo-open arrow`)에서 칸의 몸통을 눌렀을 때 |
+| `combo_arrow_clicked` | `screen`, `filter`. 기본(`--combo-open arrow`)에서 화살표를 눌렀을 때. 이어서 목록이 열림 |
 | `query_started` | `screen`, `filters`, `started_by`(`button`, `f5`), `delay_ms` |
 | `query_finished` | `screen`, `rows` |
 | `query_rejected` | `screen`, `reason`(`invalid_period`) |

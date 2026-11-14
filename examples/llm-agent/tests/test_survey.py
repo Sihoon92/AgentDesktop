@@ -102,9 +102,9 @@ def test_nodes_and_depth_cover_the_whole_tree():
     "name, expected",
     [
         ("snapshot_virtual_mes_easy.json",
-         {"named_ref": 14, "unnamed_ref": 2, "unnamed_ref_with_id": 2, "text": 2, "blank": 0, "nodes": 25, "depth": 4}),
+         {"named_ref": 20, "unnamed_ref": 2, "unnamed_ref_with_id": 2, "text": 2, "blank": 0, "nodes": 31, "depth": 4}),
         ("snapshot_virtual_mes_mes_like.json",
-         {"named_ref": 3, "unnamed_ref": 2, "unnamed_ref_with_id": 2, "text": 12, "blank": 1, "nodes": 24, "depth": 4}),
+         {"named_ref": 3, "unnamed_ref": 8, "unnamed_ref_with_id": 8, "text": 12, "blank": 1, "nodes": 30, "depth": 4}),
         ("snapshot_virtual_mes_hard.json",
          {"named_ref": 1, "unnamed_ref": 2, "unnamed_ref_with_id": 2, "text": 2, "blank": 3, "nodes": 12, "depth": 4}),
     ],

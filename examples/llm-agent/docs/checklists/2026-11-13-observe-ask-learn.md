@@ -18,10 +18,12 @@ python view.py --exe "<저장소>\examples\llm-agent\virtual-mes\build\VirtualMe
 가상 앱은 인자 없이 뜨므로 옵션은 실행 파일 옆의 `VirtualMes.args`로 줍니다. 앱은 시작할 때만 이 파일을 읽고 에이전트는 실행이 끝나도 앱을 닫지 않습니다. **옵션을 바꾸기 전에 떠 있는 가상 앱을 닫습니다.**
 
 ```powershell
-Set-Content virtual-mes\build\VirtualMes.args '--profile easy --combo-open arrow' -Encoding utf8        # 옵션 가
-Set-Content virtual-mes\build\VirtualMes.args '--combo-open arrow' -Encoding utf8                       # 옵션 나
+Set-Content virtual-mes\build\VirtualMes.args '--profile easy' -Encoding utf8                           # 옵션 가
+Remove-Item virtual-mes\build\VirtualMes.args -ErrorAction SilentlyContinue                          # 옵션 나(옵션 없음)
 Set-Content virtual-mes\build\VirtualMes.args '--expose icon=ref --delay-ms 200' -Encoding utf8         # 옵션 다
 ```
+
+2026-11-14부터 필터 칸은 옵션 없이도 화살표로만 열립니다(`--combo-open arrow`가 기본). 그 전의 결과(1, 2, 6번)는 옛 옵션으로 실행한 것입니다. 기본 프로파일에서 화살표는 이름 없는 버튼으로 보입니다.
 
 지식은 `knowledge\virtualmes\`에 쌓입니다(Git 제외). 처음부터 다시 하려면 이 폴더를 지웁니다.
 
@@ -56,11 +58,11 @@ Set-Content virtual-mes\build\VirtualMes.args '--expose icon=ref --delay-ms 200'
 | 순서 | 실행 id | 결과 | 실제로 일어난 일 |
 | --- | --- | --- | --- |
 | 1 | `20261113-213953` | 통과 | 메뉴 → 화면 → Shop 세 번째 칸의 `열기` 버튼을 곧바로 눌러 목록을 열었다. 가운데를 먼저 눌러 보지 않았다(화살표가 이름 있는 버튼으로 보여서). 동작 3회 모두 기대와 일치, 6스텝, 34,211토큰. 질문은 끝났는지 묻는 확인 1회뿐이고 등록 제안은 없었다. `run.json`의 `reason`에 모델이 쓴 완료 문장(화면의 글 포함)이 들어 있다 |
-| 2 | | 미실행 | |
+| 2 | `20261114-002325` | 통과(기대와 다름) | 가운데를 눌러 보지 않고 처음부터 칸의 오른쪽 끝을 눌러(`click_part`, `right`) 목록을 열었다. 질문이 없었으므로 배운 것도 등록되지 않았다. 6스텝, 32,830토큰. 뷰어의 단계 그림에 메뉴 목록과 선택 목록 팝업이 보이지 않는다 |
 | 3 | | 미실행 | |
 | 4 | | 미실행 | |
 | 5 | | 미실행 | |
-| 6 | | 미실행 | |
+| 6 | `20261114-002927` | 실패 | 옵션 나(`--combo-open arrow`)에서 실행. 조회 뒤 후보 셀 셋을 보여 주고 극판 소계를 제안하며 누르기 전에 물었다(기대대로). 답한 뒤의 클릭은 대상 창이 포커스를 얻지 못해 전달되지 않았다(답하느라 브라우저가 앞에 있었음). 같은 클릭을 다시 하자 답의 허락이 이미 쓰여 같은 질문이 또 나왔고, 두 번째도 포커스 문제로 실패해 `gave_up`. 14스텝, 149,389토큰 |
 | 7 | | 미실행 | |
 
 ## 따로 확인할 것

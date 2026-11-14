@@ -78,6 +78,24 @@ def test_two_mismatches_in_a_row_block_everything_until_a_question():
     assert policy.refusal(False, (10, 10), False) is None
 
 
+def test_an_unconfirmed_outcome_neither_counts_nor_clears_the_streak():
+    policy = AskPolicy()
+    policy.note_result(None, False)
+    policy.note_result(None, False)
+    assert not policy.blocked
+    policy.note_result(False, False)
+    policy.note_result(None, False)
+    assert not policy.blocked
+    policy.note_result(False, False)
+    assert policy.blocked
+
+
+def test_an_unconfirmed_outcome_after_citing_knowledge_does_not_block():
+    policy = AskPolicy()
+    policy.note_result(None, True)
+    assert not policy.blocked
+
+
 def test_the_limit_is_configurable():
     policy = AskPolicy(mismatch_limit=3)
     policy.note_result(False, False)
@@ -162,3 +180,41 @@ def test_a_confirmed_point_outside_the_candidates_keeps_the_ambiguity():
     assert policy.refusal(True, (500, 300), False) is None
     policy.note_ran()
     assert policy.refusal(False, center(CELL_A), False) == "needs_confirmation"
+
+
+def test_an_answered_action_that_was_not_delivered_keeps_the_permission():
+    policy = AskPolicy()
+    policy.note_answer([], [(500, 300)])
+    assert policy.refusal(True, (500, 300), False) is None
+    policy.note_ran(delivered=False)
+    assert policy.refusal(True, (500, 300), False) is None
+    policy.note_ran(delivered=True)
+    assert policy.refusal(True, (500, 300), False) == "needs_confirmation"
+
+
+def test_a_kept_permission_still_covers_only_the_answered_place():
+    policy = AskPolicy()
+    policy.note_answer([], [(500, 300)])
+    assert policy.refusal(True, (500, 300), False) is None
+    policy.note_ran(delivered=False)
+    assert policy.refusal(True, (700, 300), False) == "needs_confirmation"
+    assert policy.refusal(True, (500, 300), False) is None
+
+
+def test_an_allowed_action_that_never_reported_back_counts_as_delivered():
+    policy = AskPolicy()
+    policy.note_answer([], [(500, 300)])
+    assert policy.refusal(True, (500, 300), False) is None
+    assert policy.refusal(True, (500, 300), False) == "needs_confirmation"
+
+
+def test_an_ambiguous_action_that_was_not_delivered_keeps_the_ambiguity():
+    policy = AskPolicy()
+    policy.note_ambiguous([CELL_A, CELL_B])
+    policy.note_answer([CELL_A], [])
+    assert policy.refusal(False, center(CELL_A), False) is None
+    policy.note_ran(delivered=False)
+    assert policy.refusal(False, center(CELL_B), False) == "needs_confirmation"
+    assert policy.refusal(False, center(CELL_A), True) is None
+    policy.note_ran(delivered=False)
+    assert policy.refusal(False, center(CELL_B), False) == "needs_confirmation"
