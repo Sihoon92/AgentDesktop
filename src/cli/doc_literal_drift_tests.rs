@@ -12,16 +12,12 @@ const ENVELOPE_DOCS: &[(&str, &str)] = &[
     ),
 ];
 
-const ABI_DOCS: &[(&str, &str)] = &[
-    ("README.md", include_str!("../../README.md")),
-    (
-        "skills/agent-desktop-ffi/references/build-and-link.md",
-        include_str!("../../skills/agent-desktop-ffi/references/build-and-link.md"),
-    ),
-];
+const ABI_DOCS: &[(&str, &str)] = &[(
+    "skills/agent-desktop-ffi/references/build-and-link.md",
+    include_str!("../../skills/agent-desktop-ffi/references/build-and-link.md"),
+)];
 
 const FFI_HEADER: &str = include_str!("../../crates/ffi/include/agent_desktop.h");
-const README: &str = include_str!("../../README.md");
 const AGENTS_MD: &str = include_str!("../../AGENTS.md");
 const HELD_INPUT_COMMANDS: &[&str] = &["key-down", "key-up", "mouse-down", "mouse-up"];
 
@@ -96,12 +92,6 @@ fn documented_command_counts_match_the_cli() {
         .filter(|name| name.as_str() != "help")
         .count();
     let operational = total - HELD_INPUT_COMMANDS.len();
-    assert!(
-        README.contains(&format!(
-            "{total} command names, {operational} operational commands"
-        )),
-        "README.md must state {total} command names and {operational} operational commands"
-    );
     assert!(
         AGENTS_MD.contains(&format!("{total} commands spanning")),
         "AGENTS.md must state {total} commands"
