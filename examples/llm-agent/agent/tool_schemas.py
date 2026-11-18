@@ -14,7 +14,9 @@ EXPECT = {
     "description": (
         "The change you expect this action to cause. The result tells you whether it happened: "
         "expected_met true or false, or null with verdict unconfirmed when only the picture around "
-        "the target changed (never for window_opened or window_closed, which the window list decides)"
+        "the target changed or the window read before the action closed (never for window_opened "
+        "or window_closed, which the window list decides). A window that opened or closed meets "
+        "content_changed"
     ),
 }
 KNOWLEDGE_ID = {

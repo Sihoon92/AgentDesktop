@@ -322,7 +322,8 @@ def test_when_the_observed_popup_closes_the_observation_moves_to_a_remaining_win
     assert result["window_id"] == "w-1" and result["effects"]["windows_closed"] == [{"id": "w-2", "title": ""}]
     assert result["effects"]["observed_window"] == {"before": "w-2", "after": "w-1"}
     assert result["effects"]["added"]["count"] == 0 and result["effects"]["removed"]["count"] == 0
-    assert result["effects"]["none"] is False and result["expected_met"] is False
+    assert result["effects"]["none"] is False
+    assert result["expected_met"] is None and result["verdict"] == "unconfirmed"
 
 
 def test_an_expected_close_of_the_observed_popup_is_met(tmp_path):

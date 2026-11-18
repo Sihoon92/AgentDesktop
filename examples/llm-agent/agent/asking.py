@@ -26,6 +26,10 @@ RAW_POINT_TOOLS = frozenset({"mouse_click", "click_point", "drag"})
 NUMBER_ANSWER = re.compile(r"^(\d+)\s*번?$")
 CIRCLED_ONE, CIRCLED_LAST = 0x2460, 0x2473
 COMPLETION_QUESTION = "결과가 맞나요?"
+SCREEN_CHANGED_NOTE = (
+    "Windows of the application opened or closed while the user answered, so the [n] marks and "
+    "the captures from before the question no longer match the screen. Observe again before acting."
+)
 BRIEFING_HEADER = (
     "Learned in earlier runs: the user's past answers for this application. When one fits, follow "
     "it without asking again and pass its id as knowledge_id. Completion entries name how to check "
@@ -56,6 +60,7 @@ class AskingTools:
         self._started_at = wall()
         self._policy = AskPolicy(mismatch_limit=getattr(task, "mismatch_limit", 2))
         self._question_count = 0
+        self._question_changes = None
         self._exchanges = []
         self._failed_knowledge = None
 
@@ -65,23 +70,60 @@ class AskingTools:
 
     def ask(self, question):
         """Asks a person: fills id and step, logs the question and the answer, and stops the run
-        (AgentStopped) when the answer never comes. Returns the Answer."""
+        (AgentStopped) when the answer never comes. Returns the Answer.
+
+        Answering can change the app without any tool call: a person who switches to the viewer
+        takes activation from the app, and a popup list that closes on that is gone. So the next
+        action reads the screen afresh instead of reusing the marks from before the question, and
+        when a window opened or closed meanwhile the marks are dropped and
+        take_question_changes() reports it."""
         self._question_count += 1
         question_id = f"q{self._question_count}"
         question = {"candidates": [], "proposed": None, "basis": [], "items": [], "window_id": None,
                     "text": "", **question, "type": "question", "id": question_id, "step": self.step}
+        windows_before = self._rows() if self._pid is not None else None
         answer = self._asked(question)
         pin_element = self._pinned_element(answer.pin)
-        self._emit({
+        changes = self._windows_changed_since(windows_before)
+        event = {
             "type": "answer", "id": question_id, "text": answer.text,
             "pin": None if answer.pin is None else {
                 "point": [int(answer.pin[0]), int(answer.pin[1])], "image_point": None,
                 "mark": pin_element.get("mark") if pin_element else None},
             "accepted": answer.accepted, "items": list(answer.items), "timed_out": answer.timed_out,
-        })
+        }
+        if changes is not None:
+            event["windows_changed"] = {key: [w["id"] for w in rows] for key, rows in changes.items()}
+        self._emit(event)
         if answer.timed_out:
             raise AgentStopped(f"No answer to question {question_id}, so the run stopped")
         return answer
+
+    def take_question_changes(self):
+        """The note for the model when windows of the target opened or closed while the last
+        question waited for its answer, or None. Each note is given once."""
+        note, self._question_changes = self._question_changes, None
+        return note
+
+    def _windows_changed_since(self, windows_before):
+        """Marks the screen as unread after a question, and returns {"windows_opened",
+        "windows_closed"} when the window list differs from `windows_before`, else None."""
+        if self._marks_view is not None:
+            self._marks_view = (self._marks_view[0], False)
+        if windows_before is None:
+            return None
+        windows_after = self._rows()
+        before_ids = {row["id"] for row in windows_before}
+        after_ids = {row["id"] for row in windows_after}
+        changes = {
+            "windows_opened": [_window_label(row) for row in windows_after if row["id"] not in before_ids],
+            "windows_closed": [_window_label(row) for row in windows_before if row["id"] not in after_ids],
+        }
+        if not (changes["windows_opened"] or changes["windows_closed"]):
+            return None
+        self._marks = {}
+        self._question_changes = {**changes, "note": SCREEN_CHANGED_NOTE}
+        return changes
 
     def _asked(self, question):
         """Records the question and returns the asker's answer. An asker whose ask() takes
@@ -221,7 +263,11 @@ class AskingTools:
         pin = None if answer.pin is None else {
             "x": int(answer.pin[0]), "y": int(answer.pin[1]),
             "mark": pin_element.get("mark") if pin_element else None}
-        return {"ok": True, "answer": answer.text, "pin": pin}
+        result = {"ok": True, "answer": answer.text, "pin": pin}
+        changes = self.take_question_changes()
+        if changes is not None:
+            result["screen_changed"] = changes
+        return result
 
     def _allow_answered(self, candidates, answer):
         """Allows what the answer points at: the pinned place, else the one candidate the answer
@@ -388,6 +434,10 @@ def _identity(element):
     if not element or not element.get("role"):
         return None
     return {"role": element.get("role"), "name": element.get("name")}
+
+
+def _window_label(row):
+    return {"id": row.get("id"), "title": row.get("title")}
 
 
 def _takes_on_waiting(asker):

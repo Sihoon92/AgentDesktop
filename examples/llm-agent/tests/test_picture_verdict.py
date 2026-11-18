@@ -333,7 +333,7 @@ def test_without_pillow_the_verdict_is_as_before_and_nothing_is_screenshot(tmp_p
     assert screenshots(cli, before) == 0
 
 
-def test_a_pressed_window_that_closed_is_not_compared(tmp_path):
+def test_a_pressed_window_that_closed_is_not_compared_and_stays_unconfirmed(tmp_path):
     toolbox, cli, _ = toolbox_with(tmp_path, image_mode="off")
     cli.open_window(LIST_WINDOW)
     toolbox.call("observe", {**OBSERVE, "window_id": "w-2"})
@@ -345,7 +345,8 @@ def test_a_pressed_window_that_closed_is_not_compared(tmp_path):
 
     result = toolbox.call("click_part", part_call(mark=mark, part="center", expect="value_changed"))
 
-    assert result["expected_met"] is False and "picture" not in result["effects"]
+    assert result["expected_met"] is None and result["verdict"] == "unconfirmed"
+    assert "picture" not in result["effects"]
 
 
 def test_without_images_an_unconfirmed_result_is_told_in_text_only(tmp_path):

@@ -353,6 +353,19 @@ class _Run:
         if answer.text and answer.text.strip():
             self._transcript.add_note(f"The user's answer at the {question['kind']} question: {answer.text}")
             self._toolbox.note_exchange(question, answer)
+        changes = self._toolbox.take_question_changes()
+        if changes is not None:
+            self._transcript.add_note(_screen_changed_note(changes))
+
+
+def _screen_changed_note(changes):
+    """The note that tells the model which windows opened or closed while a harness question
+    waited for its answer."""
+    parts = [changes["note"]]
+    for key, label in (("windows_closed", "Closed"), ("windows_opened", "Opened")):
+        if changes[key]:
+            parts.append(f"{label}: " + ", ".join(f"{w['id']} \"{w['title'] or ''}\"" for w in changes[key]) + ".")
+    return " ".join(parts)
 
 
 def _delivered(output):

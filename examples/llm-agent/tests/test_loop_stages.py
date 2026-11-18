@@ -17,6 +17,7 @@ from test_loop import (
     stuck_question,
     text_reply,
 )
+from test_tools import LIST_WINDOW
 
 from agent.ask import NO_ANSWER, Answer, NoAsker
 from agent.loop import SYSTEM_PROMPT, run_agent
@@ -329,6 +330,26 @@ def test_the_limit_question_shows_the_current_screen():
     run_agent(model, toolbox, free_task())
 
     assert observations[-1] == "question"
+
+
+def test_a_window_that_closed_while_the_limit_question_waited_is_told_to_the_model():
+    model = ScriptedModel(to_the_limit() + [GIVE_UP])
+    cli = None
+
+    def close_the_list(_question):
+        cli.close_window("w-2")
+        return Answer(accepted=True)
+
+    toolbox = scene_toolbox(_tmp(), asker=Asker(model, close_the_list))
+    cli = toolbox._desktop._runner
+    cli.open_window(LIST_WINDOW)
+    run_agent(model, toolbox, free_task())
+
+    notes = [str(item.get("content")) for item in model.inputs[11]
+             if isinstance(item, dict) and item.get("role") == "user"]
+    [note] = [text for text in notes if "Observe again" in text]
+    assert "Closed: w-2" in note
+    assert toolbox.take_question_changes() is None
 
 
 # Revisions past the limit

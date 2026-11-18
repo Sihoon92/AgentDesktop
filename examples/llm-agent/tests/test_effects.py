@@ -135,7 +135,16 @@ def test_marks_read_from_two_windows_are_not_compared():
     assert effects["added"]["count"] == 0 and effects["removed"]["count"] == 0 and effects["changed"] == []
     assert effects["windows_closed"] == [{"id": "w-2", "title": "목록"}] and effects["none"] is False
     assert met("window_closed", effects) and met("any", effects)
-    assert not met("content_changed", effects) and not met("value_changed", effects)
+    assert met("content_changed", effects) and not met("value_changed", effects)
+
+
+def test_a_window_that_opens_or_closes_meets_content_changed_with_no_element_added():
+    opened = diff(state([W1], MARKS), state([W1, W2], MARKS))
+    closed = diff(state([W1, W2], MARKS), state([W1], MARKS))
+
+    assert opened["added"]["count"] == 0 and closed["removed"]["count"] == 0
+    assert met("content_changed", opened) and met("content_changed", closed)
+    assert not met("value_changed", opened) and not met("value_changed", closed)
 
 
 def test_a_window_switch_alone_is_still_an_effect():

@@ -79,7 +79,8 @@ def diff(before, after):
 
 
 def met(expect, effects):
-    """True when `effects` contain the kind of change `expect` names."""
+    """True when `effects` contain the kind of change `expect` names. A window that opened or
+    closed changes what is on screen, so it meets content_changed as well."""
     if expect not in EXPECTATIONS:
         raise ValueError(f"unknown expectation: {expect!r}")
     content = effects["added"]["count"] > 0 or effects["removed"]["count"] > 0
@@ -88,7 +89,7 @@ def met(expect, effects):
     if expect == "window_closed":
         return bool(effects["windows_closed"])
     if expect == "content_changed":
-        return content
+        return content or bool(effects["windows_opened"] or effects["windows_closed"])
     if expect == "value_changed":
         return bool(effects["changed"]) or content
     return not effects["none"]

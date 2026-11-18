@@ -18,6 +18,7 @@ from agent.table import find_cells
 CLICK_ACTIONS = {"click": ("left", 1), "double_click": ("left", 2), "right_click": ("right", 1)}
 POINT_ARGUMENTS = (("x", "y"), ("from_x", "from_y"), ("to_x", "to_y"))
 UNCONFIRMED = "unconfirmed"
+ELEMENT_EXPECTATIONS = ("content_changed", "value_changed")
 
 
 class ScreenTools:
@@ -211,7 +212,11 @@ class ScreenTools:
         target is compared with the one taken before the action (none is taken for a window
         expectation, which stays a mismatch). A change there makes the
         verdict UNCONFIRMED (expected_met None): the harness saw something change but cannot
-        say whether it was the expected change. effects["picture"] holds that comparison."""
+        say whether it was the expected change. effects["picture"] holds that comparison.
+
+        When the marks before and after were read from two different windows, no element was
+        compared, so an unmet content or value expectation is UNCONFIRMED too, never a mismatch:
+        nothing was checked that could count against the call or the knowledge it cited."""
         if before is None:
             return {}
         if "observation" in after:
@@ -231,6 +236,9 @@ class ScreenTools:
                 if picture["changed"]:
                     judged["expected_met"] = None
                     judged["verdict"] = UNCONFIRMED
+            if judged["expected_met"] is False and expect in ELEMENT_EXPECTATIONS and "observed_window" in effects:
+                judged["expected_met"] = None
+                judged["verdict"] = UNCONFIRMED
         return judged
 
     def _picture(self, name, arguments, rows):
