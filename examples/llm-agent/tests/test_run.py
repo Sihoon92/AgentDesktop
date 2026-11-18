@@ -1,4 +1,5 @@
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -45,6 +46,7 @@ def isolate(monkeypatch, tmp_path):
     for name in MODEL_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("AGENT_DESKTOP_BIN", raising=False)
+    monkeypatch.delenv("AGENT_PROFILE", raising=False)
     binary = tmp_path / "agent-desktop.exe"
     binary.write_text("", encoding="utf-8")
     monkeypatch.setenv("AGENT_DESKTOP_BIN", str(binary))
@@ -65,6 +67,41 @@ def test_agent_run_without_an_api_key_stops_before_touching_the_app(monkeypatch,
     assert code == 2
     assert calls == []
     assert "OPENAI_API_KEY" in capsys.readouterr().err
+
+
+def test_a_profile_without_its_env_file_stops_before_touching_the_app(monkeypatch, tmp_path, capsys):
+    calls = isolate(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=k\n", encoding="utf-8")
+    monkeypatch.setattr(run, "ENV_FILES", [tmp_path / ".env"])
+    exe = tmp_path / "app.exe"
+    exe.write_text("", encoding="utf-8")
+
+    code = run.main(["--profile", "company", str(write_task(tmp_path, exe))])
+
+    assert code == 2
+    assert calls == []
+    assert ".env.company" in capsys.readouterr().err
+
+
+def test_the_profile_file_comes_before_the_plain_env_file(monkeypatch, tmp_path, capsys):
+    isolate(monkeypatch, tmp_path)
+    (tmp_path / ".env").write_text("OPENAI_MODEL=home-model\nAGENT_PROFILE=company\n", encoding="utf-8")
+    (tmp_path / ".env.company").write_text("OPENAI_MODEL=company-model\n", encoding="utf-8")
+    monkeypatch.setattr(run, "ENV_FILES", [tmp_path / ".env"])
+    exe = tmp_path / "app.exe"
+    exe.write_text("", encoding="utf-8")
+
+    try:
+        run.main([str(write_task(tmp_path, exe))])
+        model = os.environ.get("OPENAI_MODEL")
+    finally:
+        for name in ("OPENAI_MODEL", "AGENT_PROFILE"):
+            os.environ.pop(name, None)
+
+    assert model == "company-model"
+    out = capsys.readouterr().out
+    assert "프로필: company" in out
+    assert "company-model" not in out
 
 
 def test_missing_exe_stops_before_touching_the_app(monkeypatch, tmp_path, capsys):
@@ -956,7 +993,7 @@ def test_baseline_builds_no_models_and_prints_no_start_line(monkeypatch, tmp_pat
     assert meta["model"] == "baseline" and "vision" not in meta
 
 
-PATH_ENV_NAMES = ("AGENT_DESKTOP_BIN", "AGENT_SETTINGS", "AGENT_KNOWLEDGE_DIR")
+PATH_ENV_NAMES = ("AGENT_DESKTOP_BIN", "AGENT_SETTINGS", "AGENT_KNOWLEDGE_DIR", "AGENT_PROFILE")
 
 
 def test_env_example_names_the_model_and_path_values_and_holds_none():

@@ -32,6 +32,23 @@ $env:OPENAI_API_KEY = '<키>'
 
 공백뿐인 값은 없는 것으로 봅니다. `VISION_API_KEY`나 `VISION_BASE_URL`만 있고 비전 모델 이름이 없으면 한 모델로 조용히 돌지 않고 실행을 거절합니다.
 
+`AGENT_DESKTOP_BIN`, `AGENT_SETTINGS`, `AGENT_KNOWLEDGE_DIR`도 `.env`에 둘 수 있습니다. 비우면 바이너리는 `target\release`, `target\debug` 순으로, 설정 파일은 `settings.local.yaml`, 지식 폴더는 `knowledge\`를 씁니다.
+
+### 프로필 (회사와 집)
+
+한 PC에서 두 가지 연결(예: 집의 OpenAI, 회사의 사내 게이트웨이)을 오가려면 `.env.example`을 `.env.home`, `.env.company`처럼 복사해 각각 채우고 프로필로 고릅니다. 이 파일들도 Git에서 제외됩니다.
+
+```powershell
+python run.py --profile company --exe "C:\절대\경로\App.exe" --goal "..."
+python view.py --profile company
+python check.py --profile company --skip app
+```
+
+- 매번 붙이지 않으려면 `.env`나 Windows 환경변수에 `AGENT_PROFILE=company`를 적습니다. 순서는 `--profile` > 환경변수 `AGENT_PROFILE` > `.env`의 `AGENT_PROFILE`입니다.
+- 프로필 파일을 먼저, `.env`를 나중에 읽습니다. 같은 이름이면 프로필 파일 값이 쓰이고, 이미 셸에 있는 환경변수가 둘보다 앞섭니다.
+- 고른 프로필의 파일(`.env.<이름>`)이 없으면 `.env`로 조용히 돌지 않고 멈춥니다.
+- 실행 시작과 `check.py`에는 `프로필: company`처럼 이름만 나오고 키, 주소, 모델 이름은 나오지 않습니다.
+
 ### 설정 파일
 
 PC마다 다른 값은 `settings.local.yaml`에 둡니다. `settings.example.yaml`을 복사해 쓸 줄만 값을 적습니다. 이 파일은 Git에서 제외되어 있고, 없으면 코드의 기본값으로 동작합니다.

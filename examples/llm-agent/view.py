@@ -18,6 +18,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from agent.envfiles import ProfileError, load_env
 from agent.knowledge import KNOWLEDGE_ENV, knowledge_root
 from agent.llm import ModelSetupError, build_models, make_client
 from agent.settings import SettingsError, load_settings, settings_path
@@ -208,6 +209,7 @@ def main(argv=None):
                         help="Write this run (or 'latest') as one HTML file that opens without a server")
     parser.add_argument("--summary", metavar="RUN_ID",
                         help="Print this run's (or 'latest') summary of counts and codes, with no screen content")
+    parser.add_argument("--profile", help="Load .env.<profile> before .env (default: AGENT_PROFILE)")
     args = parser.parse_args(argv)
     _check_modes(parser, args)
     runs_dir = args.runs.resolve()
@@ -217,8 +219,13 @@ def main(argv=None):
         return export(runs_dir, args.export[0], Path(args.export[1]))
     if args.summary:
         return show_summary(runs_dir, args.summary)
-    for path in ENV_FILES:
-        load_dotenv(path)
+    try:
+        profile = load_env(args.profile, ENV_FILES, loader=lambda path: load_dotenv(path))
+    except ProfileError as error:
+        print(f"오류: {error}", file=sys.stderr)
+        return 2
+    if profile:
+        print(f"프로필: {profile}")
     try:
         settings = load_settings()
     except SettingsError as error:

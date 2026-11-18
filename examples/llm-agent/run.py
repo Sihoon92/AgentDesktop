@@ -17,6 +17,7 @@ from agent.approval import TerminalGate
 from agent.ask import NoAsker, TerminalAsker
 from agent.baseline import run_baseline
 from agent.desktop import DesktopClient, start_session
+from agent.envfiles import ProfileError, load_env
 from agent.llm import ModelSetupError, build_models, make_client, start_line
 from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, system_name
 from agent.loop import RunResult, run_agent
@@ -91,13 +92,18 @@ def main(argv=None):
     parser.add_argument("--view", action="store_true", help="Open the step viewer and follow this run live")
     parser.add_argument("--system", help="Knowledge name of the target system; defaults to the exe name")
     parser.add_argument("--knowledge-dir", help="Folder that holds the per-system knowledge")
+    parser.add_argument("--profile", help="Load .env.<profile> before .env (default: AGENT_PROFILE)")
     args = parser.parse_args(argv)
     if args.approve and args.baseline:
         return _fail("--approve는 모델 실행에서만 쓸 수 있습니다. --baseline과 함께 쓸 수 없습니다")
     if args.approve and not is_interactive():
         return _fail("--approve는 입력을 받을 수 있는 터미널에서만 쓸 수 있습니다")
-    for path in ENV_FILES:
-        load_dotenv(path)
+    try:
+        profile = load_env(args.profile, ENV_FILES, loader=load_dotenv)
+    except ProfileError as error:
+        return _fail(str(error))
+    if profile:
+        print(f"프로필: {profile}")
     try:
         settings = load_settings()
         task = _resolve_task(args, settings)

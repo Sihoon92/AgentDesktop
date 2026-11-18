@@ -24,6 +24,7 @@ from agent import checks
 from agent.capture import Capture
 from agent.checks import failed, passed, skipped
 from agent.desktop import DesktopClient, start_session
+from agent.envfiles import ProfileError, load_env
 from agent.images import image_items
 from agent.knowledge import KnowledgeError, system_name
 from agent.llm import (TEXT_URL_ENV, VISION_KEY_ENV, VISION_MODEL_ENV, VISION_URL_ENV, ModelSetupError,
@@ -116,12 +117,18 @@ def main(argv=None, deps=None):
     parser.add_argument("--exe", help="Absolute path of the target executable; defaults to the settings' exe")
     parser.add_argument("--skip", action="append", choices=SKIPPABLE, default=[], help="Skip the llm or app checks")
     parser.add_argument("--settings", help="Settings file; defaults to AGENT_SETTINGS, then settings.local.yaml")
+    parser.add_argument("--profile", help="Load .env.<profile> before .env (default: AGENT_PROFILE)")
     args = parser.parse_args(argv)
     deps = deps or Deps()
-    for path in deps.env_files:
-        load_dotenv(path)
+    try:
+        profile = load_env(args.profile, deps.env_files, deps.environ, loader=load_dotenv)
+    except ProfileError as error:
+        print(f"오류: {error}", file=sys.stderr)
+        return 2
     results = run_checks(args, deps)
     print("점검 (화면 내용 없음)")
+    if profile:
+        print(f"  프로필: {profile}")
     for result in results:
         print(f"  {checks.line(result)}")
     print(checks.footer(results))
