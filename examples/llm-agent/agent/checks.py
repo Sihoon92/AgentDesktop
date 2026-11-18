@@ -31,6 +31,15 @@ PROCESS_MARK_LENGTH = 16
 DIGITS = re.compile(r"\d+")
 DIGIT_CANVAS = (480, 200)
 DIGIT_FONT_PX = 120
+POINT_CANVAS = (1000, 600)
+POINT_RADIUS_PX = 24
+POINT_TOLERANCE_PX = 40
+POINT_X_RANGE = (100, 900)
+POINT_Y_RANGE = (200, 500)
+POINT_COLOR = (255, 0, 0)
+NORMALIZED_RANGE = 1000
+POINT_X = re.compile(r'"x"\s*:\s*(-?\d+(?:\.\d+)?)')
+POINT_Y = re.compile(r'"y"\s*:\s*(-?\d+(?:\.\d+)?)')
 
 
 @dataclass(frozen=True)
@@ -158,6 +167,46 @@ def digit_image(digits, path):
         image = small.resize(DIGIT_CANVAS, Image.Resampling.NEAREST)
     image.save(path)
     return image.size
+
+
+def point_image(path, rng):
+    """Draws one red circle on a white POINT_CANVAS PNG at `path`; returns (center, size).
+    The center's y stays in POINT_Y_RANGE, where a 0-1000 answer and a pixel answer lie more
+    than twice POINT_TOLERANCE_PX apart, so the two rules cannot be mistaken for each other.
+    Raises RuntimeError without Pillow."""
+    if Image is None:
+        raise RuntimeError("Pillow is not installed")
+    center = (rng.randint(*POINT_X_RANGE), rng.randint(*POINT_Y_RANGE))
+    image = Image.new("RGB", POINT_CANVAS, "white")
+    x, y = center
+    ImageDraw.Draw(image).ellipse(
+        (x - POINT_RADIUS_PX, y - POINT_RADIUS_PX, x + POINT_RADIUS_PX, y + POINT_RADIUS_PX), fill=POINT_COLOR)
+    image.save(path)
+    return center, image.size
+
+
+def first_point(text):
+    """The first (x, y) a vision reply gives, or None when it gives no point."""
+    text = text if isinstance(text, str) else ""
+    x, y = POINT_X.search(text), POINT_Y.search(text)
+    if x is None or y is None:
+        return None
+    return tuple(float(match.group(1)) if "." in match.group(1) else int(match.group(1)) for match in (x, y))
+
+
+def point_mode(answer, center, size):
+    """"pixel" when `answer` is the center in image pixels, "normalized_1000" when it is the
+    center in thousandths of the image, else None. Both are judged in pixels within POINT_TOLERANCE_PX."""
+    x, y = answer
+    if _near((x, y), center):
+        return "pixel"
+    if _near((x * size[0] / NORMALIZED_RANGE, y * size[1] / NORMALIZED_RANGE), center):
+        return "normalized_1000"
+    return None
+
+
+def _near(point, center):
+    return abs(point[0] - center[0]) <= POINT_TOLERANCE_PX and abs(point[1] - center[1]) <= POINT_TOLERANCE_PX
 
 
 def observation_detail(kinds, complete, elapsed, shot):

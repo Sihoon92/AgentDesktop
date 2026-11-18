@@ -30,8 +30,11 @@ class Task:
     mismatch_limit: int = 2
     stage_call_limit: int = 8
     plan_reasoning_effort: str = "medium"
+    model_source: str = "기본값"
 
 
+DEFAULT_MODEL = Task.model
+MODEL_ENV = "OPENAI_MODEL"
 ARGS_MAX_STEPS = 60
 OPTIONAL_KEYS = ("max_steps", "token_budget", "model", "reasoning_effort", "baseline_target",
                  "system", "knowledge_dir", "image_mode", "ask_timeout_s", "mismatch_limit",
@@ -40,22 +43,37 @@ DEFAULT_KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "sys
                 "plan_reasoning_effort")
 
 
-def task_from_args(goal, exe, permission_level=3, defaults=None):
+def model_choice(file_value, settings, environ):
+    """The text model's name and where it came from: task file > settings file > OPENAI_MODEL >
+    code default. A blank env value counts as absent; `environ` None reads no env at all."""
+    if file_value is not None:
+        return file_value, "작업 파일"
+    if (settings or {}).get("model") is not None:
+        return settings["model"], "설정 파일"
+    env_value = (environ or {}).get(MODEL_ENV)
+    if isinstance(env_value, str) and env_value.strip():
+        return env_value.strip(), "env"
+    return DEFAULT_MODEL, "기본값"
+
+
+def task_from_args(goal, exe, permission_level=3, defaults=None, environ=None):
     """A one-off instruction with no success conditions; the harness cannot verify it alone.
 
     It gets more steps than a task file's default, because observing, looking at captures and
     asking add turns that a scripted task does not need. `defaults` (the settings file) supplies
-    the DEFAULT_KEYS in place of the code defaults."""
+    the DEFAULT_KEYS in place of the code defaults; `environ` supplies OPENAI_MODEL below them."""
     if not PureWindowsPath(exe).is_absolute():
         raise TaskError("exe must be an absolute path")
     optional = _defaults(defaults)
     _check_optional(optional)
+    optional["model"], optional["model_source"] = model_choice(None, defaults, environ)
     return Task(goal, exe, permission_level, [], max_steps=ARGS_MAX_STEPS, **optional)
 
 
-def load_task(path, defaults=None):
+def load_task(path, defaults=None, environ=None):
     """Reads a task file. success is optional: without it the run is judged by learned
-    completion entries or by a person. A key the file sets beats the same key in `defaults`."""
+    completion entries or by a person. A key the file sets beats the same key in `defaults`,
+    and `environ` supplies OPENAI_MODEL below both."""
     raw = yaml.safe_load(open(path, encoding="utf-8").read()) or {}
     for key in ("goal", "exe", "permission_level"):
         if key not in raw:
@@ -72,6 +90,7 @@ def load_task(path, defaults=None):
             raise TaskError("success.require must list at least one element")
     optional = {**_defaults(defaults), **{key: raw[key] for key in OPTIONAL_KEYS if key in raw}}
     _check_optional(optional)
+    optional["model"], optional["model_source"] = model_choice(raw.get("model"), defaults, environ)
     return Task(raw["goal"], raw["exe"], level, require, **optional)
 
 

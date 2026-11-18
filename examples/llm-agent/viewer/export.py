@@ -3,7 +3,8 @@
 The page is viewer/static/index.html with style.css inlined as <style> and every deferred viewer
 script (chat.js, app.js) inlined as a <script> at the end of the body, in the order the page names
 them (they ran deferred from the head before; at the end the page is already parsed). The record goes in <script id="run-export" type="application/json">: run.json,
-the events, and every frame as a data URI. Nothing in the file points back at the viewer
+the events, every frame as a data URI, and, only when vision events name them, those captures as
+data URIs under "captures" (a record without vision events has no "captures" key). Nothing in the file points back at the viewer
 server: no static or API path, no token, no address, nothing from other runs.
 """
 
@@ -20,6 +21,7 @@ VIEWER_SCRIPT = re.compile(r'<script src="/static/([A-Za-z0-9_-]+\.js)" defer></
 BODY_END = "</body>"
 HEAD_END = "</head>"
 FRAME_NAME = re.compile(r"\d{4}\.png")
+CAPTURE_ID = re.compile(r"c\d+")
 SERVER_REFERENCE = re.compile(r"""(src|href)\s*=\s*["']?/""", re.IGNORECASE)
 
 
@@ -71,13 +73,18 @@ def _record(run_dir, now):
         raise ValueError(f"run.json을 읽을 수 없어 내보낼 수 없습니다: {error}") from error
     if not isinstance(run, dict):
         raise ValueError("run.json이 객체가 아니어서 내보낼 수 없습니다")
-    return {
+    events = _events(run_dir / "events.jsonl")
+    record = {
         "export": EXPORT_FORMAT,
         "exported_at": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "run": run,
-        "events": _events(run_dir / "events.jsonl"),
+        "events": events,
         "frames": _frames(run_dir / "frames"),
     }
+    captures = _vision_captures(run_dir / "captures", events)
+    if captures:
+        record["captures"] = captures
+    return record
 
 
 def _events(path):
@@ -99,6 +106,19 @@ def _frames(folder):
     names = sorted(path.name for path in folder.iterdir() if FRAME_NAME.fullmatch(path.name) and path.is_file())
     return {name: "data:image/png;base64," + base64.b64encode((folder / name).read_bytes()).decode("ascii")
             for name in names}
+
+
+def _vision_captures(folder, events):
+    """The captures a vision event names, as data URIs keyed by file name; other captures stay out."""
+    ids = {event.get("capture") for event in events if isinstance(event, dict) and event.get("type") == "vision"}
+    names = sorted(f"{capture_id}.png" for capture_id in ids
+                   if isinstance(capture_id, str) and CAPTURE_ID.fullmatch(capture_id))
+    captures = {}
+    for name in names:
+        path = folder / name
+        if path.is_file():
+            captures[name] = "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+    return captures
 
 
 def _json_text(record):

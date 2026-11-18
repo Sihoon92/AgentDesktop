@@ -5,6 +5,7 @@ screens and data must stay there. The exit code is 1 when any check failed.
 """
 
 import argparse
+import base64
 import json
 import os
 import random
@@ -15,6 +16,7 @@ import time
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from dotenv import load_dotenv
 
@@ -24,10 +26,12 @@ from agent.checks import failed, passed, skipped
 from agent.desktop import DesktopClient, start_session
 from agent.images import image_items
 from agent.knowledge import KnowledgeError, system_name
-from agent.llm import OpenAIResponder
-from agent.settings import SettingsError, load_settings, settings_path
+from agent.llm import (TEXT_URL_ENV, VISION_KEY_ENV, VISION_MODEL_ENV, VISION_URL_ENV, ModelSetupError,
+                       text_responder, vision_setup)
+from agent.settings import VISION_POINT_MODES, SettingsError, load_settings, settings_path
 from agent.survey import id_keys, kinds
-from agent.task import Task
+from agent.task import Task, model_choice
+from agent.vision import VISION_INSTRUCTIONS
 from run import BINARIES, ENV_FILES
 
 HERE = Path(__file__).resolve().parent
@@ -45,6 +49,14 @@ LLM_CALL = "LLM 호출"
 LLM_TOOL = "LLM 도구 호출"
 LLM_IMAGE = "LLM 그림 입력"
 LLM_NAMES = (LLM_CALL, LLM_TOOL, LLM_IMAGE)
+VISION_CALL = "비전 호출"
+VISION_POINTS = "비전 좌표"
+VISION_NAMES = (VISION_CALL, VISION_POINTS)
+SPLIT_MODE = "나눈 방식"
+IMAGE_MODE_IGNORED = "설정의 image_mode 무시"
+DIGITS_QUESTION = "Reply with only the digits the image shows, nothing else."
+POINT_QUESTION = ('Where is the red circle? It has no numbered box. Put its center in "points" '
+                  'with the label "red circle".')
 APP = "앱 관찰"
 IDS = "id 유지"
 
@@ -75,10 +87,13 @@ TOOLS = [
 IMAGE_CALL_ID = "call_check_image"
 
 
-def _openai_client():
+def _openai_client(api_key, base_url):
     from openai import OpenAI
 
-    return OpenAI(timeout=LLM_TIMEOUT_S, max_retries=1)
+    arguments = {"api_key": api_key, "timeout": LLM_TIMEOUT_S, "max_retries": 1}
+    if base_url is not None:
+        arguments["base_url"] = base_url
+    return OpenAI(**arguments)
 
 
 @dataclass
@@ -118,10 +133,15 @@ def run_checks(args, deps):
     results = [_guarded([BINARY], lambda: [check_binary(binary, kind, deps.runner)])[0]]
     settings_result, settings = check_settings(args.settings, deps.environ)
     results.append(settings_result)
+    split = _vision_named(settings, deps.environ)
+    vision_items = split or _vision_connection_without_model(deps.environ)
     if "llm" in args.skip:
         results += [skipped(name) for name in LLM_NAMES]
+        results += [skipped(name) for name in VISION_NAMES] if vision_items else []
     else:
-        results += _guarded(LLM_NAMES, lambda: check_llm(deps, settings))
+        results += _guarded(LLM_NAMES, lambda: check_llm(deps, settings, split))
+        if vision_items:
+            results += _guarded(VISION_NAMES, lambda: check_vision(deps, settings, split))
     if "app" in args.skip:
         results += [skipped(APP), skipped(IDS)]
     else:
@@ -179,18 +199,41 @@ def check_settings(explicit, environ):
     return passed(SETTINGS, f"설정 파일 읽음 · 설정 파일에서 온 키: {keys}"), settings
 
 
-def check_llm(deps, settings):
+def _env_set(environ, name):
+    value = environ.get(name)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _vision_named(settings, environ):
+    named = settings.get("vision_model")
+    return (isinstance(named, str) and bool(named.strip())) or _env_set(environ, VISION_MODEL_ENV)
+
+
+def _vision_connection_without_model(environ):
+    return any(_env_set(environ, name) for name in (VISION_KEY_ENV, VISION_URL_ENV))
+
+
+def _image_mode_ignored(settings):
+    defaults = {item.name: item.default for item in fields(Task)}
+    return (settings.get("image_mode") or defaults["image_mode"]) != defaults["image_mode"]
+
+
+def check_llm(deps, settings, split=False):
+    """The text model's call, tool call and, in one-model mode, image reading. In split mode the
+    text model gets no picture, so the image item is skipped and the vision items check pictures."""
     environ = deps.environ
-    if not environ.get("OPENAI_API_KEY"):
+    if not _env_set(environ, "OPENAI_API_KEY"):
         return [failed(name, "NO_API_KEY") for name in LLM_NAMES]
     defaults = {item.name: item.default for item in fields(Task)}
-    model = settings.get("model") or defaults["model"]
+    model, source = model_choice(None, settings, environ)
     effort = settings.get("reasoning_effort") or defaults["reasoning_effort"]
     try:
-        responder = OpenAIResponder(model, effort, deps.make_client())
+        responder = text_responder(SimpleNamespace(model=model, reasoning_effort=effort), environ, deps.make_client)
+    except ModelSetupError:
+        return [failed(name, "NO_API_KEY") for name in LLM_NAMES]
     except Exception as error:
         return [failed(name, checks.llm_error_code(error)) for name in LLM_NAMES]
-    endpoint = "OPENAI_BASE_URL 사용" if environ.get("OPENAI_BASE_URL") else "기본 주소"
+    endpoint = f"{TEXT_URL_ENV} 사용" if _env_set(environ, TEXT_URL_ENV) else "기본 주소"
     started = deps.clock()
     try:
         responder.respond(CHECK_INSTRUCTIONS, [_user("Reply with the single word: ready. Do not call any tool.")], TOOLS)
@@ -198,8 +241,85 @@ def check_llm(deps, settings):
         reason = f"{LLM_CALL} 실패"
         return [failed(LLM_CALL, checks.llm_error_code(error), endpoint), skipped(LLM_TOOL, reason),
                 skipped(LLM_IMAGE, reason)]
-    first = passed(LLM_CALL, f"{endpoint} · {checks.seconds(deps.clock() - started)}")
+    first = passed(LLM_CALL, f"{endpoint} · 텍스트 모델: {source} · {checks.seconds(deps.clock() - started)}")
+    if split:
+        detail = SPLIT_MODE + (f" · {IMAGE_MODE_IGNORED}" if _image_mode_ignored(settings) else "")
+        return [first, _check_tool(responder, deps), skipped(LLM_IMAGE, detail)]
     return [first, _check_tool(responder, deps), _check_image(responder, deps)]
+
+
+def check_vision(deps, settings, split):
+    """The vision model's call (it reads drawn digits) and its point rule (pixel or 0-1000). The
+    reader is called directly, without shrinking or mapping, so the raw coordinates show the rule."""
+    environ = deps.environ
+    if not split:
+        return [failed(VISION_CALL, "NO_VISION_MODEL", f"{VISION_MODEL_ENV} 없음"),
+                skipped(VISION_POINTS, "비전 설정 실패")]
+    try:
+        vision, source = vision_setup(settings, environ, deps.make_client)
+    except ModelSetupError:
+        return [failed(VISION_CALL, "NO_API_KEY"), skipped(VISION_POINTS, "비전 설정 실패")]
+    except Exception as error:
+        return [failed(VISION_CALL, checks.llm_error_code(error)), skipped(VISION_POINTS, "비전 설정 실패")]
+    if _env_set(environ, VISION_URL_ENV):
+        endpoint = f"{VISION_URL_ENV} 사용"
+    elif _env_set(environ, TEXT_URL_ENV):
+        endpoint = f"{TEXT_URL_ENV} 사용"
+    else:
+        endpoint = "기본 주소"
+    reader = vision.reader
+    call = _check_vision_digits(reader, deps, f"{endpoint} · 비전 모델: {source}")
+    if call.status == checks.FAILED and call.code != "DIGITS_NOT_READ":
+        return [call, skipped(VISION_POINTS, f"{VISION_CALL} 실패")]
+    return [call, _check_vision_points(reader, deps, settings)]
+
+
+def _image_url(path):
+    return "data:image/png;base64," + base64.b64encode(Path(path).read_bytes()).decode("ascii")
+
+
+def _check_vision_digits(reader, deps, prefix):
+    expected = _digits(deps.rng)
+    with tempfile.TemporaryDirectory(prefix="agent-check-") as folder:
+        path = Path(folder) / "digits.png"
+        try:
+            checks.digit_image(expected, path)
+        except RuntimeError:
+            return failed(VISION_CALL, "NO_PILLOW", prefix)
+        started = deps.clock()
+        try:
+            text, _ = reader.ask(CHECK_INSTRUCTIONS, DIGITS_QUESTION, _image_url(path))
+        except Exception as error:
+            return failed(VISION_CALL, checks.llm_error_code(error), prefix)
+    detail = f"{prefix} · {checks.seconds(deps.clock() - started)}"
+    if "".join(checks.DIGITS.findall(text or "")) != expected:
+        return failed(VISION_CALL, "DIGITS_NOT_READ", detail)
+    return passed(VISION_CALL, detail)
+
+
+def _check_vision_points(reader, deps, settings):
+    with tempfile.TemporaryDirectory(prefix="agent-check-") as folder:
+        path = Path(folder) / "point.png"
+        try:
+            center, size = checks.point_image(path, deps.rng)
+        except RuntimeError:
+            return failed(VISION_POINTS, "NO_PILLOW")
+        started = deps.clock()
+        try:
+            text, _ = reader.ask(VISION_INSTRUCTIONS, POINT_QUESTION, _image_url(path))
+        except Exception as error:
+            return failed(VISION_POINTS, checks.llm_error_code(error))
+    elapsed = checks.seconds(deps.clock() - started)
+    point = checks.first_point(text)
+    if point is None:
+        return failed(VISION_POINTS, "NO_POINT", elapsed)
+    mode = checks.point_mode(point, center, size)
+    if mode is None:
+        return failed(VISION_POINTS, "POINT_WRONG", f"{' · '.join(f'{name} 아님' for name in VISION_POINT_MODES)}")
+    detail = f"권장 vision_points: {mode}"
+    if settings.get("vision_points", VISION_POINT_MODES[0]) != mode:
+        detail += " · 지금 설정과 다름"
+    return passed(VISION_POINTS, detail)
 
 
 def _user(text):

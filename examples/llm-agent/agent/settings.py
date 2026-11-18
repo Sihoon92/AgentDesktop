@@ -3,9 +3,12 @@
 The file is YAML with the keys in KEYS. It is found by the path given, else AGENT_SETTINGS,
 else examples/llm-agent/settings.local.yaml. A missing default file means no settings; a
 named file that is missing is an error, because a typo there would silently drop every value.
-The API key and OPENAI_BASE_URL stay in .env.
+The API keys and addresses (OPENAI_*, VISION_*) stay in .env.
 
 Precedence where these values are used: command line > task file > settings file > code default.
+The text model's name has OPENAI_MODEL between the settings file and the code default, and
+vision_model beats VISION_MODEL. VISION_POINT_MODES repeats agent.vision.POINT_MODES so the two
+modules load independently; a test keeps them equal.
 """
 
 import os
@@ -21,8 +24,9 @@ HERE = Path(__file__).resolve().parent.parent
 SETTINGS_ENV = "AGENT_SETTINGS"
 DEFAULT_PATH = HERE / "settings.local.yaml"
 KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
-        "plan_reasoning_effort")
-NUMBER_KEYS = ("stage_call_limit",)
+        "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side", "vision_points")
+NUMBER_KEYS = ("stage_call_limit", "vision_max_side")
+VISION_POINT_MODES = ("pixel", "normalized_1000")
 PATH_KEYS = ("knowledge_dir", "exe")
 QUOTE_HINT = "경로는 따옴표 없이 적거나 작은따옴표로 감싸세요"
 QUOTED_BACKSLASH = re.compile(r'"[^"]*\\')
@@ -130,6 +134,9 @@ def _checked(key, value, target):
     if key == "image_mode" and value not in IMAGE_MODES:
         raise SettingsError(f"image_mode는 {', '.join(IMAGE_MODES)} 중 하나여야 합니다",
                             f"image_mode 값이 {', '.join(IMAGE_MODES)} 중 하나가 아님")
+    if key == "vision_points" and value not in VISION_POINT_MODES:
+        raise SettingsError(f"vision_points는 {', '.join(VISION_POINT_MODES)} 중 하나여야 합니다",
+                            f"vision_points 값이 {', '.join(VISION_POINT_MODES)} 중 하나가 아님")
     if key == "exe" and not PureWindowsPath(value).is_absolute():
         raise SettingsError("exe는 절대 경로여야 합니다", "exe가 절대 경로가 아님")
     if key == "system":

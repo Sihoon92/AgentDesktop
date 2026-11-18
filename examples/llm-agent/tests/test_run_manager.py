@@ -763,3 +763,132 @@ def test_a_bad_stage_call_limit_is_rejected_before_anything_starts(tmp_path, val
 
     assert manager.active() is None
     assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())
+
+
+class RawFactory:
+    """A toolbox factory that keeps the exact positional and keyword arguments of each call."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        desktop, task, confirm, observer, asker, knowledge, captures_dir = args
+        return Toolbox(desktop, task, confirm=confirm, sleep=lambda _s: None, observer=observer, asker=asker,
+                       knowledge=knowledge, captures_dir=captures_dir, vision=kwargs.get("vision"))
+
+
+def models_manager(tmp_path, factory_result, toolbox_factory, monkeypatch):
+    """A manager whose model factory returns `factory_result`; returns (manager, models given to the loop)."""
+    exe = tmp_path / "App.exe"
+    exe.write_bytes(b"")
+    given = []
+    monkeypatch.setattr(run_manager_module, "run_agent",
+                        lambda model, *args, **kwargs: given.append(model) or RunResult("gave_up", 0, "test"))
+    manager = RunManager(tmp_path / "runs", "ad.exe", str(exe), lambda _task: factory_result, toolbox_factory,
+                         desktop_factory=lambda: DesktopClient("ad.exe", "run1", runner=FakeCli()))
+    return manager, given
+
+
+def test_model_factory_returns_models_and_toolbox_gets_vision(tmp_path, monkeypatch):
+    from agent.llm import Models
+
+    text, vision = GatedModel(), SimpleNamespace(read=lambda *args: None)
+    factory = RawFactory()
+    models = Models(text=text, vision=vision, text_source="env", vision_source="env", image_mode_ignored=False)
+    manager, given = models_manager(tmp_path, models, factory, monkeypatch)
+
+    manager.start("열어줘")
+    manager.join(timeout=5)
+
+    assert given == [text]
+    [(args, kwargs)] = factory.calls
+    assert len(args) == 7 and kwargs == {"vision": vision}
+
+
+def test_models_without_vision_call_the_toolbox_factory_exactly_as_before(tmp_path, monkeypatch):
+    from agent.llm import Models
+
+    text = GatedModel()
+    factory = RawFactory()
+    models = Models(text=text, vision=None, text_source="기본값", vision_source=None, image_mode_ignored=False)
+    manager, given = models_manager(tmp_path, models, factory, monkeypatch)
+
+    manager.start("열어줘")
+    manager.join(timeout=5)
+
+    assert given == [text]
+    [(args, kwargs)] = factory.calls
+    assert len(args) == 7 and kwargs == {}
+
+
+@pytest.mark.parametrize("with_vision", [True, False])
+def test_viewer_run_json_says_whether_a_vision_model_read_the_pictures(tmp_path, monkeypatch, with_vision):
+    from agent.llm import Models
+
+    vision = SimpleNamespace(read=lambda *args: None) if with_vision else None
+    models = Models(text=GatedModel(), vision=vision, text_source="env",
+                    vision_source="env" if with_vision else None, image_mode_ignored=False)
+    manager, _ = models_manager(tmp_path, models, RawFactory(), monkeypatch)
+
+    run_id = manager.start("열어줘")
+    manager.join(timeout=5)
+
+    assert run_json(tmp_path, run_id)["vision"] is with_vision
+
+
+def test_a_plain_model_from_the_factory_is_the_text_model(tmp_path, monkeypatch):
+    model = GatedModel()
+    factory = RawFactory()
+    manager, given = models_manager(tmp_path, model, factory, monkeypatch)
+
+    manager.start("열어줘")
+    manager.join(timeout=5)
+
+    assert given == [model]
+    assert factory.calls[0][1] == {}
+
+
+def test_default_toolbox_takes_the_vision(tmp_path):
+    vision = SimpleNamespace(read=lambda *args: None)
+    exe = tmp_path / "App.exe"
+    exe.write_bytes(b"")
+    manager = RunManager(tmp_path / "runs", "ad.exe", str(exe), None)
+    desktop = DesktopClient("ad.exe", "run1", runner=FakeCli())
+    built_task = manager.build_task("열어줘", None, 3)
+
+    with_vision = run_manager_module.default_toolbox(desktop, built_task, None, None, None, None, tmp_path, vision=vision)
+    without = run_manager_module.default_toolbox(desktop, built_task, None, None, None, None, tmp_path)
+
+    assert (with_vision.vision_enabled, without.vision_enabled) == (True, False)
+
+
+def test_broken_vision_setup_fails_the_start(tmp_path, monkeypatch):
+    from agent.llm import ModelSetupError
+
+    def refuse(_task):
+        raise ModelSetupError("VISION_BASE_URL가 있지만 비전 모델 이름이 없습니다. VISION_MODEL를 넣어 주세요")
+
+    manager, _ = make_manager(tmp_path, None)
+    manager._model_factory = refuse
+
+    with pytest.raises(run_manager_module.RunStartFailed) as raised:
+        manager.start("열어줘")
+
+    assert "VISION_MODEL" in str(raised.value)
+    assert manager.active() is None
+    assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())
+
+
+def test_the_environment_gives_viewer_runs_their_model(tmp_path):
+    exe = tmp_path / "App.exe"
+    exe.write_bytes(b"")
+    with_env = RunManager(tmp_path / "runs", "ad.exe", str(exe), None, environ={"OPENAI_MODEL": "env-model"})
+    configured = RunManager(tmp_path / "runs", "ad.exe", str(exe), None, environ={"OPENAI_MODEL": "env-model"},
+                            task_defaults={"model": "house"})
+    without = RunManager(tmp_path / "runs", "ad.exe", str(exe), None)
+
+    assert (with_env.build_task("g", None, 3).model, with_env.build_task("g", None, 3).model_source) == (
+        "env-model", "env")
+    assert configured.build_task("g", None, 3).model_source == "설정 파일"
+    assert without.build_task("g", None, 3).model_source == "기본값"

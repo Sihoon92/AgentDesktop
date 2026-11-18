@@ -3,7 +3,6 @@ exe: C:\Users\sihoo\AppData\Local\FootprintChart\try\creamer-v1-pivots-20261107\
 permission_level: 3
 max_steps: 12
 token_budget: 200000
-model: gpt-6.1-terra
 reasoning_effort: low
 
 success:

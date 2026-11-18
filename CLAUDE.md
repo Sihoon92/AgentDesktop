@@ -101,3 +101,5 @@ python check.py [--exe "<절대경로>"] [--skip llm|app]         # 바이너리
 **회사 반입 도구:** PC마다 다른 값(모델 이름, `image_mode`, 지식 폴더, 대상 앱 경로)은 Git에서 제외된 `settings.local.yaml`에 둡니다(`agent/settings.py`, 예시는 `settings.example.yaml`). `check.py`는 실행 전 환경을 점검하고, 실행 끝의 요약(`agent/summary.py`)은 수와 코드만 담아 회사 실행 결과를 말로 전할 때 씁니다. 요약과 점검 출력에 화면의 글, 요소 이름, 경로, 설정 값을 넣지 않습니다. `check.py`의 앱 관찰은 창을 띄우므로 돌리기 전에 사용자에게 확인받습니다.
 
 **사내 배포:** 내부 OpenAI 호환 LLM을 `OPENAI_BASE_URL`로 쓸 계획입니다. 이 예제는 Chat Completions가 아니라 **Responses API**를 호출하며(`agent/llm.py`), 내부 API도 이를 지원한다고 사용자가 확인했습니다. `scripts/jev/`는 외부 결정 API로 화면 내용을 보내고 OpenAI 형식도 아니므로 사내에서 쓰지 않습니다.
+
+**텍스트·비전 모델 나눠 쓰기:** env `VISION_MODEL`(또는 설정 `vision_model`)이 있으면 텍스트 모델에게 그림을 보내지 않고, `look`과 동작 뒤 자동 캡처에서 하니스가 비전 모델에게 질문 하나와 그림 한 장을 보내 답을 도구 결과의 `vision`에 넣습니다(`agent/vision.py`, 연결은 `agent/llm.py`의 `build_models`). 없으면 지금의 한 모델 방식 그대로입니다. env 여섯 개는 `.env.example`에 있습니다. 시작 줄, `check.py`, `run.json`, 요약에는 모델 이름·주소·키 대신 출처와 수만 넣고, 비전의 질문과 답은 `events.jsonl`의 `vision` 이벤트에만 둡니다. 설계는 `examples/llm-agent/docs/specs/2026-11-16-text-and-vision-models-design.md`에 있습니다.

@@ -355,6 +355,71 @@ PLAN_EVENTS = [
 ]
 
 
+VISION_EVENTS = [
+    {"type": "capture", "id": "c1", "step": 1, "observation": 1, "mark": None, "reason": "look",
+     "file": "captures/c1.png"},
+    {"type": "vision", "step": 1, "capture": "c1", "asked_by": "look", "question": "</script><b>which</b>?",
+     "answer": "mark 3", "marks": [3], "points": [{"label": "dot", "x": 10, "y": 20}], "unsure": False,
+     "error": None, "dropped": 0, "tokens": 812, "seconds": 2.4},
+]
+
+
+def test_export_keeps_vision_events(tmp_path):
+    run_dir = copy_sample(tmp_path)
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+        for event in VISION_EVENTS:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    html = build_export(run_dir, REAL_STATIC, NOW)
+
+    events = payload(html)["events"]
+    assert events[-len(VISION_EVENTS):] == VISION_EVENTS
+    assert "</script><b>" not in html
+
+
+def write_captures(run_dir, *names):
+    folder = run_dir / "captures"
+    folder.mkdir(exist_ok=True)
+    for name in names:
+        (folder / name).write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode())
+
+
+def test_export_bundles_only_the_captures_vision_events_name(tmp_path):
+    run_dir = copy_sample(tmp_path)
+    write_captures(run_dir, "c1.png", "c2.png", "c3.png")
+    odd = {**VISION_EVENTS[1], "capture": "../run"}
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+        for event in [*VISION_EVENTS, VISION_EVENTS[1], odd, {**VISION_EVENTS[1], "capture": "c9"}]:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    captures = payload(build_export(run_dir, REAL_STATIC, NOW))["captures"]
+
+    assert sorted(captures) == ["c1.png"]
+    assert base64.b64decode(captures["c1.png"].split(",", 1)[1]) == (run_dir / "captures" / "c1.png").read_bytes()
+
+
+def test_viewer_code_shows_vision_answers_as_text(tmp_path):
+    app = (REAL_STATIC / "app.js").read_text(encoding="utf-8")
+    html = build_export(copy_sample(tmp_path), REAL_STATIC, NOW)
+
+    assert "function visionSection" in app and "function captureUrl" in app
+    assert "innerHTML" not in app and "insertAdjacentHTML" not in app
+    assert "function visionSection" in html
+
+
+def test_export_without_vision_events_is_unchanged_by_captures(tmp_path):
+    plain = copy_sample(tmp_path)
+    before = build_export(plain, REAL_STATIC, NOW)
+    write_captures(plain, "c1.png", "c2.png")
+    with (plain / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(VISION_EVENTS[0], ensure_ascii=False) + "\n")
+    after = payload(build_export(plain, REAL_STATIC, NOW))
+
+    assert "captures" not in payload(before)
+    assert "captures" not in after
+    assert after["events"][-1] == VISION_EVENTS[0]
+
+
 def test_export_carries_plan_stage_and_limit_events_and_the_stage_code(tmp_path):
     run_dir = copy_sample(tmp_path)
     with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:

@@ -7,7 +7,6 @@ import yaml
 
 from agent import settings
 from agent.ask import NoAsker, TerminalAsker
-from agent.llm import OpenAIResponder
 from agent.registration import register_after_run
 from agent.task import Task
 
@@ -36,10 +35,15 @@ def write_task(tmp_path, exe):
     return path
 
 
+MODEL_ENV_NAMES = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "VISION_MODEL", "VISION_API_KEY",
+                   "VISION_BASE_URL")
+
+
 def isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(run, "ENV_FILES", [])
     monkeypatch.setattr(run, "RUNS_DIR", tmp_path / "runs")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    for name in MODEL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("AGENT_DESKTOP_BIN", raising=False)
     binary = tmp_path / "agent-desktop.exe"
     binary.write_text("", encoding="utf-8")
@@ -574,8 +578,7 @@ class FakeClient:
 def calling_agent(monkeypatch):
     """Replaces the OpenAI client with a FakeClient and the loop with one model call."""
     client = FakeClient()
-    monkeypatch.setattr(run, "OpenAIResponder",
-                        lambda model, effort: OpenAIResponder(model, effort, client=client))
+    monkeypatch.setattr(run, "make_client", lambda api_key, base_url: client)
 
     def agent(model, _toolbox, _task, _log, gate=None, register=None):
         model.respond("instructions", [], [])
@@ -810,3 +813,171 @@ def test_a_summary_that_fails_only_warns_and_keeps_the_exit_code(monkeypatch, tm
     assert code == 0
     assert answer[1] in captured.err and "요약" in captured.err
     assert ("요약 (화면 내용 없음)" in captured.out) == (failure == "write")
+
+
+def fake_clients(monkeypatch):
+    """Every client the run makes is a FakeClient; returns the (api_key, base_url) of each."""
+    made = []
+    monkeypatch.setattr(run, "make_client", lambda api_key, base_url: made.append((api_key, base_url)) or FakeClient())
+    return made
+
+
+def recorder_metas(monkeypatch):
+    """Keeps the meta run.py hands each RunRecorder (run.json keeps only the recorder's META_FIELDS)."""
+    metas = []
+
+    class WatchedRecorder(run.RunRecorder):
+        def __init__(self, runs_dir, desktop, meta, *args, **kwargs):
+            metas.append(dict(meta))
+            super().__init__(runs_dir, desktop, meta, *args, **kwargs)
+
+    monkeypatch.setattr(run, "RunRecorder", WatchedRecorder)
+    return metas
+
+
+def toolbox_run(monkeypatch, tmp_path, *argv):
+    """Runs main with the agent replaced; returns (exit code, the toolbox it got, stdout+stderr)."""
+    seen = {}
+
+    def agent(_model, toolbox, task, _log, gate=None, register=None):
+        seen.update(toolbox=toolbox, task=task)
+        return run.RunResult("claimed", 1, "done")
+
+    monkeypatch.setattr(run, "run_agent", agent)
+    code = run.main([str(arg) for arg in argv])
+    return code, seen
+
+
+def test_run_passes_env_to_task_loading(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("OPENAI_MODEL", "env-model")
+    fake_clients(monkeypatch)
+    seen = capture_agent(monkeypatch, "claimed")
+
+    run.main([str(write_task(tmp_path, make_exe(tmp_path)))])
+    run.main(["--exe", str(make_exe(tmp_path)), "--goal", "g"])
+
+    assert [(task.model, task.model_source) for task in seen] == [("env-model", "env"), ("env-model", "env")]
+
+
+def test_run_prints_the_start_line(monkeypatch, tmp_path, capsys):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("OPENAI_MODEL", "env-model")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://text.example")
+    fake_clients(monkeypatch)
+    capture_agent(monkeypatch, "claimed")
+
+    run.main(["--exe", str(make_exe(tmp_path)), "--goal", "g"])
+
+    out = capsys.readouterr()
+    assert "텍스트 모델: env · 비전 모델: 없음" in out.out.splitlines()
+    assert "env-model" not in out.out + out.err and "text.example" not in out.out + out.err
+
+
+def test_run_refuses_a_broken_vision_setup(monkeypatch, tmp_path, capsys):
+    calls = isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("VISION_BASE_URL", "http://vision.example")
+    sessions = []
+    monkeypatch.setattr(run, "start_session", lambda *_a, **_k: sessions.append(1) or "session-1")
+    made = fake_clients(monkeypatch)
+
+    code = run.main(["--exe", str(make_exe(tmp_path)), "--goal", "g"])
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "VISION_MODEL" in err and "vision.example" not in err
+    assert (calls, sessions, made) == ([], [], [])
+    assert not (tmp_path / "runs").exists()
+
+
+def test_run_gives_the_toolbox_the_vision(monkeypatch, tmp_path, capsys):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("VISION_MODEL", "eye-model")
+    monkeypatch.setenv("VISION_API_KEY", "vk")
+    made = fake_clients(monkeypatch)
+    metas = recorder_metas(monkeypatch)
+
+    code, seen = toolbox_run(monkeypatch, tmp_path, "--exe", make_exe(tmp_path), "--goal", "g")
+
+    assert code == 3
+    assert seen["toolbox"].vision_enabled is True
+    assert sorted(made) == [("test", None), ("vk", None)]
+    out = capsys.readouterr().out
+    assert "텍스트 모델: 기본값 · 비전 모델: env" in out.splitlines()
+    assert [meta["vision"] for meta in metas] == [True]
+    [(written, _)] = recorded_runs(tmp_path)
+    assert "eye-model" not in json.dumps(metas) + json.dumps(written) and "eye-model" not in out
+
+
+def test_one_model_run_gives_the_toolbox_no_vision(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    fake_clients(monkeypatch)
+    metas = recorder_metas(monkeypatch)
+
+    code, seen = toolbox_run(monkeypatch, tmp_path, "--exe", make_exe(tmp_path), "--goal", "g")
+
+    assert code == 3
+    assert seen["toolbox"].vision_enabled is False
+    assert [meta["vision"] for meta in metas] == [False]
+
+
+def test_run_notes_an_ignored_image_mode(monkeypatch, tmp_path, capsys):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("VISION_MODEL", "eye-model")
+    settings_file(monkeypatch, tmp_path, "image_mode: off\n")
+    fake_clients(monkeypatch)
+    capture_agent(monkeypatch, "claimed")
+
+    run.main(["--exe", str(make_exe(tmp_path)), "--goal", "g"])
+
+    assert "텍스트 모델: 기본값 · 비전 모델: env · image_mode 무시(나눈 방식)" in capsys.readouterr().out.splitlines()
+
+
+def test_baseline_builds_no_models_and_prints_no_start_line(monkeypatch, tmp_path, capsys):
+    calls = isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("VISION_BASE_URL", "http://vision.example")
+    made = fake_clients(monkeypatch)
+    metas = recorder_metas(monkeypatch)
+    monkeypatch.setattr(run, "run_baseline", lambda *_a, **_k: calls.append("baseline") or run.RunResult("stopped", 1, "no"))
+
+    code = run.main([str(write_task(tmp_path, make_exe(tmp_path))), "--baseline"])
+
+    assert calls == ["baseline"]
+    assert code == 1
+    assert made == []
+    assert "텍스트 모델" not in capsys.readouterr().out
+    [meta] = metas
+    assert meta["model"] == "baseline" and "vision" not in meta
+
+
+PATH_ENV_NAMES = ("AGENT_DESKTOP_BIN", "AGENT_SETTINGS", "AGENT_KNOWLEDGE_DIR")
+
+
+def test_env_example_names_the_model_and_path_values_and_holds_none():
+    from dotenv import dotenv_values
+
+    example = run.HERE / ".env.example"
+    values = dotenv_values(example)
+
+    assert tuple(values) == MODEL_ENV_NAMES + PATH_ENV_NAMES
+    assert all(value == "" for value in values.values())
+    comments = [line for line in example.read_text(encoding="utf-8").splitlines() if line.startswith("#")]
+    assert len(comments) >= len(values)
+
+
+def test_env_example_is_not_ignored_by_git():
+    import subprocess
+
+    result = subprocess.run(["git", "check-ignore", "-q", str(run.HERE / ".env.example")], cwd=run.HERE,
+                            capture_output=True)
+    ignored_env = subprocess.run(["git", "check-ignore", "-q", str(run.HERE / ".env")], cwd=run.HERE,
+                                 capture_output=True)
+
+    assert result.returncode == 1
+    assert ignored_env.returncode == 0

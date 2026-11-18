@@ -10,10 +10,12 @@ from pathlib import Path
 
 from agent import capture as capturing
 from agent.effects import WINDOW_EXPECTATIONS, diff, met, state
+from agent.frames import to_image_rect
 from agent.geometry import contains, has_area, part_point
 from agent.observe import render_marked
 from agent.results import refused
 from agent.table import find_cells
+from agent.vision import auto_question
 
 CLICK_ACTIONS = {"click": ("left", 1), "double_click": ("left", 2), "right_click": ("right", 1)}
 POINT_ARGUMENTS = (("x", "y"), ("from_x", "from_y"), ("to_x", "to_y"))
@@ -22,7 +24,7 @@ ELEMENT_EXPECTATIONS = ("content_changed", "value_changed")
 
 
 class ScreenTools:
-    def _init_screen(self, captures_dir):
+    def _init_screen(self, captures_dir, vision=None):
         self._captures_dir = Path(captures_dir) if captures_dir is not None else None
         self._marks = {}
         self._marks_view = None
@@ -30,11 +32,53 @@ class ScreenTools:
         self._capture_count = 0
         self._picture_count = 0
         self._attachments = []
+        self._capture_marks = {}
+        self._vision = vision
+        self._vision_calls = 0
+        self._vision_tokens = 0
+
+    @property
+    def vision_enabled(self):
+        """Whether a vision model reads the pictures (split mode)."""
+        return self._vision is not None
 
     def take_attachments(self):
         """Returns the captures made since the last call, and forgets them."""
         attachments, self._attachments = self._attachments, []
         return attachments
+
+    def take_vision_usage(self):
+        """(vision reads, vision tokens) since the last call, which resets both to 0."""
+        usage = (self._vision_calls, self._vision_tokens)
+        self._vision_calls = self._vision_tokens = 0
+        return usage
+
+    def _ask_vision(self, shot, question, asked_by):
+        """Asks the vision model `question` about capture `shot` and counts the read. Returns
+        (the tool result's vision value, the vision event); the event is not sent."""
+        answer = self._vision.read(shot, question, _drawn_marks(shot, self._capture_marks.get(shot.id)))
+        self._vision_calls += 1
+        self._vision_tokens += answer.tokens
+        event = {"type": "vision", "step": None, "capture": shot.id, "asked_by": asked_by,
+                 "question": question, **answer.as_event()}
+        return answer.as_result(), event
+
+    def _capture_after_action(self, reason, expect, target, before):
+        """The capture after a mismatched or unconfirmed action: (Capture, capture event,
+        vision value or None, vision event or None), or None when nothing was captured.
+
+        In split mode the capture is cut around where the target was before the action (the
+        whole window when that is unknown) and the vision model is asked about the target's
+        state; the question names no mark, since the re-read numbers marks afresh."""
+        if not self.vision_enabled:
+            taken = self._capture_current(reason)
+            return None if taken is None else (*taken, None, None)
+        known = (before or {}).get("target")
+        taken = self._capture_current(reason, around=known[1] if known else None)
+        if taken is None:
+            return None
+        vision, event = self._ask_vision(taken[0], auto_question(reason, expect, target), reason)
+        return (*taken, vision, event)
 
     def _part_preview(self, arguments):
         element = self._marks.get(arguments.get("mark"))
@@ -122,7 +166,10 @@ class ScreenTools:
         return shot, None
 
     def _tool_look(self, arguments):
-        if self._image_mode() == "off":
+        question = (arguments.get("question") or "").strip()
+        if self.vision_enabled and not question:
+            return refused("look needs a question for the vision model: the one thing you need to know.")
+        if self._image_mode() == "off" and not self.vision_enabled:
             return refused(
                 "Images are turned off for this run. Use the [n] marks in the observation, "
                 "find_cells for table cells, and click_part for elements without a ref."
@@ -148,6 +195,9 @@ class ScreenTools:
                   "height": shot.height, "drawn": shot.drawn, "cropped": shot.cropped}
         if shot.missing:
             result["windows_left_out"] = shot.missing
+        if self.vision_enabled:
+            result["vision"], vision_event = self._ask_vision(shot, question, "look")
+            self._emit(vision_event)
         return result
 
     def _tool_find_cells(self, arguments):
@@ -191,7 +241,9 @@ class ScreenTools:
     def _before_state(self, name, arguments):
         """The window list now, the marks of the window the action's re-read will show, and,
         when the call declares an expectation a picture can speak to, the picture around its
-        target (see _picture). A window expectation is answered by the window list alone."""
+        target (see _picture). A window expectation is answered by the window list alone.
+        In split mode it also keeps the target's (window id, screen bounds) as "target", even
+        for a window expectation, so the capture after a mismatch can be cut around it."""
         rows = self._rows()
         window_id = self._acting_window(name, arguments)
         if window_id is not None and self._marks_view == (window_id, True):
@@ -201,8 +253,12 @@ class ScreenTools:
             marks = render_marked(envelope["data"]["tree"])[2] if envelope.get("ok") else {}
             before = state(rows, marks, window_id)
         expect = arguments.get("expect")
-        if expect is not None and expect not in WINDOW_EXPECTATIONS:
-            before["picture"] = self._picture(name, arguments, rows)
+        picturing = expect is not None and expect not in WINDOW_EXPECTATIONS
+        target = self._picture_target(name, arguments, rows) if picturing or self.vision_enabled else None
+        if self.vision_enabled and target is not None:
+            before["target"] = target
+        if picturing:
+            before["picture"] = self._picture(target, rows)
         return before
 
     def _judged(self, expect, before, after):
@@ -241,10 +297,9 @@ class ScreenTools:
                 judged["verdict"] = UNCONFIRMED
         return judged
 
-    def _picture(self, name, arguments, rows):
-        """The Region around the call's target in the window it presses, or None when the call
-        has no target on screen or the screenshot cannot be taken."""
-        target = self._picture_target(name, arguments, rows)
+    def _picture(self, target, rows):
+        """The Region around the call's target (see _picture_target) in the window it presses,
+        or None when the call has no target on screen or the screenshot cannot be taken."""
         if target is None:
             return None
         window_id, around = target
@@ -290,18 +345,20 @@ class ScreenTools:
         folder.mkdir(parents=True, exist_ok=True)
         return folder / f"picture-{self._picture_count}.png"
 
-    def _capture_current(self, reason):
-        """Captures the current window for the model when images are on: (Capture, event) or None."""
-        if self._image_mode() == "off" or not self._current_window:
+    def _capture_current(self, reason, around=None):
+        """Captures the current window for the model when images are on, or always in split mode,
+        cut around `around` (screen bounds) when given: (Capture, event) or None."""
+        if (self._image_mode() == "off" and not self.vision_enabled) or not self._current_window:
             return None
         rows = self._rows()
         row = next((r for r in rows if r["id"] == self._current_window), None)
-        return self._take_capture(row, None, reason, None, rows) if row else None
+        return self._take_capture(row, around, reason, None, rows) if row else None
 
     def _take_capture(self, row, around, reason, mark, rows):
         """Screenshots `row` with the other visible windows of the process among `rows`, stacked
         as `rows` lists them (capture.stacked); returns (Capture, capture event) or None. The
-        event is not sent."""
+        event is not sent. In split mode the capture is kept for the record and the vision model,
+        never attached for the text model."""
         self._capture_count += 1
         capture_id = f"c{self._capture_count}"
         marks = self._marks if self._marks_window() == row["id"] else {}
@@ -310,7 +367,9 @@ class ScreenTools:
         if shot is None:
             return None
         self._captures[capture_id] = shot
-        self._attachments.append(shot)
+        self._capture_marks[capture_id] = marks
+        if not self.vision_enabled:
+            self._attachments.append(shot)
         event = {"type": "capture", "id": capture_id, "step": None, "observation": None, "mark": mark,
                  "reason": reason, "file": f"captures/{shot.path.name}"}
         return shot, event
@@ -324,6 +383,17 @@ class ScreenTools:
         on_event = getattr(self._observer, "on_event", None)
         if on_event is not None:
             on_event(event)
+
+
+def _drawn_marks(shot, marks):
+    """The mark numbers drawn on capture `shot` from the `marks` it was taken with: those whose
+    box lies inside the image, or none when no box was drawn (see capture.take)."""
+    if not shot.drawn:
+        return []
+    size = (shot.width, shot.height)
+    return [number for number in sorted(marks or {})
+            if marks[number].get("bounds")
+            and to_image_rect(marks[number]["bounds"], shot.origin, size) is not None]
 
 
 def _box_of(points):

@@ -14,7 +14,7 @@ from agent.guard import ActionGuard, signature
 from agent.observe import render_marked
 from agent.results import refused as _refused
 from agent.screen_tools import UNCONFIRMED, ScreenTools
-from agent.tool_schemas import READ_ONLY_TOOLS, SCHEMAS
+from agent.tool_schemas import READ_ONLY_TOOLS, SCHEMAS, definitions_for
 from agent.verify import first_unmet
 
 OBSERVE_TIMEOUT_MS = "8000"
@@ -86,14 +86,19 @@ def _summary(envelope):
 
 class Toolbox(AskingTools, ScreenTools):
     def __init__(self, desktop, task, confirm, sleep=time.sleep, clock=time.monotonic, observer=None,
-                 asker=None, knowledge=None, captures_dir=None, wall=time.time):
+                 asker=None, knowledge=None, captures_dir=None, wall=time.time, vision=None):
         """observer gets on_observation(window, envelope, text, source=..., wait=...) for each tree
         the agent reads, and on_action(tool, arguments, target, result) for each other tool call,
         before the re-read is reported. source names what made the observation ("observe", "action",
         "question" or "wait_for_text"); wait is set only for wait_for_text, which reports one
         observation per call. An observer with on_event(event) also gets the capture, question,
         answer, knowledge and completion events. Captures go to captures_dir, or a temporary folder
-        when it is None. asker answers questions; knowledge is the system's KnowledgeStore."""
+        when it is None. asker answers questions; knowledge is the system's KnowledgeStore.
+
+        vision, when given, reads pictures for a text model that cannot (split mode): an object
+        with read(capture, question, marks) returning an answer with as_result() and as_event(),
+        as agent.vision.Vision does. look then asks it a question, captures are recorded but never
+        attached for the model, image_mode is ignored, and each read is sent as a vision event."""
         self._desktop = desktop
         self._observer = observer or _NoObserver()
         self._task = task
@@ -108,11 +113,11 @@ class Toolbox(AskingTools, ScreenTools):
         self._view_origin = None
         self._last_read = None
         self._levels = {s["definition"]["name"]: s["level"] for s in SCHEMAS}
-        self._init_screen(captures_dir)
+        self._init_screen(captures_dir, vision)
         self._init_asking(asker, knowledge, wall, task)
 
     def definitions(self):
-        return [s["definition"] for s in SCHEMAS if s["level"] <= self._task.permission_level]
+        return definitions_for(self._task.permission_level, self.vision_enabled)
 
     def call(self, name, arguments):
         if name in READ_ONLY_TOOLS:
@@ -142,14 +147,18 @@ class Toolbox(AskingTools, ScreenTools):
             result["knowledge_id"] = arguments["knowledge_id"]
         self._after_action(name, arguments, target, result)
         reason = _capture_reason(result)
-        taken = self._capture_current(reason) if reason is not None else None
+        taken = self._capture_after_action(reason, expect, target, before) if reason is not None else None
         if taken is not None:
             result["capture"] = taken[0].id
+            if taken[2] is not None:
+                result["vision"] = taken[2]
         self._observer.on_action(name, arguments, target, result)
         if self._last_read is not None:
             self._observer.on_observation(*self._last_read, source="action")
         if taken is not None:
             self._emit(taken[1])
+            if taken[3] is not None:
+                self._emit(taken[3])
         return {**result, **after}
 
     def _refuse_for_question(self, name, arguments, target, refusal):

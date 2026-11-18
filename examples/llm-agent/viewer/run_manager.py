@@ -17,6 +17,7 @@ from agent.approval import ApprovalGate, Decision
 from agent.ask import Answer, AskGate
 from agent.desktop import DesktopClient, start_session
 from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, system_name
+from agent.llm import ModelSetupError, Models
 from agent.loop import RunResult, run_agent
 from agent.recorder import RunRecorder
 from agent.registration import register_after_run
@@ -41,9 +42,16 @@ def decline(_prompt):
     return False
 
 
-def default_toolbox(desktop, task, confirm, observer, asker, knowledge, captures_dir):
+def default_toolbox(desktop, task, confirm, observer, asker, knowledge, captures_dir, vision=None):
     return Toolbox(desktop, task, confirm=confirm, observer=observer, asker=asker, knowledge=knowledge,
-                   captures_dir=captures_dir)
+                   captures_dir=captures_dir, vision=vision)
+
+
+def _split_models(built):
+    """(text model, vision) from what the model factory returned: a Models, or a bare text model."""
+    if isinstance(built, Models):
+        return built.text, built.vision
+    return built, None
 
 
 def _leave_summary(run_dir):
@@ -57,8 +65,10 @@ def _leave_summary(run_dir):
 class RunManager:
     def __init__(self, runs_dir, binary, default_exe, model_factory, toolbox_factory=default_toolbox,
                  desktop_factory=None, gate_factory=ApprovalGate, ask_gate_factory=AskGate, knowledge_dir=None,
-                 task_defaults=None):
-        """task_defaults are the settings file's values that every new run's task starts from."""
+                 task_defaults=None, environ=None):
+        """task_defaults are the settings file's values that every new run's task starts from;
+        environ supplies OPENAI_MODEL below them (None reads no env). model_factory(task) returns
+        an agent.llm.Models, or a bare text model, and may raise ModelSetupError."""
         self.runs_dir = Path(runs_dir)
         self.binary = str(binary)
         self.default_exe = default_exe
@@ -69,6 +79,7 @@ class RunManager:
         self._ask_gate_factory = ask_gate_factory
         self._knowledge_dir = knowledge_dir
         self._task_defaults = dict(task_defaults or {})
+        self._environ = environ
         self._lock = threading.Lock()
         self._active = None
         self._gate = None
@@ -128,12 +139,19 @@ class RunManager:
                 raise RunBusy(f"실행 중인 작업이 있습니다: {self._active}")
             self._active = "starting"
         try:
-            model = self._model_factory(task)
+            built = self._model_factory(task)
+            model, vision = _split_models(built)
+            meta = self._meta(task, system)
+            if isinstance(built, Models):
+                meta["vision"] = vision is not None
             desktop = self._desktop_factory()
-            recorder = RunRecorder(self.runs_dir, desktop, self._meta(task, system))
+            recorder = RunRecorder(self.runs_dir, desktop, meta)
         except RunStartFailed:
             self._release()
             raise
+        except ModelSetupError as error:
+            self._release()
+            raise RunStartFailed(str(error)) from error
         except Exception as error:
             self._release()
             raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
@@ -141,7 +159,9 @@ class RunManager:
             gate = self._gate_factory() if approve else None
             ask_gate = self._ask_gate_factory(timeout_s=getattr(task, "ask_timeout_s", 1800))
             store = KnowledgeStore(knowledge_root(self._knowledge_dir, task.knowledge_dir), system)
-            toolbox = self._toolbox_factory(desktop, task, decline, recorder, ask_gate, store, recorder.path / "captures")
+            extra = {} if vision is None else {"vision": vision}
+            toolbox = self._toolbox_factory(desktop, task, decline, recorder, ask_gate, store, recorder.path / "captures",
+                                            **extra)
             register = functools.partial(register_after_run, store=store, run_id=recorder.run_id)
         except Exception as error:
             recorder.finish(RunResult("stopped", 0, f"실행을 시작하지 못했습니다: {error}"))
@@ -183,7 +203,7 @@ class RunManager:
                 raise InvalidRun("단계별 호출 한도는 1 이상의 정수여야 합니다(비우면 기본값)")
             defaults["stage_call_limit"] = stage_call_limit
         try:
-            return task_from_args(goal.strip(), exe, level, defaults=defaults)
+            return task_from_args(goal.strip(), exe, level, defaults=defaults, environ=self._environ)
         except TaskError as error:
             raise InvalidRun(str(error)) from error
 

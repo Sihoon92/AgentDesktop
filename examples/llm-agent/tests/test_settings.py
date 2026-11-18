@@ -26,7 +26,8 @@ def test_contract_names():
     assert SETTINGS_ENV == "AGENT_SETTINGS"
     assert DEFAULT_PATH == HERE / "settings.local.yaml"
     assert KEYS == ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
-                    "plan_reasoning_effort")
+                    "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side",
+                    "vision_points")
 
 
 def test_every_key_is_read(tmp_path):
@@ -296,3 +297,39 @@ def test_a_stage_call_limit_must_be_a_whole_number_of_at_least_one(tmp_path, val
         load_settings(write(tmp_path, f"stage_call_limit: {value}\n"), environ={})
 
     assert "stage_call_limit" in raised.value.reason and value not in raised.value.reason
+
+
+def test_vision_keys_are_read(tmp_path):
+    text = "vision_model: eye-1\nvision_reasoning_effort: low\nvision_max_side: 1024\nvision_points: normalized_1000\n"
+
+    assert load_settings(write(tmp_path, text), environ={}) == {
+        "vision_model": "eye-1", "vision_reasoning_effort": "low", "vision_max_side": 1024,
+        "vision_points": "normalized_1000"}
+
+
+def test_vision_points_must_be_a_known_mode(tmp_path):
+    assert load_settings(write(tmp_path, "vision_points: pixel\n"), environ={}) == {"vision_points": "pixel"}
+    with pytest.raises(SettingsError) as raised:
+        load_settings(write(tmp_path, "vision_points: percent\n"), environ={})
+
+    assert "vision_points" in raised.value.reason and "percent" not in raised.value.reason
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "big", "true", "2.5", "'1280'"])
+def test_vision_max_side_must_be_a_positive_integer(tmp_path, value):
+    with pytest.raises(SettingsError) as raised:
+        load_settings(write(tmp_path, f"vision_max_side: {value}\n"), environ={})
+
+    assert "vision_max_side" in raised.value.reason and value not in raised.value.reason
+    assert "1 이상의 정수" in raised.value.reason
+
+
+def test_vision_points_modes():
+    assert settings.VISION_POINT_MODES == ("pixel", "normalized_1000")
+
+
+def test_example_file_tells_about_omit_and_the_env_model():
+    text = (HERE / "settings.example.yaml").read_text(encoding="utf-8")
+
+    assert "omit" in text
+    assert "OPENAI_MODEL" in text

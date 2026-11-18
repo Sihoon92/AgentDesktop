@@ -17,7 +17,7 @@ from agent.approval import TerminalGate
 from agent.ask import NoAsker, TerminalAsker
 from agent.baseline import run_baseline
 from agent.desktop import DesktopClient, start_session
-from agent.llm import OpenAIResponder
+from agent.llm import ModelSetupError, build_models, make_client, start_line
 from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, system_name
 from agent.loop import RunResult, run_agent
 from agent.recorder import RunRecorder
@@ -118,6 +118,13 @@ def main(argv=None):
         return _fail("작업 파일에 baseline_target이 없습니다")
     if not args.baseline and not os.environ.get("OPENAI_API_KEY"):
         return _fail("OPENAI_API_KEY가 없습니다. 환경변수나 .env에 넣어 주세요")
+    models = None
+    if not args.baseline:
+        try:
+            models = build_models(task, settings, os.environ, make_client=make_client)
+        except ModelSetupError as error:
+            return _fail(str(error))
+        print(start_line(models))
 
     started = datetime.now().strftime("%Y%m%d-%H%M%S")
     session = start_session(str(binary), f"llm-agent {started}")
@@ -125,7 +132,7 @@ def main(argv=None):
         return _fail("agent-desktop 세션을 시작하지 못했습니다")
     viewer = start_viewer(RUNS_DIR) if args.view else None
     try:
-        return _run_recorded(args, task, binary, session, viewer, system)
+        return _run_recorded(args, task, binary, session, viewer, system, models)
     finally:
         if viewer is not None:
             viewer.shutdown()
@@ -174,7 +181,8 @@ def started_by(args):
     return "run.py --view" if args.view else "run.py"
 
 
-def _run_recorded(args, task, binary, session, viewer, system):
+def _run_recorded(args, task, binary, session, viewer, system, models):
+    """`models` is None for a baseline run, which calls no model."""
     desktop = DesktopClient(str(binary), session)
     meta = {
         "goal": task.goal,
@@ -186,6 +194,8 @@ def _run_recorded(args, task, binary, session, viewer, system):
         "system": system,
         "code": current_code(),
     }
+    if models is not None:
+        meta["vision"] = models.vision is not None
     try:
         recorder = RunRecorder(RUNS_DIR, desktop, meta)
     except OSError as error:
@@ -200,11 +210,10 @@ def _run_recorded(args, task, binary, session, viewer, system):
         store = KnowledgeStore(knowledge_root(args.knowledge_dir, task.knowledge_dir), system)
         asker = TerminalAsker() if is_interactive() else NoAsker()
         toolbox = Toolbox(desktop, task, confirm=confirm, observer=recorder, asker=asker, knowledge=store,
-                          captures_dir=captures)
-        model = OpenAIResponder(task.model, task.reasoning_effort)
+                          captures_dir=captures, vision=models.vision)
         gate = TerminalGate() if args.approve else None
         register = functools.partial(register_after_run, store=store, run_id=recorder.run_id)
-        result = run_agent(model, toolbox, task, make_logger(recorder), gate=gate, register=register)
+        result = run_agent(models.text, toolbox, task, make_logger(recorder), gate=gate, register=register)
     recorder.finish(result)
     print(f"결과: {result.status} (스텝 {result.steps}, 토큰 {result.tokens}) - {result.reason}")
     print(f"기록: {recorder.path}")
@@ -231,7 +240,7 @@ def _resolve_task(args, settings):
     if args.task is not None:
         if args.exe:
             raise TaskError("작업 파일과 --exe는 함께 쓸 수 없습니다. 작업 파일의 exe를 고쳐 주세요")
-        task = load_task(args.task, defaults=settings)
+        task = load_task(args.task, defaults=settings, environ=os.environ)
         return replace(task, goal=args.goal) if args.goal else task
     exe = args.exe or settings.get("exe")
     if not exe:
@@ -242,7 +251,7 @@ def _resolve_task(args, settings):
         raise TaskError("작업 파일이 없으면 --goal로 지시를 주세요(실행 파일은 설정 파일의 exe를 씁니다)")
     if args.baseline:
         raise TaskError("--baseline은 성공 조건이 있는 작업 파일에서만 쓸 수 있습니다")
-    return task_from_args(args.goal, exe, args.level, defaults=settings)
+    return task_from_args(args.goal, exe, args.level, defaults=settings, environ=os.environ)
 
 
 if __name__ == "__main__":

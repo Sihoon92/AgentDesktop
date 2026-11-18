@@ -863,3 +863,16 @@ pre {
 .limit-answer textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; resize: none; }
 .limit-intents { margin: 0 0 12px; padding-left: 20px; font-size: 12px; overflow-wrap: anywhere; }
 .chat-msg.system.plan { color: var(--element); border-color: var(--element); }
+
+.vision-card { margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--border); border-left: 3px solid var(--focus); border-radius: 0 6px 6px 0; background: var(--panel); font-size: 12px; }
+.vision-card.failed { border-left-color: var(--bad); }
+.vision-card .facts { margin: 6px 0 8px; }
+.vision-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vision-capture { color: var(--muted); font-family: var(--mono); }
+.vision-figure { margin: 0; }
+.vision-frame { position: relative; display: block; width: fit-content; max-width: 100%; line-height: 0; background: var(--stage-bg); border: 1px solid var(--border); }
+.vision-frame img { display: block; max-width: 100%; height: auto; }
+.vision-markers { position: absolute; inset: 0; pointer-events: none; overflow: hidden; line-height: 1.2; }
+.vision-dot { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--target); box-shadow: 0 0 0 2px var(--halo); }
+.vision-label { position: absolute; transform: translate(8px, -50%); max-width: 60%; padding: 1px 4px; border-radius: 3px; background: var(--target); color: #fff; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vision-label.flip { transform: translate(calc(-100% - 8px), -50%); }

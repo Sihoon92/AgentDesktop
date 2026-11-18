@@ -250,3 +250,30 @@ SCHEMAS = [
                        "description": "The id of the learned completion entry that fits this task, or null"},
     ),
 ]
+
+LOOK_QUESTION = {
+    "type": "string",
+    "description": (
+        "The one thing you need to know from the picture, such as which mark is a button or whether a "
+        "check mark is on"
+    ),
+}
+VISION_LOOK = _tool(
+    "look",
+    "Ask the vision model one question about a screenshot of the current window, with each [n] mark drawn "
+    "as a numbered box. You cannot see the picture: the result's vision holds the answer, with the marks "
+    "it points at and, for a target without a mark, its pixels in the capture. Use it when the tree does "
+    "not show the target or an action did not do what you expected.",
+    0,
+    mark={"type": ["integer", "null"], "description": "Null for the whole window, or a mark to crop around"},
+    question=LOOK_QUESTION,
+)
+"""look when a vision model reads the pictures for a text model (split mode)."""
+
+
+def definitions_for(level, vision):
+    """The definitions a model at permission `level` sees. With `vision`, look asks the vision
+    model a question; without it every definition is SCHEMAS' own."""
+    replaced = {"look": VISION_LOOK} if vision else {}
+    chosen = [replaced.get(s["definition"]["name"], s) for s in SCHEMAS]
+    return [s["definition"] for s in chosen if s["level"] <= level]

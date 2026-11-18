@@ -7,6 +7,7 @@ the viewer: `--prune` lists old runs to delete (and deletes them with --yes),
 """
 
 import argparse
+import functools
 import os
 import re
 import secrets
@@ -18,7 +19,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from agent.knowledge import KNOWLEDGE_ENV, knowledge_root
-from agent.llm import OpenAIResponder
+from agent.llm import ModelSetupError, build_models, make_client
 from agent.settings import SettingsError, load_settings, settings_path
 from run import ENV_FILES, RUNS_DIR, find_binary
 from viewer.export import write_export
@@ -32,20 +33,26 @@ COUNT = re.compile(r"[0-9]+")
 EXPORT_WARNING = "이 파일에는 앱 화면과 UI 텍스트가 들어 있습니다. 공유 전에 확인하세요"
 
 
-def openai_model(task):
+def openai_model(task, settings=None):
+    """The models (agent.llm.Models) for a run started from the viewer; RunStartFailed says why not."""
     if not os.environ.get("OPENAI_API_KEY"):
         raise RunStartFailed("OPENAI_API_KEY가 없습니다. 환경변수나 .env에 넣고 뷰어를 다시 켜 주세요")
-    return OpenAIResponder(task.model, task.reasoning_effort)
+    try:
+        return build_models(task, settings, os.environ, make_client=make_client)
+    except ModelSetupError as error:
+        raise RunStartFailed(str(error)) from error
 
 
 def build_run_manager(runs_dir, default_exe, knowledge_dir=None, task_defaults=None):
     """Returns a RunManager, or None with the reason when this viewer can only replay.
-    task_defaults (the settings file) give new runs their model and the other task keys."""
+    task_defaults (the settings file) give new runs their model and the other task keys,
+    with OPENAI_MODEL below them."""
     binary = find_binary()
     if not binary.exists():
         return None, f"agent-desktop 바이너리가 없어 기록 보기만 합니다: {binary}"
-    return RunManager(runs_dir, binary, default_exe, openai_model, knowledge_dir=knowledge_dir,
-                      task_defaults=task_defaults), None
+    model_factory = functools.partial(openai_model, settings=task_defaults)
+    return RunManager(runs_dir, binary, default_exe, model_factory, knowledge_dir=knowledge_dir,
+                      task_defaults=task_defaults, environ=os.environ), None
 
 
 def open_fragment(runs_dir, value):

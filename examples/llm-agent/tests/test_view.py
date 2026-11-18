@@ -8,7 +8,6 @@ import pytest
 
 import view
 from agent import settings
-from agent.llm import OpenAIResponder
 from agent.loop import RunResult
 from viewer import run_manager as run_manager_module
 
@@ -420,9 +419,10 @@ def test_a_run_started_from_the_viewer_calls_the_model_named_in_the_settings_fil
     binary.write_bytes(b"")
     settings_file(monkeypatch, tmp_path, f"model: house-model-7\nreasoning_effort: medium\nexe: '{exe}'\n")
     monkeypatch.setenv("AGENT_DESKTOP_BIN", str(binary))
+    clear_model_env(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     client = FakeClient()
-    monkeypatch.setattr(view, "OpenAIResponder", lambda model, effort: OpenAIResponder(model, effort, client=client))
+    monkeypatch.setattr(view, "make_client", lambda api_key, base_url: client)
     monkeypatch.setattr(run_manager_module, "start_session", lambda *_args, **_kwargs: "session-1")
 
     def agent(model, _toolbox, _task, _log, gate=None, register=None):
@@ -443,6 +443,88 @@ def test_a_run_started_from_the_viewer_calls_the_model_named_in_the_settings_fil
     assert [(call["model"], call["reasoning"]) for call in client.calls] == [("house-model-7", {"effort": "medium"})]
     meta = json.loads((runs / run_id / "run.json").read_text(encoding="utf-8"))
     assert (meta["model"], meta["exe"], meta["status"]) == ("house-model-7", str(exe), "gave_up")
+
+
+MODEL_ENV_NAMES = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "VISION_MODEL", "VISION_API_KEY",
+                   "VISION_BASE_URL")
+
+
+def clear_model_env(monkeypatch):
+    """The model env names of this machine or its .env must not change what these tests see."""
+    for name in MODEL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+def viewer_manager(monkeypatch, tmp_path, env, settings_text=""):
+    """Starts view.main with fake clients and a recording agent; returns (manager, seen, made)."""
+    exe = tmp_path / "Tool.exe"
+    exe.write_bytes(b"")
+    binary = tmp_path / "agent-desktop.exe"
+    binary.write_bytes(b"")
+    settings_file(monkeypatch, tmp_path, f"{settings_text}exe: '{exe}'\n")
+    monkeypatch.setenv("AGENT_DESKTOP_BIN", str(binary))
+    clear_model_env(monkeypatch)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    made = []
+    monkeypatch.setattr(view, "make_client", lambda api_key, base_url: made.append((api_key, base_url)) or FakeClient())
+    monkeypatch.setattr(run_manager_module, "start_session", lambda *_args, **_kwargs: "session-1")
+    seen = {}
+
+    def agent(model, toolbox, task, _log, gate=None, register=None):
+        seen.update(model=model, toolbox=toolbox, task=task)
+        return RunResult("gave_up", 1, "done")
+
+    monkeypatch.setattr(run_manager_module, "run_agent", agent)
+    served = {}
+    monkeypatch.setattr(view, "make_server", lambda *args, **kwargs: served.update(kwargs) or FakeServer())
+    monkeypatch.setattr(view, "load_dotenv", lambda path: None)
+    assert view.main(["--runs", str(tmp_path / "runs"), "--no-browser"]) == 0
+    return served["run_manager"], seen, made
+
+
+def test_a_viewer_run_takes_the_env_model_and_gives_the_toolbox_the_vision(monkeypatch, tmp_path):
+    manager, seen, made = viewer_manager(monkeypatch, tmp_path, {
+        "OPENAI_API_KEY": "test", "OPENAI_MODEL": "env-model", "VISION_MODEL": "eye-model"})
+
+    manager.start("g")
+    manager.join(5)
+
+    assert (seen["task"].model, seen["task"].model_source) == ("env-model", "env")
+    assert seen["toolbox"].vision_enabled is True
+    assert made == [("test", None), ("test", None)]
+
+
+def test_a_viewer_run_without_vision_gives_the_toolbox_none(monkeypatch, tmp_path):
+    manager, seen, _made = viewer_manager(monkeypatch, tmp_path, {"OPENAI_API_KEY": "test"})
+
+    manager.start("g")
+    manager.join(5)
+
+    assert seen["toolbox"].vision_enabled is False
+    assert seen["task"].model_source == "기본값"
+
+
+def test_a_broken_vision_setup_fails_the_viewer_start(monkeypatch, tmp_path):
+    manager, seen, made = viewer_manager(monkeypatch, tmp_path, {
+        "OPENAI_API_KEY": "test", "VISION_API_KEY": "vk"})
+
+    with pytest.raises(run_manager_module.RunStartFailed) as raised:
+        manager.start("g")
+
+    assert "VISION_MODEL" in str(raised.value) and "vk" not in str(raised.value).split()
+    assert (seen, made) == ({}, [])
+    assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())
+    assert manager.active() is None
+
+
+def test_the_viewer_still_needs_the_text_key(monkeypatch, tmp_path):
+    manager, _seen, _made = viewer_manager(monkeypatch, tmp_path, {})
+
+    with pytest.raises(run_manager_module.RunStartFailed) as raised:
+        manager.start("g")
+
+    assert "OPENAI_API_KEY" in str(raised.value)
 
 
 QUESTIONS_RUN = "20261113-101500"

@@ -696,6 +696,22 @@ def test_run_json_keeps_the_step_limit_or_null(tmp_path):
     assert run_json(new_recorder(tmp_path / "other", desktop))["max_steps"] is None
 
 
+@pytest.mark.parametrize(("given", "kept"), [(True, True), (False, False), ("gpt-vision-test", None),
+                                             ({"model": "gpt-vision-test"}, None)])
+def test_run_json_keeps_whether_a_vision_model_was_used_and_never_its_name(tmp_path, given, kept):
+    desktop = DesktopClient("ad.exe", "run1", runner=FakeCli())
+    recorder = RunRecorder(tmp_path / "runs", desktop, {**META, "vision": given}, now=lambda: NOW)
+    OPEN_RECORDERS.append(recorder)
+    recorder.finish(RunResult("verified", 1, "opened", 10))
+    assert run_json(recorder)["vision"] is kept
+    assert "gpt-vision-test" not in (recorder.path / "run.json").read_text(encoding="utf-8")
+
+
+def test_run_json_vision_is_null_when_the_meta_does_not_say(tmp_path):
+    desktop = DesktopClient("ad.exe", "run1", runner=FakeCli())
+    assert run_json(new_recorder(tmp_path, desktop))["vision"] is None
+
+
 def test_confirmed_status_and_a_warning_are_recorded(tmp_path):
     recorder, _, _ = recorded(tmp_path)
     recorder.on_event({"type": "warning", "message": "등록 중 오류: RuntimeError: x"})
@@ -925,3 +941,63 @@ def test_stage_texts_never_reach_run_json_or_the_summary(tmp_path):
     assert MARK not in summary
     assert "단계: 2 · 완료 1 · 단계별 호출 3/8 · 한도 질문 1 · 계획 고침 1" in summary
     assert "호출당 토큰 최대: 9120" in summary
+
+
+def vision_event(**fields):
+    return {"type": "vision", "step": None, "capture": "c1", "asked_by": "look", "question": f"{MARK} 질문",
+            "answer": f"{MARK} 답", "marks": [2], "points": [{"label": f"{MARK} 칸", "x": 4, "y": 5}],
+            "unsure": False, "error": None, "dropped": 0, "tokens": 812, "seconds": 2.4, **fields}
+
+
+def test_vision_event_is_recorded_with_a_step(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event({"type": "model", "step": 5, "tokens": 10})
+
+    recorder.on_event(vision_event())
+
+    assert events(recorder)[-1] == vision_event(step=5)
+
+
+def test_vision_event_keeps_the_step_it_was_given(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event({"type": "model", "step": 5, "tokens": 10})
+
+    recorder.on_event(vision_event(step=3, asked_by="mismatch"))
+
+    assert events(recorder)[-1] == vision_event(step=3, asked_by="mismatch")
+
+
+def test_run_json_gets_vision_counts(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.finish(RunResult("verified", 4, "opened", 400,
+                              stats={**STAGE_STATS, "vision_calls": 2, "vision_tokens": 1500}))
+
+    data = run_json(recorder)
+    assert (data["vision_calls"], data["vision_tokens"]) == (2, 1500)
+    assert data["stages"] == STAGE_STATS
+
+
+@pytest.mark.parametrize("stats", [STAGE_STATS, {**STAGE_STATS, "vision_calls": "2", "vision_tokens": True}])
+def test_run_json_has_no_vision_counts_without_whole_numbers(tmp_path, stats):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.finish(RunResult("verified", 4, "opened", 400, stats=stats))
+
+    data = run_json(recorder)
+    assert "vision_calls" not in data and "vision_tokens" not in data
+
+
+def test_vision_texts_stay_in_events_jsonl_alone(tmp_path):
+    from agent.summary import summary_of
+
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event({"type": "model", "step": 1, "tokens": 100})
+    recorder.on_event(vision_event())
+    recorder.finish(RunResult("verified", 1, "opened", 912,
+                              stats={**STAGE_STATS, "vision_calls": 1, "vision_tokens": 812}))
+
+    assert MARK in (recorder.path / "events.jsonl").read_text(encoding="utf-8")
+    assert MARK not in (recorder.path / "run.json").read_text(encoding="utf-8")
+    summary = "\n".join(summary_of(recorder.path))
+    assert MARK not in summary and "비전 호출 1 · 비전 토큰 812" in summary

@@ -1034,12 +1034,111 @@ function actionDetails(entry) {
     ]),
     ...outcomeNotes(action),
     ...knowledgeNotes(entry),
+    ...visionSection(entry),
     el("h3", { text: "인자" }),
     el("pre", { text: JSON.stringify(args, null, 2) }),
   ];
   if (result.post_state) nodes.push(el("h3", { text: "동작 뒤 상태" }), el("pre", { text: JSON.stringify(result.post_state, null, 2) }));
   nodes.push(...changesSection(entry));
   return nodes.filter(Boolean);
+}
+
+/* ---------- vision answers ---------- */
+
+const VISION_ASKERS = { look: "look 질문", mismatch: "동작 뒤 불일치", unconfirmed: "동작 뒤 확인 못 함" };
+const CAPTURE_ID = /^c\d+$/;
+
+async function captureUrl(runId, captureId) {
+  const name = `${captureId}.png`;
+  if (state.exportMode) {
+    const uri = (state.exported.captures || {})[name];
+    if (typeof uri !== "string" || !uri.startsWith("data:image/png;base64,")) throw new Error(`내보낸 파일에 ${name} 캡처가 없습니다.`);
+    return uri;
+  }
+  const key = `${runId}/captures/${name}`;
+  if (!state.blobs.has(key)) {
+    const response = await api(`/api/runs/${encodeURIComponent(runId)}/captures/${encodeURIComponent(name)}`);
+    state.blobs.set(key, URL.createObjectURL(await response.blob()));
+  }
+  return state.blobs.get(key);
+}
+
+function visionEventsFor(entry) {
+  const capture = entry && entry.kind === "action" && entry.action.result ? entry.action.result.capture : null;
+  if (typeof capture !== "string" || !CAPTURE_ID.test(capture)) return [];
+  return state.events.filter((event) => event.type === "vision" && event.capture === capture);
+}
+
+function visionSection(entry) {
+  const events = visionEventsFor(entry);
+  if (events.length === 0) return [];
+  return [el("h3", { text: "비전 모델의 답" }), ...events.map(visionCard)];
+}
+
+function visionCard(event) {
+  const points = Array.isArray(event.points) ? event.points.filter(isVisionPoint) : [];
+  const marks = Array.isArray(event.marks) ? event.marks.filter(Number.isInteger) : [];
+  const asker = VISION_ASKERS[event.asked_by] || event.asked_by || "알 수 없음";
+  const figure = el("figure", { className: "vision-figure" }, [el("p", { className: "hint", text: "캡처를 불러오는 중…" })]);
+  const card = el("section", { className: event.error ? "vision-card failed" : "vision-card", attrs: { "aria-label": `비전 답 · ${asker}` } }, [
+    el("div", { className: "vision-head" }, [
+      el("span", { className: "kind vision-kind", text: asker }),
+      el("span", { className: "vision-capture", text: `캡처 ${event.capture}` }),
+    ]),
+    factList([
+      ["질문", event.question],
+      ["답", event.answer],
+      ["확실성", event.unsure ? "모름(unsure)" : event.error ? null : "답함", event.unsure ? "warn-text" : ""],
+      ["오류", event.error, "bad-text"],
+      ["번호", marks.length ? marks.join(", ") : null],
+      ["점", points.length ? points.map((point) => `${point.label || "(이름 없음)"} (${point.x}, ${point.y})`).join(" · ") : null],
+      ["버린 항목", event.dropped ? `${event.dropped}개` : null, "warn-text"],
+      ["비전 토큰", Number.isInteger(event.tokens) && event.tokens > 0 ? event.tokens : null],
+      ["걸린 시간", typeof event.seconds === "number" ? `${event.seconds.toFixed(1)}초` : null],
+    ]),
+    figure,
+  ]);
+  fillVisionFigure(figure, event.capture, points);
+  return card;
+}
+
+function isVisionPoint(point) {
+  return point && typeof point === "object" && Number.isFinite(point.x) && Number.isFinite(point.y);
+}
+
+async function fillVisionFigure(figure, captureId, points) {
+  const runId = state.runId;
+  let url;
+  try {
+    url = await captureUrl(runId, captureId);
+  } catch (error) {
+    figure.replaceChildren(el("p", { className: "hint", text: `캡처를 보여 줄 수 없습니다: ${error.message}` }));
+    return;
+  }
+  if (runId !== state.runId) return;
+  const img = el("img", { attrs: { alt: `캡처 ${captureId}` } });
+  img.src = url;
+  await img.decode().catch(() => {});
+  if (runId !== state.runId) return;
+  const width = img.naturalWidth;
+  const height = img.naturalHeight;
+  if (!width || !height) {
+    figure.replaceChildren(el("p", { className: "hint", text: "캡처 그림을 읽을 수 없습니다." }));
+    return;
+  }
+  const markers = el("div", { className: "vision-markers", attrs: { "aria-hidden": "true" } });
+  for (const point of points) {
+    const left = `${(point.x / width) * 100}%`;
+    const top = `${(point.y / height) * 100}%`;
+    const dot = el("span", { className: "vision-dot" });
+    const label = el("span", { className: point.x / width > 0.6 ? "vision-label flip" : "vision-label", text: point.label || "(이름 없음)" });
+    for (const node of [dot, label]) {
+      node.style.left = left;
+      node.style.top = top;
+    }
+    markers.append(dot, label);
+  }
+  figure.replaceChildren(el("div", { className: "vision-frame" }, [img, markers]));
 }
 
 function proposalState(entry) {

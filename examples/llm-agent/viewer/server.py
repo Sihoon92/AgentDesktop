@@ -3,7 +3,7 @@
 Every request must name this server in its Host header, which defeats DNS
 rebinding. Every /api/ request must also carry the per-launch token in
 X-Agent-Token, which a page from another origin cannot read or forge.
-Run ids and frame names are matched against fixed patterns before any file
+Run ids, frame names and capture names are matched against fixed patterns before any file
 is touched, so a request can never name a path outside the runs folder.
 """
 
@@ -24,6 +24,7 @@ from viewer.run_manager import InvalidRun, RunBusy, RunStartFailed
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 FRAME_NAME = re.compile(r"\d{4}\.png")
+CAPTURE_NAME = re.compile(r"c\d+\.png")
 STATIC_NAME = re.compile(r"[A-Za-z0-9_-]+\.(html|js|css)")
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -53,6 +54,10 @@ class ViewerServer(ThreadingHTTPServer):
 
 def is_frame_name(name):
     return FRAME_NAME.fullmatch(name) is not None
+
+
+def is_capture_name(name):
+    return CAPTURE_NAME.fullmatch(name) is not None
 
 
 def is_static_name(name):
@@ -175,6 +180,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_summary(segments[2])
         if len(segments) == 5 and segments[:2] == ["api", "runs"] and segments[3] == "frames":
             return self._send_frame(segments[2], segments[4])
+        if len(segments) == 5 and segments[:2] == ["api", "runs"] and segments[3] == "captures":
+            return self._send_capture(segments[2], segments[4])
         self._send_json(404, {"error": "없는 경로입니다"})
 
     def do_POST(self):
@@ -454,6 +461,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
         if run_dir is None or not is_frame_name(name):
             return self._send_json(404, {"error": "없는 프레임입니다"})
         self._send_file(run_dir / "frames" / name)
+
+    def _send_capture(self, run_id, name):
+        run_dir = self._run_dir(run_id)
+        if run_dir is None or not is_capture_name(name):
+            return self._send_json(404, {"error": "없는 캡처입니다"})
+        self._send_file(run_dir / "captures" / name)
 
     def _send_static(self, name):
         if not is_static_name(name):

@@ -73,6 +73,18 @@ Rules:
 - If the goal is unreachable, call finish with success=false and say why. Never call finish with
   success=true before the observation shows the goal is met, or while stages are not done.
 """
+VISION_PROMPT = """\
+
+Pictures in this run:
+- You cannot see pictures. Ask the vision model through look's question, one thing at a time, and
+  read the answer in the result's vision. After a mismatched or unconfirmed action the result's
+  vision already holds its answer about the target; there is no attached capture.
+- When vision.marks names a mark, use click_part on it. When only vision.points gives pixels, use
+  click_point with that capture and those pixels.
+- When vision.unsure is true or vision.error is set, ask look again or ask the user. Confirm with
+  ask any target you cannot be sure of from the vision answer alone.
+"""
+"""Added to SYSTEM_PROMPT when a vision model reads the pictures for the text model."""
 COMPLETION_QUESTION = "결과가 맞나요?"
 SUCCESS_STATUSES = ("verified", "confirmed")
 TASK_MET = "작업 파일의 성공 조건을 모두 만족함"
@@ -165,11 +177,16 @@ class _Run:
         self._call_tokens = 0
         self._max_call_tokens = 0
         self._delivered = []
+        self._split = getattr(toolbox, "vision_enabled", False) is True
+        self._instructions = SYSTEM_PROMPT + VISION_PROMPT if self._split else SYSTEM_PROMPT
+        self._vision_calls = 0
+        self._vision_tokens = 0
 
     def run(self):
         briefing = self._toolbox.briefing()
         goal = f"{self._task.goal}\n\n{briefing}" if briefing else self._task.goal
-        self._transcript = Transcript({"role": "user", "content": goal}, self._task.image_mode)
+        image_mode = "off" if self._split else self._task.image_mode
+        self._transcript = Transcript({"role": "user", "content": goal}, image_mode)
         try:
             result = self._turns()
         except AgentStopped as stop:
@@ -179,7 +196,10 @@ class _Run:
             if event is not None:
                 self._log_event(event)
         self._toolbox.stage_records = self._plan.records()
-        return replace(result, stats={**self._plan.stats(), "max_call_tokens": self._max_call_tokens})
+        stats = {**self._plan.stats(), "max_call_tokens": self._max_call_tokens}
+        if self._split:
+            stats.update(vision_calls=self._vision_calls, vision_tokens=self._vision_tokens)
+        return replace(result, stats=stats)
 
     def _turns(self):
         while True:
@@ -198,10 +218,21 @@ class _Run:
                 return self._result("stopped", "The model replied without calling a tool")
             for call in calls:
                 ended, output = self._execute(call)
+                self._count_vision()
                 self._log_tool(call, output)
                 if ended:
                     return self._result(output["status"], output["reason"])
                 self._transcript.add_result(call.call_id, call.name, output, self._toolbox.take_attachments())
+
+    def _count_vision(self):
+        """Adds the vision reads made by the last tool call to the run's tokens, which the token
+        budget checks, and to the vision counts. A stage's call count never includes them."""
+        if not self._split:
+            return
+        calls, tokens = self._toolbox.take_vision_usage()
+        self._vision_calls += calls
+        self._vision_tokens += tokens
+        self._tokens += tokens
 
     def _ceiling(self):
         """Why the run is at its ceiling, or None. Checked before each model call."""
@@ -223,6 +254,7 @@ class _Run:
         if call is None:
             return self._result("stopped", reason)
         ended, output = self._execute(call, at_ceiling=True)
+        self._count_vision()
         self._log_tool(call, output)
         if ended:
             return self._result(output["status"], output["reason"])
@@ -232,7 +264,7 @@ class _Run:
         self._turn += 1
         self._toolbox.step = self._turn
         effort = None if self._plan.exists else self._task.plan_reasoning_effort
-        response = self._model.respond(SYSTEM_PROMPT, self._transcript.view() if items is None else items,
+        response = self._model.respond(self._instructions, self._transcript.view() if items is None else items,
                                        tools, effort=effort)
         self._call_tokens = response.usage.total_tokens if response.usage else 0
         self._tokens += self._call_tokens

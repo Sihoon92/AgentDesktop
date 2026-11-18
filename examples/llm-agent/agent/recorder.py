@@ -35,7 +35,10 @@ HEARTBEAT_S = 10
 REPLACE_ATTEMPTS = 5
 REPLACE_PAUSE_S = 0.02
 MAX_TEXT_ELEMENTS = 400
-META_FIELDS = ("goal", "exe", "model", "permission_level", "started_by", "system", "max_steps", "code")
+META_FIELDS = ("goal", "exe", "model", "permission_level", "started_by", "system", "max_steps", "code", "vision")
+BOOLEAN_META = ("vision",)
+"""Meta fields kept only as true or false, else null: `vision` says whether a vision model read the
+pictures, never which one."""
 WINDOW_FIELDS = ("id", "title", "bounds")
 RESULT_FIELDS = (
     "ok", "disposition", "code", "message", "refused", "post_state",
@@ -48,6 +51,11 @@ MODEL_FIELDS = ("call_tokens", "stage", "stage_calls", "stage_limit")
 STAGE_COUNTS = ("stage_count", "stages_done", "limit_questions", "plan_revisions", "max_call_tokens")
 STAGE_LISTS = ("stage_calls",)
 """The numbers of a run's stages that run.json keeps. Plan and stage texts stay in events.jsonl."""
+VISION_COUNTS = ("vision_calls", "vision_tokens")
+"""The vision counts of a split-mode run that run.json keeps at its top level. The vision
+model's questions and answers stay in events.jsonl."""
+STEP_FILLED_EVENTS = ("capture", "vision")
+"""Toolbox events that get the current step when they come without one."""
 
 
 def _never_raises(method):
@@ -82,7 +90,7 @@ class RunRecorder:
         self._run = {
             "format": RUN_FORMAT,
             "run_id": self.run_id,
-            **{key: meta.get(key) for key in META_FIELDS},
+            **{key: _meta_value(meta, key) for key in META_FIELDS},
             "started_at": _stamp(started),
             "finished_at": None,
             "heartbeat_at": _stamp(started),
@@ -143,9 +151,9 @@ class RunRecorder:
     @_never_raises
     def on_event(self, event):
         """Takes the loop's log events and the toolbox's own events. Model turns, proposals,
-        decisions, captures, questions, answers, knowledge, completion and registration events are
-        recorded; tool calls are not, because on_action already recorded each one. A capture or a
-        question without a step gets the current one. A question is tied to the latest observation
+        decisions, captures, vision reads, questions, answers, knowledge, completion and registration
+        events are recorded; tool calls are not, because on_action already recorded each one. A
+        capture, a vision read or a question without a step gets the current one. A question is tied to the latest observation
         and its screen boxes and points get image coordinates; so does an answer's pin."""
         kind = event.get("type")
         if kind == "question":
@@ -157,11 +165,11 @@ class RunRecorder:
         if kind in KEPT_EVENTS:
             self._append(event)
             return
-        if event.get("type") == "capture":
+        if kind in STEP_FILLED_EVENTS:
             filled = dict(event)
             if filled.get("step") is None:
                 filled["step"] = self._step
-            if filled.get("observation") is None:
+            if kind == "capture" and filled.get("observation") is None:
                 filled["observation"] = self._observations or None
             self._append(filled)
             return
@@ -182,7 +190,8 @@ class RunRecorder:
     @_never_raises
     def finish(self, result):
         """Writes the final status and finished_at, then stops the heartbeat for good. A result
-        with stats (the loop's stage counts) adds their numbers to run.json as `stages`; a result
+        with stats (the loop's stage counts) adds their numbers to run.json as `stages`, and the
+        whole-number vision counts of a split-mode run (VISION_COUNTS) at its top level; a result
         without them, such as one from a run that made no plan, adds nothing."""
         self.close()
         stats = getattr(result, "stats", None)
@@ -193,6 +202,7 @@ class RunRecorder:
                              steps=result.steps, finished_at=stamp, heartbeat_at=stamp)
             if isinstance(stats, dict):
                 self._run["stages"] = _stage_numbers(stats)
+                self._run.update({key: stats[key] for key in VISION_COUNTS if _whole(stats.get(key))})
             self._write_run_locked()
         self._append(
             {
@@ -360,6 +370,13 @@ def _stage_numbers(stats):
         if isinstance(value, list) and all(_whole(item) for item in value):
             numbers[key] = list(value)
     return numbers
+
+
+def _meta_value(meta, key):
+    value = meta.get(key)
+    if key in BOOLEAN_META and not isinstance(value, bool):
+        return None
+    return value
 
 
 def _whole(value):

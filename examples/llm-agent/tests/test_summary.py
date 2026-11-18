@@ -484,3 +484,25 @@ def test_odd_stage_values_are_unknown():
 
     assert "  단계: 4 · 완료 알 수 없음 · 단계별 호출 알 수 없음 · 한도 질문 알 수 없음 · 계획 고침 0" in lines
     assert not any(line.strip().startswith("호출당 토큰 최대") for line in lines)
+
+
+VISION_TEXT = "ZQX-비전글-4410"
+VISION_EVENT = {"type": "vision", "step": 3, "capture": "c1", "asked_by": "look", "question": f"{VISION_TEXT} 질문",
+                "answer": f"{VISION_TEXT} 답", "marks": [2], "points": [{"label": VISION_TEXT, "x": 1, "y": 2}],
+                "unsure": False, "error": "TimeoutError", "dropped": 0, "tokens": 700, "seconds": 1.0}
+
+
+def test_summary_has_a_vision_line_in_split_mode():
+    lines = summarize({"status": "verified", "vision_calls": 2, "vision_tokens": 1500}, [VISION_EVENT])
+
+    assert "  비전 호출 2 · 비전 토큰 1500" in lines
+    assert VISION_TEXT not in "\n".join(lines)
+
+
+@pytest.mark.parametrize("run", [{"status": "verified"}, {"status": "verified", "vision_calls": 2},
+                                 {"status": "verified", "vision_calls": "2", "vision_tokens": 5},
+                                 {"status": "verified", "vision_calls": -1, "vision_tokens": 5}])
+def test_summary_has_no_vision_line_without_vision(run):
+    lines = summarize(run, [VISION_EVENT])
+
+    assert not any("비전" in line for line in lines)

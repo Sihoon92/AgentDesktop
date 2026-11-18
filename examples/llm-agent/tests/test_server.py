@@ -137,6 +137,87 @@ def test_events_since_returns_only_new_lines(server):
     assert payload["next"] == 3
 
 
+VISION_EVENT = {
+    "type": "vision", "step": 7, "capture": "c3", "asked_by": "look", "question": "<b>which</b> mark?",
+    "answer": "mark 3 </script>", "marks": [3], "points": [{"label": "point <i>", "x": 412, "y": 88}],
+    "unsure": False, "error": None, "dropped": 0, "tokens": 812, "seconds": 2.4,
+}
+
+
+def test_vision_event_is_served_with_the_run(server):
+    instance, runs_dir = server
+    events = [{"type": "observation", "id": 1}, {"type": "capture", "id": "c3", "step": 7, "file": "captures/c3.png"},
+              VISION_EVENT]
+    write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z", events)
+
+    status, _, body = request(instance, "/api/runs/20261107-120000/events?since=0")
+
+    assert status == 200
+    assert json.loads(body)["events"] == events
+
+
+def write_capture(run, name="c3.png"):
+    (run / "captures").mkdir(exist_ok=True)
+    (run / "captures" / name).write_bytes(PNG_BYTES + name.encode())
+
+
+def test_capture_is_served_as_png(server):
+    instance, runs_dir = server
+    write_capture(write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z"), "c12.png")
+
+    status, content_type, body = request(instance, "/api/runs/20261107-120000/captures/c12.png")
+
+    assert status == 200
+    assert content_type == "image/png"
+    assert body == PNG_BYTES + b"c12.png"
+
+
+def test_capture_needs_the_token_and_the_right_host(server):
+    instance, runs_dir = server
+    write_capture(write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z"))
+    port = instance.server_address[1]
+    path = "/api/runs/20261107-120000/captures/c3.png"
+
+    assert request(instance, path, {"X-Agent-Token": None})[0] == 403
+    assert request(instance, path, {"X-Agent-Token": "nope"})[0] == 403
+    assert request(instance, path, {"Host": f"attacker.example:{port}"})[0] == 403
+
+
+def test_capture_names_and_traversal_are_404(server):
+    instance, runs_dir = server
+    run = write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z")
+    write_capture(run)
+    (run / "captures" / "c3.txt").write_text("secret", encoding="utf-8")
+    (run / "captures" / "x3.png").write_text("secret", encoding="utf-8")
+
+    paths = [
+        "/api/runs/20261107-120000/captures/c3.txt",
+        "/api/runs/20261107-120000/captures/x3.png",
+        "/api/runs/20261107-120000/captures/c.png",
+        "/api/runs/20261107-120000/captures/c3.png%0A",
+        "/api/runs/20261107-120000/captures/c3.png/../x",
+        "/api/runs/20261107-120000/captures/..%2F..%2F..%2Frun.py",
+        "/api/runs/20261107-120000/captures/..%2Frun.json",
+        "/api/runs/20261107-120000/captures/c99.png",
+        "/api/runs/..%2F..%2Frun.py/captures/c3.png",
+        "/api/runs/20261107-120000%0A/captures/c3.png",
+    ]
+
+    for path in paths:
+        status, _, body = request(instance, path)
+        assert status == 404, path
+        assert b"secret" not in body
+
+
+def test_capture_name_pattern():
+    assert server_module.is_capture_name("c3.png")
+    assert server_module.is_capture_name("c120.png")
+    assert not server_module.is_capture_name("c3.png\n")
+    assert not server_module.is_capture_name("c.png")
+    assert not server_module.is_capture_name("0001.png")
+    assert not server_module.is_capture_name("../c3.png")
+
+
 def test_path_traversal_in_run_id_or_frame_is_404(server):
     instance, runs_dir = server
     write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z")

@@ -5,7 +5,8 @@ knowledge and file paths. None of that may leave the machine the run happened on
 summary is built only from counts, codes, tool names and verdicts. Every printed word comes
 from this module or passes CODE: a status, tool name or error code that is not a plain
 identifier is printed as OTHER instead. The counts come from events.jsonl, except the stage
-counts, which come from run.json's `stages` (numbers only, written when the run ends); a value
+counts, which come from run.json's `stages` (numbers only, written when the run ends), and the
+vision counts of a split-mode run, from run.json's `vision_calls` and `vision_tokens`; a value
 the record does not hold is printed as UNKNOWN or its line is left out. The texts of a plan and
 its stages are never read.
 
@@ -64,6 +65,9 @@ def summarize(run, events, code=None):
     largest = _count(stages.get("max_call_tokens"))
     if largest is not None:
         lines.append(f"  호출당 토큰 최대: {largest}")
+    vision_calls, vision_tokens = _count(run.get("vision_calls")), _count(run.get("vision_tokens"))
+    if vision_calls is not None and vision_tokens is not None:
+        lines.append(f"  비전 호출 {vision_calls}{SEPARATOR}비전 토큰 {vision_tokens}")
     knowledge = _knowledge(events)
     if knowledge:
         lines.append("  지식: " + knowledge)
