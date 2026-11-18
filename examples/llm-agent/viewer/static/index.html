@@ -19,7 +19,22 @@
       <button type="button" id="show-knowledge" aria-pressed="false">지식</button>
     </div>
     <p class="hint" id="key-hint">← → 스텝 이동 · B 동작 전/후 · A 전체 요소/대상만 · T 텍스트 박스 · V 다음 비전 스텝</p>
+    <div class="viewer-controls">
+      <span id="control-status" class="control-status" role="status" aria-live="polite"></span>
+      <button type="button" id="stop-run" class="ghost stop-run" hidden disabled title="진행 중인 실행을 다음 안전한 자리에서 멈춥니다. 대상 앱은 닫지 않습니다">실행 멈춤</button>
+      <button type="button" id="shutdown-viewer" class="ghost shutdown-viewer" hidden title="뷰어 서버를 끕니다">뷰어 종료</button>
+    </div>
   </header>
+
+  <div id="confirm-strip" class="confirm-strip" role="group" aria-labelledby="confirm-text" hidden>
+    <span id="confirm-text" class="confirm-text"></span>
+    <button type="button" id="confirm-yes" class="danger"></button>
+    <button type="button" id="confirm-no" class="ghost">취소</button>
+  </div>
+
+  <div id="closed-cover" class="closed-cover" hidden>
+    <p id="closed-text" class="closed-text" role="status" aria-live="polite" tabindex="-1"></p>
+  </div>
 
   <div id="export-warning" class="export-warning" role="note" hidden></div>
 

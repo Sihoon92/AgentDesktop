@@ -111,6 +111,7 @@ class Toolbox(AskingTools, ScreenTools):
         self._instance = None
         self._current_window = None
         self._ready = False
+        self._ready_cancelled = None
         self._refs = {}
         self._view_origin = None
         self._last_read = None
@@ -255,16 +256,19 @@ class Toolbox(AskingTools, ScreenTools):
         if self._last_read is not None:
             self._observer.on_observation(*self._last_read, source="wait_for_text", wait=wait)
 
-    def launch_ready(self):
+    def launch_ready(self, cancelled=None):
         """Launches the target and waits until a window shows the task's ready signal (agent/ready.py),
         then makes that window's process the target and that window the current one. Sends a ready
         start and end event, and records the ready window as one observation with source "ready",
         from the very read that found the signal. Returns {"ok": True, "pid", "windows", "ready":
         {"waited_ms", "switched"}}, or {"ok": False, "code": "READY_<STATUS>", "message"} with the
-        reason in the words of READY_MESSAGES. No approval is asked: starting the run asked for it."""
+        reason in the words of READY_MESSAGES. No approval is asked: starting the run asked for it.
+        `cancelled()` true ends the wait as READY_CANCELLED; a restart_target waits with the same one."""
+        if cancelled is not None:
+            self._ready_cancelled = cancelled
         self._emit({"type": "ready", "phase": "start"})
         outcome = wait_until_ready(self._desktop, self._task.exe, self._task.ready_text, self._task.ready_timeout_s,
-                                   self.clock, self.sleep)
+                                   self.clock, self.sleep, cancelled=self._ready_cancelled)
         if outcome.status == "ready":
             self._pid = outcome.pid
             self._instance = outcome.instance

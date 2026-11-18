@@ -1077,3 +1077,24 @@ def test_a_ready_run_is_recorded_from_the_toolbox_to_the_summary(tmp_path):
     summary = summary_of(recorder.path)
     assert "  준비: ready · 4초 · 대상 바뀜" in summary
     assert SIGNAL not in "\n".join(summary)
+
+
+def test_stop_requested_is_kept_with_the_current_step(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event({"type": "model", "step": 3, "tokens": 100})
+
+    recorder.on_event({"type": "stop_requested"})
+
+    assert [event for event in events(recorder) if event["type"] == "stop_requested"] == [
+        {"type": "stop_requested", "step": 3}]
+    assert "stop_requested" not in json.dumps(run_json(recorder))
+
+
+def test_stop_requested_after_the_finish_is_not_recorded(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.finish(RunResult("stopped", 1, "사용자가 실행을 멈췄습니다", 100))
+
+    recorder.on_event({"type": "stop_requested"})
+
+    assert [event["type"] for event in events(recorder)][-1] == "finish"
+    assert all(event["type"] != "stop_requested" for event in events(recorder))

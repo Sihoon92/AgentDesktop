@@ -76,6 +76,12 @@ const state = {
   stageDetailOpen: false,
   stageCache: null,
   panelPrefs: {},
+  stopRequested: null,
+  pendingConfirm: null,
+  closing: null,
+  timers: {},
+  statusPolling: false,
+  closePolling: false,
 };
 const PANEL_KEY = "agent-viewer-panels";
 const FOLDABLE = ["runs", "chat", "details", "settings"];
@@ -153,6 +159,7 @@ function formatTime(text) {
 }
 
 function showBanner(messages) {
+  if (state.closing) return;
   const banner = $("banner");
   const lines = messages.filter(Boolean);
   banner.replaceChildren(...lines.map((line) => el("div", { text: line })));
@@ -841,7 +848,7 @@ function followLatest() {
 }
 
 async function pollLive() {
-  if (state.polling || !isLive()) return;
+  if (state.closing || state.polling || !isLive()) return;
   state.polling = true;
   const runId = state.runId;
   try {
@@ -1616,6 +1623,7 @@ function positionLabels() {
 }
 
 async function loadStatus() {
+  if (state.closing) return;
   try {
     const response = await api("/api/status");
     state.status = await response.json();
@@ -1623,7 +1631,9 @@ async function loadStatus() {
     showBanner([error.message]);
     return;
   }
+  if (state.closing) return;
   renderStartForm();
+  renderViewerControls();
   if (state.runId) {
     renderChat();
     renderToggles();
@@ -1780,6 +1790,223 @@ async function submitRun(event) {
   await selectRun(body.run_id, "run");
 }
 
+/* ---------- stopping a run and closing the viewer ---------- */
+
+/* Two buttons on the top bar. "실행 멈춤" shows wherever runs can start and is enabled only while
+   one runs; the server stops that run at its next safe point and leaves the target app open, so
+   the button reads "멈추는 중…" until the status says the run ended. "뷰어 종료" shows only when
+   the server offers it (view.py, not run.py --view). Both confirm in a strip on the page, never in
+   a browser dialog. Closing first asks without stopping the run; a 409 means a run is active, and
+   the strip asks before sending stop_run. Once the server agreed to close, every poll stops and a
+   cover over the page says how to open the viewer again. */
+const STOP_CONFIRM = "실행을 멈출까요? 대상 앱은 그대로 둡니다.";
+const SHUTDOWN_CONFIRM = "실행 중인 작업을 멈추고 뷰어를 종료할까요?";
+const CLOSING_TEXT = "종료하는 중…";
+const CLOSING_RUN_TEXT = "종료하는 중… 실행을 멈추고 기록을 마무리하고 있습니다.";
+const CLOSED_TEXT = "뷰어를 종료했습니다. 다시 열려면 터미널에서 python view.py";
+
+async function postJson(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Agent-Token": state.token || "" },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+  const body = await response.json().catch(() => null);
+  return { status: response.status, body: body && typeof body === "object" ? body : {} };
+}
+
+function runStopping() {
+  const status = state.status;
+  if (!status || !status.active) return false;
+  return status.stopping === true || state.stopRequested === status.active;
+}
+
+function renderViewerControls() {
+  const status = state.status;
+  if (state.stopRequested && (!status || status.active !== state.stopRequested)) state.stopRequested = null;
+  const stopping = runStopping();
+  const stop = $("stop-run");
+  stop.hidden = !status || !status.can_start;
+  stop.disabled = Boolean(state.closing) || !status || !status.active || stopping;
+  stop.textContent = stopping ? "멈추는 중…" : "실행 멈춤";
+  const shutdown = $("shutdown-viewer");
+  shutdown.hidden = !status || status.can_shutdown !== true;
+  shutdown.disabled = Boolean(state.closing);
+  const pending = state.pendingConfirm;
+  if (pending && pending.kind === "stop" && (stopping || !status || status.active !== pending.runId)) hideConfirm();
+  if (stopping) watchStopping();
+}
+
+function setControlMessage(text) {
+  $("control-status").textContent = text || "";
+}
+
+function showConfirm(kind, text, yesLabel, onYes, runId = null) {
+  state.pendingConfirm = { kind, onYes, runId };
+  $("confirm-text").textContent = text;
+  $("confirm-yes").textContent = yesLabel;
+  $("confirm-strip").hidden = false;
+  $("confirm-no").focus();
+}
+
+function hideConfirm() {
+  state.pendingConfirm = null;
+  $("confirm-strip").hidden = true;
+}
+
+function acceptConfirm() {
+  const pending = state.pendingConfirm;
+  hideConfirm();
+  if (pending) pending.onYes();
+}
+
+function askStop() {
+  const runId = state.status && state.status.active;
+  if (state.closing || !runId || runStopping()) return;
+  setControlMessage("");
+  showConfirm("stop", STOP_CONFIRM, "멈춤", () => sendStop(runId), runId);
+}
+
+async function sendStop(runId) {
+  let result;
+  try {
+    result = await postJson("/api/runs/" + encodeURIComponent(runId) + "/stop", {});
+  } catch (error) {
+    setControlMessage(`서버에 연결하지 못했습니다: ${error.message}`);
+    return;
+  }
+  if (result.status === 200) {
+    state.stopRequested = runId;
+    renderViewerControls();
+  } else {
+    setControlMessage(result.body.error || `실행을 멈추지 못했습니다 (${result.status})`);
+  }
+  await loadStatus();
+}
+
+/* While a stop is pending the status is read every second, so the button turns back once the
+   run has written its record; runs that are not stopping keep the status reads they had. */
+function watchStopping() {
+  if (state.timers.stopping || state.closing) return;
+  state.timers.stopping = setInterval(pollStopping, POLL_MS);
+}
+
+async function pollStopping() {
+  if (state.closing || state.statusPolling) return;
+  state.statusPolling = true;
+  try {
+    await loadStatus();
+  } finally {
+    state.statusPolling = false;
+  }
+  if (state.closing || runStopping()) return;
+  clearInterval(state.timers.stopping);
+  state.timers.stopping = null;
+  try {
+    await fetchRuns();
+  } catch (error) {
+    showBanner([error.message]);
+  }
+}
+
+async function askShutdown() {
+  if (state.closing) return;
+  hideConfirm();
+  setControlMessage("");
+  await sendShutdown(false);
+}
+
+async function sendShutdown(stopRun) {
+  $("shutdown-viewer").disabled = true;
+  let result;
+  try {
+    result = await postJson("/api/shutdown", { stop_run: stopRun });
+  } catch (error) {
+    setControlMessage(`서버에 연결하지 못했습니다: ${error.message}`);
+    renderViewerControls();
+    return;
+  }
+  if (result.status === 202) {
+    beginClosing(result.body.run_stopping === true);
+    return;
+  }
+  if (result.status === 409 && !stopRun) {
+    renderViewerControls();
+    showConfirm("shutdown", SHUTDOWN_CONFIRM, "멈추고 종료", () => sendShutdown(true));
+    return;
+  }
+  if (result.status === 404) {
+    if (state.status) state.status.can_shutdown = false;
+    setControlMessage("이 뷰어는 화면에서 끌 수 없습니다. 띄운 터미널에서 끄세요.");
+  } else {
+    setControlMessage(result.body.error || `뷰어를 종료하지 못했습니다 (${result.status})`);
+  }
+  renderViewerControls();
+}
+
+function stopPolling() {
+  for (const name of Object.keys(state.timers)) {
+    if (state.timers[name]) clearInterval(state.timers[name]);
+    state.timers[name] = null;
+  }
+}
+
+function showCover(text) {
+  $("closed-text").textContent = text;
+  const cover = $("closed-cover");
+  if (cover.hidden) {
+    for (const node of Array.from(document.body.children)) if (node !== cover) node.inert = true;
+    cover.hidden = false;
+  }
+  $("closed-text").focus();
+}
+
+function beginClosing(runWillStop) {
+  state.closing = "closing";
+  hideConfirm();
+  stopPolling();
+  renderViewerControls();
+  showCover(runWillStop ? CLOSING_RUN_TEXT : CLOSING_TEXT);
+  state.timers.closed = setInterval(pollClosed, POLL_MS);
+}
+
+/* The server answers until it has closed, which can take up to two minutes while a stopped run
+   writes its record. A refused connection, or an answer from some other server that does not
+   know this token, means this viewer is gone. */
+async function pollClosed() {
+  if (state.closing !== "closing" || state.closePolling) return;
+  state.closePolling = true;
+  let gone = false;
+  try {
+    const response = await fetch("/api/status", { headers: { "X-Agent-Token": state.token || "" }, cache: "no-store" });
+    gone = !response.ok;
+  } catch (_) {
+    gone = true;
+  } finally {
+    state.closePolling = false;
+  }
+  if (gone && state.closing === "closing") finishClosing();
+}
+
+function finishClosing() {
+  state.closing = "closed";
+  stopPolling();
+  showCover(CLOSED_TEXT);
+}
+
+function watchViewerControls() {
+  $("stop-run").addEventListener("click", askStop);
+  $("shutdown-viewer").addEventListener("click", askShutdown);
+  $("confirm-yes").addEventListener("click", acceptConfirm);
+  $("confirm-no").addEventListener("click", hideConfirm);
+  $("confirm-strip").addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    hideConfirm();
+  });
+}
+
 function fillLevels() {
   const select = $("level");
   select.replaceChildren(...LEVEL_LABELS.map((label, level) => el("option", { text: label, attrs: { value: String(level) } })));
@@ -1833,6 +2060,7 @@ function toggleTexts() {
 }
 
 function onKey(event) {
+  if (state.closing) return;
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   if (document.body.classList.contains("knowledge-mode")) return;
   const tag = (event.target.tagName || "").toLowerCase();
@@ -1982,11 +2210,12 @@ function start() {
     showBanner(["접속 토큰이 없습니다. view.py가 터미널에 출력한 주소로 여세요."]);
     return;
   }
+  watchViewerControls();
   initKnowledge();
   loadStatus();
   loadRuns();
-  setInterval(pollLive, POLL_MS);
-  setInterval(renderReadyBanner, POLL_MS);
+  state.timers.live = setInterval(pollLive, POLL_MS);
+  state.timers.ready = setInterval(renderReadyBanner, POLL_MS);
 }
 
 start();

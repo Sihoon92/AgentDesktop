@@ -7,10 +7,13 @@ A run started with approval holds each app-changing action until decide() answer
 Every run gets an ask gate, so a question from the agent waits until answer() replies, and the
 knowledge store of its system, so a confirmed run can register what the person taught it.
 Every run that ends leaves summary.txt in its folder, as a run.py run does.
+stop() asks the active run to stop at its next safe place (agent.loop): each run gets its own
+stop signal, so a stop never reaches the next run, and the target app is left open.
 """
 
 import functools
 import threading
+import time
 from pathlib import Path, PureWindowsPath
 
 from agent.approval import ApprovalGate, Decision
@@ -88,6 +91,8 @@ class RunManager:
         self._gate = None
         self._ask_gate = None
         self._thread = None
+        self._stop = None
+        self._recorder = None
 
     def active(self):
         with self._lock:
@@ -132,6 +137,42 @@ class RunManager:
         reply = Answer(text=text, pin=tuple(pin) if pin is not None else None, accepted=accepted,
                        items=tuple(items))
         return gate.answer(question_id, reply)
+
+    def stop(self, run_id):
+        """Asks the active run `run_id` to stop: sets its stop signal, answers what its gates hold
+        with no answer, and records stop_requested once. False when that run is not active."""
+        with self._lock:
+            if run_id != self._active or self._stop is None:
+                return False
+            first = not self._stop.is_set()
+            self._stop.set()
+            gates = [gate for gate in (self._gate, self._ask_gate) if gate is not None]
+            recorder = self._recorder
+        for gate in gates:
+            gate.close()
+        if first and recorder is not None:
+            recorder.on_event({"type": "stop_requested"})
+        return True
+
+    def stop_and_wait(self, timeout_s):
+        """Stops the active run, if any, and waits up to `timeout_s` for its thread to end. True
+        when no run is active at the end. A run still starting is waited for first."""
+        deadline = time.monotonic() + timeout_s
+        active = self.active()
+        while active == "starting" and time.monotonic() < deadline:
+            time.sleep(0.05)
+            active = self.active()
+        if active is not None and active != "starting":
+            self.stop(active)
+            thread = self._thread
+            if thread is not None:
+                thread.join(max(0.0, deadline - time.monotonic()))
+        return self.active() is None
+
+    def stopping(self):
+        """True once stop() was asked of the active run and until that run has ended."""
+        with self._lock:
+            return self._active is not None and self._stop is not None and self._stop.is_set()
 
     def can_answer(self):
         """True while a run is active and its questions can be answered here."""
@@ -183,13 +224,16 @@ class RunManager:
             _leave_summary(recorder.path)
             self._release()
             raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
+        stop = threading.Event()
         with self._lock:
             self._active = recorder.run_id
             self._gate = gate
             self._ask_gate = ask_gate
+            self._stop = stop
+            self._recorder = recorder
             self._thread = threading.Thread(
-                target=self._run, args=(model, toolbox, task, recorder, gate, register), name=f"run-{recorder.run_id}",
-                daemon=True,
+                target=self._run, args=(model, toolbox, task, recorder, gate, register, stop),
+                name=f"run-{recorder.run_id}", daemon=True,
             )
             self._thread.start()
         return recorder.run_id
@@ -252,9 +296,9 @@ class RunManager:
         except KnowledgeError as error:
             raise InvalidRun("시스템 이름은 영문, 숫자, 한글, '.', '_', '-'로 64자까지 쓸 수 있습니다") from error
 
-    def _run(self, model, toolbox, task, recorder, gate, register):
+    def _run(self, model, toolbox, task, recorder, gate, register, stop):
         try:
-            result = run_agent(model, toolbox, task, recorder.on_event, gate=gate, register=register)
+            result = run_agent(model, toolbox, task, recorder.on_event, gate=gate, register=register, stop=stop)
         except Exception as error:
             result = RunResult("stopped", 0, f"실행 중 오류: {type(error).__name__}: {error}")
         try:
@@ -268,6 +312,8 @@ class RunManager:
             self._active = None
             self._gate = None
             self._ask_gate = None
+            self._stop = None
+            self._recorder = None
 
     def _meta(self, task, system):
         return {

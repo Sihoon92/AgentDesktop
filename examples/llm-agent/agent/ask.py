@@ -30,6 +30,7 @@ class AskGate:
     """Holds each question until answer() replies from any thread, or the timeout passes.
 
     An unanswered question becomes NO_ANSWER, so a closed viewer never blocks a run forever.
+    After close() every question, waiting or still to come, is NO_ANSWER at once.
     """
 
     interactive = True
@@ -39,6 +40,7 @@ class AskGate:
         self._clock = clock
         self._changed = threading.Condition()
         self._waiting = {}
+        self._closed = False
 
     def ask(self, question, on_waiting=None):
         """Waits for the answer. `on_waiting` runs once the question can be answered and before
@@ -46,6 +48,8 @@ class AskGate:
         recorded can answer at once. If it raises, the question stops waiting and the error goes on."""
         question_id = question["id"]
         with self._changed:
+            if self._closed:
+                return NO_ANSWER
             self._waiting[question_id] = _PENDING
         if on_waiting is not None:
             try:
@@ -63,6 +67,16 @@ class AskGate:
                     return NO_ANSWER
                 self._changed.wait(remaining)
             return self._waiting.pop(question_id)
+
+    def close(self):
+        """Answers every waiting question with NO_ANSWER, and every later one at once; for a
+        stopped run."""
+        with self._changed:
+            self._closed = True
+            for question_id, value in self._waiting.items():
+                if value is _PENDING:
+                    self._waiting[question_id] = NO_ANSWER
+            self._changed.notify_all()
 
     def answer(self, question_id, answer):
         """Answers a waiting question. Returns False for an unknown or already answered id."""

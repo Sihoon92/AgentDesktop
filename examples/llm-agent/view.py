@@ -4,6 +4,10 @@
 the viewer: `--prune` lists old runs to delete (and deletes them with --yes),
 `--export <run_id|latest> <out.html>` writes one run as a file that opens without a server, and
 `--summary <run_id|latest>` prints a run's summary, which holds no screen content.
+
+The viewer marks itself in the runs folder (`.viewer.json`), so opening it again takes over an
+idle old viewer instead of sharing its port, and `--stop` shuts down the one left running.
+Ctrl+C (and Ctrl+Break) stops a run in progress before closing; a second press closes at once.
 """
 
 import argparse
@@ -11,6 +15,7 @@ import functools
 import os
 import re
 import secrets
+import signal
 import sys
 import webbrowser
 from datetime import datetime, timedelta, timezone
@@ -25,9 +30,18 @@ from agent.settings import SettingsError, load_settings, settings_path
 from run import ENV_FILES, RUNS_DIR, find_binary
 from viewer.export import write_export
 from viewer.history import RunIndex, is_run_id
+from viewer.instance import (
+    INSTANCE_FILE,
+    clear_instance,
+    instance_alive,
+    open_viewer,
+    read_instance,
+    request_shutdown,
+    write_instance,
+)
 from viewer.retention import delete_plan, format_plan, plan_prune
 from viewer.run_manager import RunManager, RunStartFailed
-from viewer.server import STATIC_DIR, make_server, summary_lines
+from viewer.server import SHUTDOWN_WAIT_S, STATIC_DIR, make_server, summary_lines
 
 DAYS = re.compile(r"([0-9]+)d")
 COUNT = re.compile(r"[0-9]+")
@@ -161,6 +175,50 @@ def show_summary(runs_dir, value):
     return 0
 
 
+def stop_viewer(runs_dir):
+    """Asks the viewer marked in the runs folder to stop its run and shut down. A marker whose
+    process is gone (or that cannot be read) is removed. Returns the exit code."""
+    info = read_instance(runs_dir)
+    if info is None or not instance_alive(info):
+        try:
+            (runs_dir / INSTANCE_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
+        print("떠 있는 뷰어가 없습니다")
+        return 0
+    status, body = request_shutdown(info, stop_run=True)
+    if status != 202:
+        reason = f"응답 {status}" if status is not None else "연결하지 못함"
+        print(f"오류: 포트 {info['port']}의 뷰어가 종료 요청을 받지 않았습니다({reason})", file=sys.stderr)
+        return 1
+    running = " 진행 중인 실행을 멈춘 뒤 닫힙니다" if body.get("run_stopping") else ""
+    print(f"포트 {info['port']}의 뷰어를 종료합니다.{running}")
+    return 0
+
+
+def wind_down(run_manager):
+    """After Ctrl+C: stops the run in progress and waits for its records, up to SHUTDOWN_WAIT_S.
+    A second Ctrl+C ends only the waiting. The target app stays open either way."""
+    if run_manager is None or run_manager.active() is None:
+        return
+    print("실행을 멈추는 중입니다. 바로 끄려면 Ctrl+C를 한 번 더 누르세요")
+    try:
+        finished = run_manager.stop_and_wait(SHUTDOWN_WAIT_S)
+    except KeyboardInterrupt:
+        print("기다리지 않고 끕니다. 그 실행은 나중에 끊김으로 보입니다")
+        return
+    if not finished:
+        print(f"실행이 {SHUTDOWN_WAIT_S}초 안에 끝나지 않아 기다리지 않고 끕니다")
+
+
+def _break_as_interrupt():
+    """Makes Ctrl+Break raise KeyboardInterrupt like Ctrl+C. Returns how to put it back."""
+    if not hasattr(signal, "SIGBREAK"):
+        return lambda: None
+    previous = signal.signal(signal.SIGBREAK, signal.default_int_handler)
+    return lambda: signal.signal(signal.SIGBREAK, previous)
+
+
 def _export_source(runs_dir, value):
     """(path to export, None), or (None, why not)."""
     if value == "latest":
@@ -180,6 +238,8 @@ def _export_source(runs_dir, value):
 
 
 def _check_modes(parser, args):
+    if args.stop and (args.summary or args.prune or args.export or args.open):
+        parser.error("--stop은 --summary·--prune·--export·--open과 함께 쓸 수 없습니다")
     if args.summary and (args.prune or args.export or args.open):
         parser.error("--summary는 --prune·--export·--open과 함께 쓸 수 없습니다")
     if args.prune and args.export:
@@ -209,6 +269,8 @@ def main(argv=None):
                         help="Write this run (or 'latest') as one HTML file that opens without a server")
     parser.add_argument("--summary", metavar="RUN_ID",
                         help="Print this run's (or 'latest') summary of counts and codes, with no screen content")
+    parser.add_argument("--stop", action="store_true",
+                        help="Shut down the viewer left running for this runs folder, stopping its run first")
     parser.add_argument("--profile", help="Load .env.<profile> before .env (default: AGENT_PROFILE)")
     args = parser.parse_args(argv)
     _check_modes(parser, args)
@@ -219,6 +281,8 @@ def main(argv=None):
         return export(runs_dir, args.export[0], Path(args.export[1]))
     if args.summary:
         return show_summary(runs_dir, args.summary)
+    if args.stop:
+        return stop_viewer(runs_dir)
     try:
         profile = load_env(args.profile, ENV_FILES, loader=lambda path: load_dotenv(path))
     except ProfileError as error:
@@ -235,12 +299,23 @@ def main(argv=None):
     run_manager, notice = build_run_manager(runs_dir, args.exe or settings.get("exe"), knowledge_dir=knowledge_dir,
                                             task_defaults=settings)
     token = secrets.token_urlsafe(32)
+
+    def make(port):
+        return make_server(runs_dir, token, port=port, run_manager=run_manager,
+                           knowledge_dir=knowledge_dir, allow_shutdown=True)
+
     try:
-        server = make_server(runs_dir, token, port=args.port, run_manager=run_manager,
-                             knowledge_dir=knowledge_dir)
+        server, takeover = open_viewer(runs_dir, args.port, make)
     except OSError as error:
         print(f"오류: 127.0.0.1:{args.port}에서 서버를 열지 못했습니다: {error}", file=sys.stderr)
         return 2
+    if takeover:
+        print(takeover)
+    try:
+        write_instance(runs_dir, server.server_port, token)
+    except OSError as error:
+        print(f"경고: 뷰어 표시 파일을 쓰지 못해 다음에 이 뷰어를 알아보지 못합니다({type(error).__name__})",
+              file=sys.stderr)
     fragment, warning = open_fragment(runs_dir, args.open)
     if warning:
         print(warning, file=sys.stderr)
@@ -252,15 +327,21 @@ def main(argv=None):
         print(f"설정 파일: {settings_path()} ({', '.join(settings)})")
     if notice:
         print(notice)
-    print("끝내려면 Ctrl+C를 누르세요.")
+    print("끝내려면 Ctrl+C를 누르거나 뷰어의 종료 버튼을 누르세요.")
     if not args.no_browser:
         webbrowser.open(url)
+    restore_break = _break_as_interrupt()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        try:
+            wind_down(run_manager)
+        except KeyboardInterrupt:
+            pass
     finally:
         server.server_close()
+        clear_instance(runs_dir, token)
+        restore_break()
     return 0
 
 

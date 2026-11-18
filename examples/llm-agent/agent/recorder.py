@@ -47,7 +47,7 @@ RESULT_FIELDS = (
     "expect", "effects", "expected_met", "verdict", "knowledge_id", "refused_code", "capture",
 )
 KEPT_EVENTS = ("knowledge_loaded", "knowledge_used", "knowledge_failed", "completion", "registration", "warning",
-               "plan", "stage")
+               "plan", "stage", "stop_requested")
 MODEL_FIELDS = ("call_tokens", "stage", "stage_calls", "stage_limit")
 """Counts a model event may carry besides step and tokens; each is kept only when present."""
 STAGE_COUNTS = ("stage_count", "stages_done", "limit_questions", "plan_revisions", "max_call_tokens")
@@ -164,6 +164,9 @@ class RunRecorder:
         if kind == "answer":
             self._append(self._mapped_answer(event))
             return
+        if kind == "stop_requested":
+            self._note_stop_requested(event)
+            return
         if kind in KEPT_EVENTS:
             self._append(event)
             return
@@ -233,6 +236,15 @@ class RunRecorder:
         with self._run_lock:
             self._run["ready"] = {"status": status, "waited_s": round(waited_ms / 1000), "switched": switched}
             self._write_run_locked()
+
+    def _note_stop_requested(self, event):
+        """Keeps the stop request with the current step, unless the run already finished: a stop
+        that comes too late is never written after the finish event."""
+        with self._run_lock:
+            if self._finished:
+                return
+            self._write_line({**event, "step": event.get("step", self._step)})
+        self._heartbeat()
 
     def close(self):
         """Stops the heartbeat thread without finishing the run. Safe to call more than once."""
@@ -331,10 +343,13 @@ class RunRecorder:
         return {**event, "pin": {**pin, "image_point": _point(pin["point"], self._frame_geometry())}}
 
     def _append(self, event):
+        self._write_line(event)
+        self._heartbeat()
+
+    def _write_line(self, event):
         line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
         with (self.path / "events.jsonl").open("a", encoding="utf-8") as file:
             file.write(line)
-        self._heartbeat()
 
     def _write_run(self):
         with self._run_lock:

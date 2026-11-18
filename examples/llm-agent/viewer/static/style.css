@@ -75,8 +75,9 @@ h1, h2, h3 { margin: 0; font-weight: 650; }
 
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 16px;
+  gap: 8px 16px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
@@ -536,6 +537,8 @@ pre {
 
 @media (max-width: 720px) {
   .hint { display: none; }
+  .topbar { padding: 8px 12px; gap: 6px 10px; }
+  .viewer-controls button { padding: 4px 8px; }
   .settings-summary { display: none; }
   .start-row { flex-wrap: wrap; }
   .start-status { order: 1; flex-basis: 100%; }
@@ -904,3 +907,38 @@ pre {
 }
 .timeline button[aria-current="step"] .vision-badge { background: #fff; color: var(--focus); }
 .timeline .dot.look { background: var(--focus); border-radius: 2px; }
+
+/* stopping a run and closing the viewer */
+.viewer-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 8px; margin-left: auto; align-self: center; min-width: 0; }
+.viewer-controls button { white-space: nowrap; }
+.viewer-controls button:disabled { opacity: 0.5; cursor: default; }
+.viewer-controls button[hidden] { display: none; }
+.stop-run:not(:disabled) { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, var(--border)); }
+.control-status { color: var(--bad); font-size: 12px; overflow-wrap: anywhere; min-width: 0; }
+.control-status:empty { display: none; }
+.confirm-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 8px 16px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  border-bottom: 1px solid var(--warn);
+}
+.confirm-strip[hidden] { display: none; }
+.confirm-text { flex: 1 1 16em; min-width: 0; overflow-wrap: anywhere; }
+.confirm-strip button { flex: none; }
+.confirm-strip .danger { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 600; }
+.closed-cover {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--bg);
+}
+.closed-cover[hidden] { display: none; }
+.closed-text { max-width: 32em; margin: 0; font-size: 16px; text-align: center; overflow-wrap: anywhere; outline: none; }

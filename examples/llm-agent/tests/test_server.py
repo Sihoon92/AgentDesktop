@@ -476,7 +476,7 @@ def test_status_reports_the_active_run_and_default_exe(tmp_path):
 
     assert json.loads(idle) == {"can_start": True, "active": None, "default_exe": str(exe),
                                  "can_answer": False, "default_system": None, "default_stage_call_limit": 8,
-                                 "systems": [], "default_choice": None}
+                                 "systems": [], "default_choice": None, "can_shutdown": False, "stopping": False}
     assert json.loads(busy)["active"] == started["run_id"]
 
 
@@ -488,7 +488,7 @@ def test_status_without_a_run_manager_says_runs_cannot_start(server):
     assert status == 200
     assert json.loads(body) == {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
                                 "default_system": None, "default_stage_call_limit": None,
-                                "systems": [], "default_choice": None}
+                                "systems": [], "default_choice": None, "can_shutdown": False, "stopping": False}
 
 
 def test_favicon_request_is_answered_without_a_404(server):
@@ -1944,3 +1944,296 @@ def test_page_marks_where_the_vision_model_was_used(server):
     code = script.decode("utf-8")
     for name in ("vision-badge", "nextVisionStep", 'kind: "look"', "lookDetails", "비전 ${visionReads}회"):
         assert name in code
+
+
+def test_page_has_stop_and_shutdown_controls(server):
+    instance, _ = server
+
+    _, _, page = request(instance, "/", {"X-Agent-Token": None})
+    _, _, script = request(instance, "/static/app.js", {"X-Agent-Token": None})
+
+    html = page.decode("utf-8")
+    for name in ('id="stop-run"', 'id="shutdown-viewer"', 'id="confirm-strip"'):
+        assert name in html
+    code = script.decode("utf-8")
+    for name in ("/api/shutdown", '"/stop"', "stop_run"):
+        assert name in code
+    assert "confirm(" not in code and "alert(" not in code and "prompt(" not in code
+
+
+import os  # noqa: E402
+import socket  # noqa: E402
+
+STOP_RUN = "20261118-090000"
+
+
+class StoppableManager:
+    """Stands in for RunManager with the stop methods of the viewer stop plan (C2). It records
+    every call; stop_and_wait blocks until `release` is set, so a test can look at the server
+    while the run is being wound down."""
+
+    default_exe = None
+    default_system = None
+
+    def __init__(self, active=STOP_RUN, stopping=False):
+        self.running = active
+        self.is_stopping = stopping
+        self.calls = []
+        self.waiting = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
+
+    def active(self):
+        return self.running
+
+    def can_answer(self):
+        return False
+
+    def stopping(self):
+        return self.is_stopping
+
+    def stop(self, run_id):
+        self.calls.append(("stop", run_id))
+        if run_id != self.running:
+            return False
+        self.is_stopping = True
+        return True
+
+    def stop_and_wait(self, timeout_s):
+        self.calls.append(("stop_and_wait", timeout_s))
+        self.is_stopping = self.running is not None
+        self.waiting.set()
+        self.release.wait(timeout=5)
+        self.running = None
+        self.is_stopping = False
+        return True
+
+    def start(self, goal, exe=None, level=3, approve=False, system=None, stage_call_limit=None):
+        self.calls.append(("start", goal))
+        return "20261118-100000"
+
+
+@contextmanager
+def serving_with_shutdown(runs_dir, manager=None, allow_shutdown=True):
+    """Like `serving`, but lets the server end its own serve_forever through /api/shutdown."""
+    instance = make_server(runs_dir, TOKEN, port=0, run_manager=manager, allow_shutdown=allow_shutdown)
+    thread = threading.Thread(target=instance.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+    try:
+        yield instance, thread
+    finally:
+        if thread.is_alive():
+            instance.shutdown()
+        instance.server_close()
+        thread.join(timeout=5)
+
+
+def status_of(instance):
+    _, _, body = request(instance, "/api/status")
+    return json.loads(body)
+
+
+def test_stop_route_stops_the_active_run(tmp_path):
+    manager = StoppableManager()
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, _):
+        status, body = post_json(instance, f"/api/runs/{STOP_RUN}/stop", {})
+
+    assert (status, body) == (200, {"stopping": True})
+    assert manager.calls == [("stop", STOP_RUN)]
+
+
+def test_stop_route_refuses_a_run_that_is_not_active(tmp_path):
+    manager = StoppableManager()
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, _):
+        other, other_body = post_json(instance, "/api/runs/20261118-080000/stop", {})
+        bad, _ = post_json(instance, "/api/runs/..%2Fx/stop", {})
+        manager.running = None
+        idle, _ = post_json(instance, f"/api/runs/{STOP_RUN}/stop", {})
+
+    assert other == 409 and other_body["error"]
+    assert bad == 404
+    assert idle == 409
+    assert [run_id for name, run_id in manager.calls if name == "stop"] == ["20261118-080000", STOP_RUN]
+
+
+def test_stop_route_without_a_manager_is_503_and_needs_the_token(tmp_path):
+    manager = StoppableManager()
+    with serving_with_shutdown(tmp_path / "runs") as (viewing_only, _):
+        without, _ = post_json(viewing_only, f"/api/runs/{STOP_RUN}/stop", {})
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, _):
+        no_token, _ = post_json(instance, f"/api/runs/{STOP_RUN}/stop", {}, {"X-Agent-Token": None})
+
+    assert without == 503
+    assert no_token == 403
+    assert manager.calls == []
+
+
+def test_shutdown_is_not_offered_unless_allowed(tmp_path):
+    manager = StoppableManager(active=None)
+    with serving_with_shutdown(tmp_path / "runs", manager, allow_shutdown=False) as (instance, thread):
+        status, _ = post_json(instance, "/api/shutdown", {"stop_run": True})
+        offered = status_of(instance)["can_shutdown"]
+        still_serving = thread.is_alive()
+
+    assert status == 404
+    assert offered is False
+    assert still_serving
+    assert manager.calls == []
+
+
+def test_shutdown_with_an_active_run_needs_stop_run(tmp_path):
+    manager = StoppableManager()
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, thread):
+        status, body = post_json(instance, "/api/shutdown", {"stop_run": False})
+        missing, _ = post_json(instance, "/api/shutdown", {})
+        thread.join(timeout=0.3)
+        still_serving = thread.is_alive()
+
+    assert status == 409
+    assert body["active"] == STOP_RUN and body["error"]
+    assert missing == 409
+    assert still_serving
+    assert manager.calls == []
+
+
+def test_shutdown_stops_the_run_then_closes_the_server(tmp_path):
+    manager = StoppableManager()
+    manager.release.clear()
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, thread):
+        status, body = post_json(instance, "/api/shutdown", {"stop_run": True})
+        assert manager.waiting.wait(timeout=5)
+        during = status_of(instance)
+        alive_while_waiting = thread.is_alive()
+        manager.release.set()
+        thread.join(timeout=5)
+        ended = not thread.is_alive()
+
+    assert (status, body) == (202, {"shutting_down": True, "run_stopping": True})
+    assert manager.calls == [("stop_and_wait", 120)]
+    assert alive_while_waiting and during["stopping"] is True
+    assert ended
+
+
+def test_shutdown_without_a_run_closes_at_once(tmp_path):
+    manager = StoppableManager(active=None)
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, thread):
+        status, body = post_json(instance, "/api/shutdown", {"stop_run": False})
+        thread.join(timeout=5)
+        ended = not thread.is_alive()
+
+    assert (status, body) == (202, {"shutting_down": True, "run_stopping": False})
+    assert ended
+    assert manager.calls == []
+
+
+def test_shutdown_of_a_viewer_without_a_manager_closes(tmp_path):
+    with serving_with_shutdown(tmp_path / "runs") as (instance, thread):
+        status, body = post_json(instance, "/api/shutdown", {"stop_run": False})
+        thread.join(timeout=5)
+        ended = not thread.is_alive()
+
+    assert (status, body) == (202, {"shutting_down": True, "run_stopping": False})
+    assert ended
+
+
+@pytest.mark.parametrize("payload", [{"stop_run": "yes"}, {"stop_run": 1}, {"stop_run": None}])
+def test_shutdown_with_a_bad_stop_run_is_400(tmp_path, payload):
+    manager = StoppableManager(active=None)
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, thread):
+        status, _ = post_json(instance, "/api/shutdown", payload)
+        thread.join(timeout=0.2)
+        still_serving = thread.is_alive()
+
+    assert status == 400
+    assert still_serving
+
+
+def test_shutdown_needs_the_token_and_the_right_host(tmp_path):
+    manager = StoppableManager(active=None)
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, thread):
+        port = instance.server_address[1]
+        no_token, _ = post_json(instance, "/api/shutdown", {"stop_run": True}, {"X-Agent-Token": None})
+        rebound, _ = post_json(instance, "/api/shutdown", {"stop_run": True}, {"Host": f"attacker.example:{port}"})
+        thread.join(timeout=0.2)
+        still_serving = thread.is_alive()
+
+    assert no_token == 403 and rebound == 403
+    assert still_serving
+
+
+def test_no_run_starts_while_the_viewer_shuts_down(tmp_path):
+    manager = StoppableManager()
+    manager.release.clear()
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, thread):
+        post_json(instance, "/api/shutdown", {"stop_run": True})
+        assert manager.waiting.wait(timeout=5)
+        started, body = post_json(instance, "/api/runs", {"goal": "g"})
+        again, again_body = post_json(instance, "/api/shutdown", {"stop_run": True})
+        manager.release.set()
+        thread.join(timeout=5)
+
+    assert started == 503 and body["error"]
+    assert (again, again_body) == (202, {"shutting_down": True, "run_stopping": True})
+    assert manager.calls == [("stop_and_wait", 120)]
+
+
+def test_status_says_stopping_and_can_shutdown(tmp_path):
+    manager = StoppableManager(stopping=True)
+    with serving_with_shutdown(tmp_path / "runs", manager) as (instance, _):
+        stopping = status_of(instance)
+        manager.is_stopping = False
+        settled = status_of(instance)
+    with serving_with_shutdown(tmp_path / "runs", manager, allow_shutdown=False) as (instance, _):
+        not_allowed = status_of(instance)
+    with serving_with_shutdown(tmp_path / "runs") as (instance, _):
+        viewing_only = status_of(instance)
+
+    assert stopping["stopping"] is True and stopping["can_shutdown"] is True
+    assert settled["stopping"] is False
+    assert not_allowed["can_shutdown"] is False
+    assert viewing_only["can_shutdown"] is True and viewing_only["stopping"] is False
+
+
+def test_status_of_a_manager_without_stop_methods_is_not_stopping(tmp_path):
+    with serving(tmp_path / "runs", RecordingManager()) as instance:
+        status = status_of(instance)
+
+    assert status["stopping"] is False and status["can_shutdown"] is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows socket option")
+def test_a_second_server_cannot_share_the_port(tmp_path):
+    first = make_server(tmp_path, TOKEN, port=0)
+    try:
+        with pytest.raises(OSError):
+            second = make_server(tmp_path, TOKEN, port=first.server_address[1])
+            second.server_close()
+    finally:
+        first.server_close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows socket option")
+def test_a_socket_asking_to_reuse_the_address_cannot_take_the_port(tmp_path):
+    first = make_server(tmp_path, TOKEN, port=0)
+    intruder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        intruder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        with pytest.raises(OSError):
+            intruder.bind(("127.0.0.1", first.server_address[1]))
+    finally:
+        intruder.close()
+        first.server_close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows socket option")
+def test_a_viewer_from_before_this_change_still_blocks_the_port(tmp_path):
+    old_viewer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    old_viewer.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    old_viewer.bind(("127.0.0.1", 0))
+    old_viewer.listen()
+    try:
+        with pytest.raises(OSError):
+            second = make_server(tmp_path, TOKEN, port=old_viewer.getsockname()[1])
+            second.server_close()
+    finally:
+        old_viewer.close()

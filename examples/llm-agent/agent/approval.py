@@ -19,6 +19,7 @@ class ApprovalGate:
     """Holds each proposal until decide() answers it from any thread, or the timeout passes.
 
     An unanswered proposal becomes NO_ANSWER, so a closed viewer never blocks a run forever.
+    After close() every proposal, waiting or still to come, is NO_ANSWER at once.
     """
 
     def __init__(self, timeout_s=600, clock=time.monotonic):
@@ -26,10 +27,13 @@ class ApprovalGate:
         self._clock = clock
         self._changed = threading.Condition()
         self._waiting = {}
+        self._closed = False
 
     def review(self, proposal):
         proposal_id = proposal["id"]
         with self._changed:
+            if self._closed:
+                return NO_ANSWER
             self._waiting[proposal_id] = None
             deadline = self._clock() + self._timeout_s
             while self._waiting[proposal_id] is None:
@@ -39,6 +43,16 @@ class ApprovalGate:
                     return NO_ANSWER
                 self._changed.wait(remaining)
             return self._waiting.pop(proposal_id)
+
+    def close(self):
+        """Answers every waiting proposal with NO_ANSWER, and every later one at once; for a
+        stopped run."""
+        with self._changed:
+            self._closed = True
+            for proposal_id, value in self._waiting.items():
+                if value is None:
+                    self._waiting[proposal_id] = NO_ANSWER
+            self._changed.notify_all()
 
     def decide(self, proposal_id, decision):
         """Answers a waiting proposal. Returns False for an unknown or already answered id."""

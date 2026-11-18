@@ -370,3 +370,45 @@ def test_the_terminal_asks_at_the_plan_limit(typed, accepted):
 @pytest.mark.parametrize("question", [STAGE_LIMIT, PLAN_LIMIT])
 def test_terminal_eof_at_a_limit_is_no_answer(question):
     assert TerminalAsker(ask=closed, show=lambda _line: None).ask(question) is NO_ANSWER
+
+
+def within(seconds, work):
+    """What `work` returned, run in a daemon thread; fails instead of hanging after `seconds`."""
+    done = []
+    thread = threading.Thread(target=lambda: done.append(work()), daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert done, f"still waiting after {seconds} s"
+    return done[0]
+
+
+def test_closed_ask_gate_answers_no_answer_now_and_later():
+    gate = AskGate(timeout_s=1800)
+    answers = []
+    asker = threading.Thread(target=lambda: answers.append(gate.ask({"id": "q1", "kind": "stuck", "text": "?"})),
+                             daemon=True)
+    asker.start()
+    for _ in range(500):
+        if gate.waiting("q1"):
+            break
+        threading.Event().wait(0.01)
+
+    gate.close()
+    asker.join(timeout=5)
+    seen = []
+    later = within(5, lambda: gate.ask({"id": "q2", "kind": "stuck", "text": "?"},
+                                       on_waiting=lambda: seen.append("q2")))
+
+    assert not asker.is_alive()
+    assert answers == [NO_ANSWER]
+    assert later == NO_ANSWER
+    assert seen == []
+    assert gate.answer("q1", Answer(text="늦음")) is False
+    assert gate.waiting("q1") is False and gate.waiting("q2") is False
+
+
+def test_closing_while_on_waiting_runs_still_ends_the_question():
+    gate = AskGate(timeout_s=1800)
+
+    assert within(5, lambda: gate.ask({"id": "q1", "kind": "stuck", "text": "?"}, on_waiting=gate.close)) == NO_ANSWER
+    assert gate.waiting("q1") is False

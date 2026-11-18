@@ -5,12 +5,17 @@ rebinding. Every /api/ request must also carry the per-launch token in
 X-Agent-Token, which a page from another origin cannot read or forge.
 Run ids, frame names and capture names are matched against fixed patterns before any file
 is touched, so a request can never name a path outside the runs folder.
+On Windows the port is held exclusively, so a second viewer on the same port fails to open
+instead of sharing it with an old one. Only a server made with allow_shutdown (view.py) can be
+shut down from the browser; it answers first and winds the run down on another thread.
 """
 
 import hmac
 import json
 import os
 import re
+import socket
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -37,19 +42,49 @@ MAX_COMMENT_CHARS = 2000
 MAX_ANSWER_ITEMS = 50
 KNOWLEDGE_NAME = re.compile(r"[A-Za-z0-9가-힣._-]{1,64}")
 ITEM_DECISIONS = ("approve", "edit", "reject")
+SHUTDOWN_WAIT_S = 120
 PAGE_POLICY = "default-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
 
 class ViewerServer(ThreadingHTTPServer):
     daemon_threads = True
+    allow_reuse_address = os.name != "nt"
 
-    def __init__(self, port, runs_dir, token, run_manager, history=None, knowledge_dir=None):
+    def __init__(self, port, runs_dir, token, run_manager, history=None, knowledge_dir=None, allow_shutdown=False):
         self.runs_dir = Path(runs_dir)
         self.knowledge_dir = Path(knowledge_dir) if knowledge_dir is not None else None
         self.token = token
         self.run_manager = run_manager
         self.history = history or RunIndex(self.runs_dir)
+        self.allow_shutdown = allow_shutdown
+        self.shutting_down = False
+        self._shutdown_lock = threading.Lock()
         super().__init__(("127.0.0.1", port), ViewerHandler)
+
+    def server_bind(self):
+        """On Windows SO_REUSEADDR lets a second process listen on a port already in use, so the
+        port is taken with SO_EXCLUSIVEADDRUSE instead and a busy port fails to bind."""
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+    def begin_shutdown(self, stop_run):
+        """Starts winding down once: a thread stops the active run (waiting up to SHUTDOWN_WAIT_S)
+        and then ends serve_forever. Closing the socket is left to whoever called serve_forever.
+        Returns False when a shutdown had already begun."""
+        with self._shutdown_lock:
+            if self.shutting_down:
+                return False
+            self.shutting_down = True
+        threading.Thread(target=self._wind_down, args=(stop_run,), name="viewer-shutdown", daemon=True).start()
+        return True
+
+    def _wind_down(self, stop_run):
+        try:
+            if stop_run and self.run_manager is not None:
+                self.run_manager.stop_and_wait(SHUTDOWN_WAIT_S)
+        finally:
+            self.shutdown()
 
 
 def is_frame_name(name):
@@ -72,10 +107,12 @@ def summary_lines(history, run_dir):
     return summary_of(run_dir, status=status)
 
 
-def make_server(runs_dir, token, port=0, run_manager=None, history=None, knowledge_dir=None):
+def make_server(runs_dir, token, port=0, run_manager=None, history=None, knowledge_dir=None, allow_shutdown=False):
     """Returns a server bound to 127.0.0.1; call serve_forever() to start it.
-    `history` replaces the RunIndex, so tests can fix the clock and the process lookup."""
-    return ViewerServer(port, runs_dir, token, run_manager, history, knowledge_dir)
+    `history` replaces the RunIndex, so tests can fix the clock and the process lookup.
+    `allow_shutdown` opens POST /api/shutdown; only view.py, which owns its process, sets it.
+    A port already in use raises OSError, on Windows too."""
+    return ViewerServer(port, runs_dir, token, run_manager, history, knowledge_dir, allow_shutdown)
 
 
 def read_events(events_path, since):
@@ -200,6 +237,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return
         if segments == ["api", "runs"]:
             return self._start_run()
+        if segments == ["api", "shutdown"]:
+            return self._shutdown()
+        if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "stop":
+            return self._stop_run(segments[2])
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "decision":
             return self._decide(segments[2])
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "answer":
@@ -243,6 +284,37 @@ class ViewerHandler(BaseHTTPRequestHandler):
         if mark.is_file() != keep:
             return self._send_json(409, {"error": "보관 표시 자리에 파일이 아닌 것이 있어 바꾸지 못했습니다"})
         self._send_json(200, {"keep": keep})
+
+    def _stop_run(self, run_id):
+        """Asks the run manager to stop that run at its next safe point; the target app stays open."""
+        manager = self.server.run_manager
+        if manager is None:
+            return self._send_json(503, {"error": "이 뷰어는 실행을 관리하지 않아 멈출 수 없습니다"})
+        if not is_run_id(run_id):
+            return self._send_json(404, {"error": "없는 실행입니다"})
+        if not manager.stop(run_id):
+            return self._send_json(409, {"error": "진행 중인 실행이 아닙니다. 이미 끝났을 수 있습니다"})
+        self._send_json(200, {"stopping": True})
+
+    def _shutdown(self):
+        """Answers 202 before anything is stopped, then winds down on another thread, so this
+        request thread never waits for serve_forever to end."""
+        if not self.server.allow_shutdown:
+            return self._send_json(404, {"error": "없는 경로입니다"})
+        payload, problem = self._read_json()
+        if problem:
+            return self._send_json(*problem)
+        stop_run = payload.get("stop_run", False)
+        if type(stop_run) is not bool:
+            return self._send_json(400, {"error": "stop_run은 true 또는 false여야 합니다"})
+        manager = self.server.run_manager
+        active = manager.active() if manager is not None else None
+        if active is not None and not stop_run and not self.server.shutting_down:
+            return self._send_json(409, {"error": "실행 중인 작업이 있습니다. 멈추고 종료하려면 stop_run을 true로 보내세요",
+                                         "active": active})
+        self._send_json(202, {"shutting_down": True, "run_stopping": active is not None})
+        self.wfile.flush()
+        self.server.begin_shutdown(stop_run=active is not None)
 
     def _decide(self, run_id):
         if not is_run_id(run_id):
@@ -355,19 +427,25 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
     def _status(self):
         manager = self.server.run_manager
+        can_shutdown = bool(self.server.allow_shutdown)
         if manager is None:
             return {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
-                    "default_system": None, "default_stage_call_limit": None, "systems": [], "default_choice": None}
+                    "default_system": None, "default_stage_call_limit": None, "systems": [], "default_choice": None,
+                    "can_shutdown": can_shutdown, "stopping": False}
         systems, choice = _system_choices(manager)
+        stopping = getattr(manager, "stopping", None)
         return {"can_start": True, "active": manager.active(), "default_exe": manager.default_exe,
                 "can_answer": manager.can_answer(), "default_system": manager.default_system,
                 "default_stage_call_limit": getattr(manager, "default_stage_call_limit", None),
-                "systems": systems, "default_choice": choice}
+                "systems": systems, "default_choice": choice,
+                "can_shutdown": can_shutdown, "stopping": bool(stopping()) if callable(stopping) else False}
 
     def _start_run(self):
         manager = self.server.run_manager
         if manager is None:
             return self._send_json(503, {"error": "이 뷰어는 실행을 시작할 수 없습니다. 기록 보기 전용입니다"})
+        if self.server.shutting_down:
+            return self._send_json(503, {"error": "뷰어를 종료하는 중이라 새 실행을 시작할 수 없습니다"})
         payload, problem = self._read_json()
         if problem:
             return self._send_json(*problem)

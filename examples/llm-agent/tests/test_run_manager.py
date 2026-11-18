@@ -553,7 +553,7 @@ class RegisterSpy:
 def test_started_run_gets_the_ask_gate_the_store_and_the_register_hook(tmp_path, monkeypatch):
     seen = {}
 
-    def fake_run_agent(model, toolbox, task, log=None, gate=None, register=None):
+    def fake_run_agent(model, toolbox, task, log=None, gate=None, register=None, stop=None):
         seen.update(register=register, toolbox=toolbox)
         return RunResult("gave_up", 0, "test")
 
@@ -1058,3 +1058,149 @@ def test_the_ready_text_stays_out_of_run_json(tmp_path, monkeypatch):
 
     text = (tmp_path / "runs" / run_id / "run.json").read_text(encoding="utf-8")
     assert "생산운영" not in text
+
+
+from agent.loop import USER_STOP_REASON  # noqa: E402
+
+
+def wait_until(condition, timeout=5):
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition never held")
+        time.sleep(0.01)
+
+
+def gated_run(tmp_path, monkeypatch, **options):
+    monkeypatch.setattr(run_manager_module, "current_code", lambda: "abc1234")
+    model = GatedModel()
+    manager, _ = make_manager(tmp_path, model, **options)
+    run_id = manager.start("설정을 열어줘", None, 3)
+    assert model.started.wait(timeout=5)
+    return manager, model, run_id
+
+
+def test_stop_ends_the_active_run_as_stopped_with_a_summary(tmp_path, monkeypatch):
+    manager, model, run_id = gated_run(tmp_path, monkeypatch)
+
+    assert manager.stop(run_id) is True
+    model.release.set()
+    manager.join(timeout=5)
+
+    final = run_json(tmp_path, run_id)
+    assert (final["status"], final["reason"]) == ("stopped", USER_STOP_REASON)
+    assert (tmp_path / "runs" / run_id / "summary.txt").exists()
+    assert not [event for event in run_events(tmp_path, run_id) if event["type"] == "action"]
+    assert manager.active() is None
+
+
+def test_stop_of_another_or_no_run_is_false(tmp_path, monkeypatch):
+    manager, _ = make_manager(tmp_path, GatedModel())
+    assert manager.stop("20261118-000000") is False
+    assert manager.stopping() is False
+
+    (tmp_path / "second").mkdir()
+    manager, model, run_id = gated_run(tmp_path / "second", monkeypatch)
+    assert manager.stop("20261118-000000") is False
+    assert manager.stopping() is False
+    model.release.set()
+    manager.join(timeout=5)
+    assert manager.stop(run_id) is False
+    assert run_json(tmp_path / "second", run_id)["status"] == "gave_up"
+
+
+def test_stop_answers_a_waiting_question_at_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_manager_module, "register_after_run", RegisterSpy())
+    manager, _ = spy_manager(tmp_path, asking_model(), FakeCli(scene=SCENE), knowledge_dir=tmp_path / "knowledge")
+    run_id = manager.start("목록을 열어줘", None, 2)
+    wait_until(lambda: manager._ask_gate is not None and manager._ask_gate.waiting("q1"))
+
+    assert manager.stop(run_id) is True
+    manager.join(timeout=1)
+
+    assert manager.active() is None
+    final = run_json(tmp_path, run_id)
+    assert (final["status"], final["reason"]) == ("stopped", USER_STOP_REASON)
+
+
+def test_stop_answers_a_waiting_proposal_at_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_manager_module, "current_code", lambda: "abc1234")
+    gate = WatchedGate(timeout_s=600)
+    manager, _ = make_manager(tmp_path, launch_then_finish(), gate_factory=lambda: gate)
+    run_id = manager.start("설정을 열어줘", None, 3, approve=True)
+    assert gate.waiting.wait(timeout=5)
+
+    assert manager.stop(run_id) is True
+    manager.join(timeout=1)
+
+    assert manager.active() is None
+    final = run_json(tmp_path, run_id)
+    assert (final["status"], final["reason"]) == ("stopped", USER_STOP_REASON)
+
+
+def test_stop_and_wait_returns_true_once_the_run_ended(tmp_path, monkeypatch):
+    manager, model, run_id = gated_run(tmp_path, monkeypatch)
+    threading.Timer(0.1, model.release.set).start()
+
+    assert manager.stop_and_wait(5) is True
+
+    assert manager.active() is None
+    assert run_json(tmp_path, run_id)["reason"] == USER_STOP_REASON
+
+
+def test_stop_and_wait_without_a_run_is_true(tmp_path):
+    manager, _ = make_manager(tmp_path, GatedModel())
+    assert manager.stop_and_wait(0.1) is True
+
+
+def test_stop_and_wait_gives_up_after_the_timeout(tmp_path, monkeypatch):
+    manager, model, run_id = gated_run(tmp_path, monkeypatch)
+
+    started = time.monotonic()
+    assert manager.stop_and_wait(0.2) is False
+    assert time.monotonic() - started < 2
+    assert manager.active() == run_id
+
+    model.release.set()
+    manager.join(timeout=5)
+    assert manager.active() is None
+
+
+def test_stopping_is_true_until_the_run_ends(tmp_path, monkeypatch):
+    manager, model, run_id = gated_run(tmp_path, monkeypatch)
+    assert manager.stopping() is False
+
+    manager.stop(run_id)
+    assert manager.stopping() is True
+
+    model.release.set()
+    manager.join(timeout=5)
+    assert manager.stopping() is False
+
+
+def test_stop_requested_is_recorded(tmp_path, monkeypatch):
+    manager, model, run_id = gated_run(tmp_path, monkeypatch)
+
+    manager.stop(run_id)
+    manager.stop(run_id)
+    model.release.set()
+    manager.join(timeout=5)
+
+    kinds = [event["type"] for event in run_events(tmp_path, run_id)]
+    assert kinds.count("stop_requested") == 1
+    assert kinds.index("stop_requested") < kinds.index("finish")
+
+
+def test_a_new_run_does_not_inherit_the_stop(tmp_path, monkeypatch):
+    manager, model, run_id = gated_run(tmp_path, monkeypatch)
+    manager.stop(run_id)
+    model.release.set()
+    manager.join(timeout=5)
+
+    model.started.clear()
+    second = manager.start("설정을 열어줘", None, 3)
+    assert model.started.wait(timeout=5)
+    assert manager.stopping() is False
+    manager.join(timeout=5)
+
+    assert run_json(tmp_path, second)["status"] == "gave_up"

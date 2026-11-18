@@ -1,5 +1,7 @@
 """Launching a system and waiting until a window shows the ready signal (agent/ready.py)."""
 
+import math
+
 import pytest
 
 from agent.ready import (
@@ -32,7 +34,8 @@ def test_constants_follow_the_contract():
     assert NO_WINDOW_S == 30
     assert READY_POLL_S == 1.0
     assert RUNNING_HINT_MAX_WINDOWS == 30
-    assert READY_STATUSES == ("ready", "already_running", "no_new_window", "timeout", "launch_failed")
+    assert READY_STATUSES == ("ready", "already_running", "no_new_window", "timeout", "launch_failed",
+                              "cancelled")
 
 
 def test_has_named_element_needs_the_whole_name():
@@ -290,7 +293,7 @@ def test_outcome_defaults():
 
 def test_ready_message_texts():
     assert set(READY_MESSAGES) == {"already_running", "no_new_window_hint", "no_new_window", "timeout",
-                                   "launch_failed"}
+                                   "launch_failed", "cancelled"}
     assert ready_message(ReadyOutcome("already_running")) == "같은 시스템이 이미 떠 있습니다. 닫고 다시 실행해 주세요"
     assert ready_message(ReadyOutcome("no_new_window", running_hint=True)) == \
         "같은 시스템이 이미 떠 있는 것 같습니다. 닫고 다시 실행해 주세요"
@@ -307,3 +310,37 @@ def test_ready_message_texts():
 @pytest.mark.parametrize("status", READY_STATUSES)
 def test_messages_never_carry_the_signal(status):
     assert SIGNAL not in ready_message(ReadyOutcome(status, running_hint=True))
+
+
+def cancel_after_polls(desktop, polls):
+    """True once `polls` window lists were read after the one before the launch."""
+    return lambda: len(desktop.commands("list-windows")) > polls
+
+
+def test_cancelled_before_the_next_round():
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [main_window(menus_at=math.inf)])
+
+    outcome = wait(desktop, clock, cancelled=cancel_after_polls(desktop, 2))
+
+    assert (outcome.status, outcome.polls, outcome.running_hint) == ("cancelled", 2, False)
+    assert outcome.waited_ms == 2000
+    assert len(desktop.commands("launch")) == 1
+    assert ready_message(outcome) == READY_MESSAGES["cancelled"] == "사용자가 실행을 멈췄습니다"
+
+
+def test_cancelled_before_the_launch_launches_nothing():
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [main_window()])
+
+    outcome = wait(desktop, clock, cancelled=lambda: True)
+
+    assert (outcome.status, outcome.polls) == ("cancelled", 0)
+    assert desktop.calls == []
+
+
+def test_ready_wins_over_a_cancel_that_never_comes():
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [main_window(menus_at=3.0)])
+
+    assert wait(desktop, clock, cancelled=lambda: False).status == "ready"

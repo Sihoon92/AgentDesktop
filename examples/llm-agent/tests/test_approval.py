@@ -4,7 +4,7 @@ import threading
 from fake_cli import FakeCli
 from test_loop import OBSERVE, PLAN, STAGE_DONE, ScriptedModel, call, last_output
 
-from agent.approval import ApprovalGate, Decision, TerminalGate
+from agent.approval import NO_ANSWER, ApprovalGate, Decision, TerminalGate
 from agent.desktop import DesktopClient
 from agent.loop import run_agent
 from agent.task import Task
@@ -174,3 +174,27 @@ def test_terminal_gate_without_input_rejects():
     gate = TerminalGate(ask=closed, show=lambda _text: None)
 
     assert gate.review({"id": "p1", "step": 1, "tool": "check", "intent": "", "arguments": {}}).approved is False
+
+
+def test_closed_approval_gate_answers_no_answer_now_and_later():
+    gate = ApprovalGate(timeout_s=600)
+    answers = []
+    reviewer = threading.Thread(target=lambda: answers.append(gate.review({"id": "p1"})), daemon=True)
+    reviewer.start()
+    for _ in range(500):
+        if "p1" in gate._waiting:
+            break
+        threading.Event().wait(0.01)
+
+    gate.close()
+    reviewer.join(timeout=5)
+
+    assert not reviewer.is_alive()
+    assert answers == [NO_ANSWER]
+    later = []
+    second = threading.Thread(target=lambda: later.append(gate.review({"id": "p2"})), daemon=True)
+    second.start()
+    second.join(timeout=5)
+    assert later == [NO_ANSWER]
+    assert gate.decide("p1", Decision(True, "")) is False
+    assert gate.decide("p2", Decision(True, "")) is False

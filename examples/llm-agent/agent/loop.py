@@ -5,6 +5,10 @@ keeps the plan (agent.stages) and what the model is sent (agent.history). Each s
 limit: at the limit the person is asked before the next model call. The run's ceiling (calls or
 tokens) is checked before each call, and reaching it gives the model one last call that offers
 only finish.
+
+A stop signal (`stop`, a threading.Event) ends the run at a safe place: before a model call,
+before each tool of an answer, and in the ready wait. A call to the model or the CLI that is
+under way is never cut; a question or proposal the stop released is reported as the stop.
 """
 
 import json
@@ -103,6 +107,7 @@ NEEDS_PLAN = (
     "launch_target, reading tools and ask work without a plan."
 )
 STEP_LIMIT = "Step limit reached"
+USER_STOP_REASON = "사용자가 실행을 멈췄습니다"
 READY_BRIEFING = (
     "The harness has already launched the target app and waited until its first screen was ready. "
     "Do not call launch_target; start from the target's windows:"
@@ -152,12 +157,13 @@ class _Approval:
         return {"ok": False, "refused": f"사용자가 거부함: {decision.comment}"}
 
 
-def run_agent(model, toolbox, task, log=lambda _event: None, gate=None, register=None):
+def run_agent(model, toolbox, task, log=lambda _event: None, gate=None, register=None, stop=None):
     """Runs the loop. With a gate, every app-changing call the policy allows waits for
     gate.review(proposal); plan and stage_done never do. A turn whose only calls are ask uses no
     step. After a verified or confirmed run, register(model, toolbox, log) may save what was
-    learned; its tokens count. The result's stats and toolbox.stage_records hold the stages."""
-    result = _Run(model, toolbox, task, log, gate).run()
+    learned; its tokens count. The result's stats and toolbox.stage_records hold the stages.
+    `stop` (anything with is_set(), None for none) ends the run as stopped with USER_STOP_REASON."""
+    result = _Run(model, toolbox, task, log, gate, stop).run()
     if result.status in SUCCESS_STATUSES and register is not None:
         try:
             spent = register(model, toolbox, log)
@@ -171,8 +177,9 @@ def run_agent(model, toolbox, task, log=lambda _event: None, gate=None, register
 class _Run:
     """One run of the loop: the turns, the counts, the plan and the transcript."""
 
-    def __init__(self, model, toolbox, task, log, gate):
+    def __init__(self, model, toolbox, task, log, gate, stop=None):
         self._model = model
+        self._stop = stop
         self._toolbox = toolbox
         self._task = task
         self._log = log
@@ -191,7 +198,7 @@ class _Run:
         self._vision_tokens = 0
 
     def run(self):
-        ready = self._toolbox.launch_ready() if self._task.ready_text else None
+        ready = self._toolbox.launch_ready(cancelled=self._stopped) if self._task.ready_text else None
         if ready is not None and not ready.get("ok"):
             result = self._result("stopped", ready["message"])
         else:
@@ -218,10 +225,18 @@ class _Run:
         try:
             return self._turns()
         except AgentStopped as stop:
-            return self._result("stopped", str(stop))
+            return self._result("stopped", USER_STOP_REASON if self._stopped() else str(stop))
+
+    def _stopped(self):
+        return self._stop is not None and self._stop.is_set()
+
+    def _check_stop(self):
+        if self._stopped():
+            raise AgentStopped(USER_STOP_REASON)
 
     def _turns(self):
         while True:
+            self._check_stop()
             ceiling = self._ceiling()
             if ceiling is not None:
                 return self._last_turn(ceiling)
@@ -236,6 +251,7 @@ class _Run:
             if not calls:
                 return self._result("stopped", "The model replied without calling a tool")
             for call in calls:
+                self._check_stop()
                 ended, output = self._execute(call)
                 self._count_vision()
                 self._log_tool(call, output)
@@ -272,6 +288,7 @@ class _Run:
                      if item.type == "function_call" and item.name == "finish"), None)
         if call is None:
             return self._result("stopped", reason)
+        self._check_stop()
         ended, output = self._execute(call, at_ceiling=True)
         self._count_vision()
         self._log_tool(call, output)

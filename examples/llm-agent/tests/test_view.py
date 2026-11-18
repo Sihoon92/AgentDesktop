@@ -425,7 +425,7 @@ def test_a_run_started_from_the_viewer_calls_the_model_named_in_the_settings_fil
     monkeypatch.setattr(view, "make_client", lambda api_key, base_url: client)
     monkeypatch.setattr(run_manager_module, "start_session", lambda *_args, **_kwargs: "session-1")
 
-    def agent(model, _toolbox, _task, _log, gate=None, register=None):
+    def agent(model, _toolbox, _task, _log, gate=None, register=None, stop=None):
         model.respond("instructions", [], [])
         return RunResult("gave_up", 1, "done")
 
@@ -472,7 +472,7 @@ def viewer_manager(monkeypatch, tmp_path, env, settings_text="", exe_line=True):
     monkeypatch.setattr(run_manager_module, "start_session", lambda *_args, **_kwargs: "session-1")
     seen = {}
 
-    def agent(model, toolbox, task, _log, gate=None, register=None):
+    def agent(model, toolbox, task, _log, gate=None, register=None, stop=None):
         seen.update(model=model, toolbox=toolbox, task=task)
         return RunResult("gave_up", 1, "done")
 
@@ -641,3 +641,237 @@ def test_summary_does_not_mix_with_the_other_modes(monkeypatch, tmp_path, argv):
     with pytest.raises(SystemExit) as stopped:
         view.main(["--runs", str(tmp_path), *argv])
     assert stopped.value.code == 2
+
+
+import signal  # noqa: E402
+
+from viewer import instance as instance_module  # noqa: E402
+
+STOP_RUN_ID = "20261118-090000"
+
+
+@pytest.fixture(autouse=True)
+def instance_file_in_memory(monkeypatch):
+    """view.main writes .viewer.json into the runs folder, and several tests here serve the
+    committed fixture folder; the marker is kept in memory unless a test puts the real one back."""
+    marker = {"written": [], "cleared": []}
+    monkeypatch.setattr(view, "write_instance",
+                        lambda runs_dir, port, token, **_: marker["written"].append((runs_dir, port, token)))
+    monkeypatch.setattr(view, "clear_instance", lambda runs_dir, token: marker["cleared"].append((runs_dir, token)))
+    return marker
+
+
+def real_instance_file(monkeypatch):
+    monkeypatch.setattr(view, "write_instance", instance_module.write_instance)
+    monkeypatch.setattr(view, "clear_instance", instance_module.clear_instance)
+
+
+class StoppingManager:
+    """The run manager as view.py sees it on Ctrl+C: it records into the shared `events` list."""
+
+    def __init__(self, events, active=STOP_RUN_ID, interrupt=False):
+        self.events = events
+        self.running = active
+        self.interrupt = interrupt
+
+    def active(self):
+        return self.running
+
+    def stop_and_wait(self, timeout_s):
+        self.events.append(("stop_and_wait", timeout_s))
+        if self.interrupt:
+            raise KeyboardInterrupt
+        return True
+
+
+class InterruptedServer(FakeServer):
+    def __init__(self, events, during=None):
+        super().__init__()
+        self.events = events
+        self.during = during
+
+    def serve_forever(self):
+        if self.during is not None:
+            self.during()
+        raise KeyboardInterrupt
+
+    def server_close(self):
+        self.events.append("close")
+        self.closed = True
+
+
+def viewer_main(monkeypatch, runs, server, manager=None):
+    seen = {}
+    monkeypatch.setattr(view, "make_server", lambda *args, **kwargs: seen.update(kwargs) or server)
+    monkeypatch.setattr(view, "build_run_manager", lambda runs_dir, exe, **_options: (manager, None))
+    monkeypatch.setattr(view, "load_dotenv", lambda path: None)
+    code = view.main(["--runs", str(runs), "--no-browser"])
+    return code, seen
+
+
+def test_viewer_writes_and_clears_the_instance_file(tmp_path, monkeypatch, capsys):
+    real_instance_file(monkeypatch)
+    runs = tmp_path / "runs"
+    during = {}
+
+    class ShutDownServer(FakeServer):
+        def serve_forever(self):
+            during["info"] = instance_module.read_instance(runs)
+
+    server = ShutDownServer()
+    code, seen = viewer_main(monkeypatch, runs, server)
+
+    out = capsys.readouterr().out
+    assert code == 0 and server.closed
+    assert seen["allow_shutdown"] is True
+    info = during["info"]
+    assert info["port"] == 8765 and info["pid"] == os.getpid()
+    assert f"?t={info['token']}" in out
+    assert not (runs / instance_module.INSTANCE_FILE).exists()
+
+
+def test_ctrl_c_stops_the_run_before_closing(tmp_path, monkeypatch, capsys, instance_file_in_memory):
+    events = []
+    code, _ = viewer_main(monkeypatch, tmp_path, InterruptedServer(events), StoppingManager(events))
+
+    assert code == 0
+    assert events == [("stop_and_wait", 120), "close"]
+    assert "실행을 멈추는 중입니다. 바로 끄려면 Ctrl+C를 한 번 더 누르세요" in capsys.readouterr().out
+    assert len(instance_file_in_memory["cleared"]) == 1
+
+
+def test_ctrl_c_without_a_run_closes_at_once(tmp_path, monkeypatch, capsys):
+    events = []
+    code, _ = viewer_main(monkeypatch, tmp_path, InterruptedServer(events), StoppingManager(events, active=None))
+
+    assert code == 0
+    assert events == ["close"]
+    assert "멈추는 중" not in capsys.readouterr().out
+
+
+def test_second_ctrl_c_closes_without_waiting(tmp_path, monkeypatch, capsys, instance_file_in_memory):
+    events = []
+    server = InterruptedServer(events)
+    code, _ = viewer_main(monkeypatch, tmp_path, server, StoppingManager(events, interrupt=True))
+
+    assert code == 0
+    assert events == [("stop_and_wait", 120), "close"]
+    assert server.closed
+    [(_, token)] = instance_file_in_memory["cleared"]
+    assert [written[2] for written in instance_file_in_memory["written"]] == [token]
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGBREAK"), reason="Windows Ctrl+Break")
+def test_ctrl_break_is_handled_like_ctrl_c(tmp_path, monkeypatch):
+    before = signal.getsignal(signal.SIGBREAK)
+    during = {}
+    server = InterruptedServer([], during=lambda: during.update(handler=signal.getsignal(signal.SIGBREAK)))
+
+    viewer_main(monkeypatch, tmp_path, server)
+
+    assert during["handler"] is signal.default_int_handler
+    assert signal.getsignal(signal.SIGBREAK) is before
+
+
+def test_viewer_prints_where_it_opened_after_a_takeover(tmp_path, monkeypatch, capsys):
+    asked = []
+
+    def open_viewer(runs_dir, port, make, **_options):
+        asked.append((runs_dir, port))
+        return make(port + 1), "다른 뷰어에서 실행 중입니다(포트 8765). 그 실행을 끊지 않으려고 그 뷰어는 그대로 둡니다. 포트 8766에서 엽니다"
+
+    monkeypatch.setattr(view, "open_viewer", open_viewer)
+    code, seen = viewer_main(monkeypatch, tmp_path, FakeServer())
+
+    assert code == 0
+    assert asked == [(tmp_path.resolve(), 8765)]
+    assert seen["port"] == 8766 and seen["allow_shutdown"] is True
+    assert "포트 8766에서 엽니다" in capsys.readouterr().out
+
+
+def test_viewer_without_a_free_port_exits_2(tmp_path, monkeypatch, capsys, instance_file_in_memory):
+    def open_viewer(runs_dir, port, make, **_options):
+        raise OSError(10048, "in use")
+
+    monkeypatch.setattr(view, "open_viewer", open_viewer)
+    code, _ = viewer_main(monkeypatch, tmp_path, FakeServer())
+
+    assert code == 2
+    assert "127.0.0.1:8765" in capsys.readouterr().err
+    assert instance_file_in_memory["written"] == []
+
+
+def stop_main(monkeypatch, runs, alive=True, answer=(202, {"shutting_down": True, "run_stopping": True})):
+    no_server(monkeypatch)
+    asked = []
+    monkeypatch.setattr(view, "instance_alive", lambda info: alive)
+    monkeypatch.setattr(view, "request_shutdown", lambda info, stop_run: asked.append((info["port"], stop_run)) or answer)
+    return view.main(["--runs", str(runs), "--stop"]), asked
+
+
+def test_stop_option_asks_the_running_viewer_to_stop(tmp_path, monkeypatch, capsys):
+    instance_module.write_instance(tmp_path, 8771, "secret-token", pid=4242, started_at="2026-11-18T08:00:00.000Z")
+
+    code, asked = stop_main(monkeypatch, tmp_path)
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert asked == [(8771, True)]
+    assert "8771" in out and "종료" in out
+    assert "secret-token" not in out
+
+
+def test_stop_option_reports_a_viewer_that_does_not_answer(tmp_path, monkeypatch, capsys):
+    instance_module.write_instance(tmp_path, 8771, "secret-token", pid=4242, started_at="2026-11-18T08:00:00.000Z")
+
+    code, asked = stop_main(monkeypatch, tmp_path, answer=(None, {"error": "URLError"}))
+
+    captured = capsys.readouterr()
+    assert code == 1 and asked == [(8771, True)]
+    assert "8771" in captured.err and "secret-token" not in captured.err + captured.out
+
+
+def test_stop_option_without_a_viewer_says_so(tmp_path, monkeypatch, capsys):
+    code, asked = stop_main(monkeypatch, tmp_path)
+
+    assert code == 0 and asked == []
+    assert "떠 있는 뷰어가 없습니다" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("text", [None, "broken"])
+def test_stop_option_removes_a_marker_left_by_a_dead_viewer(tmp_path, monkeypatch, capsys, text):
+    marker = tmp_path / instance_module.INSTANCE_FILE
+    if text is None:
+        instance_module.write_instance(tmp_path, 8771, "secret-token", pid=4242, started_at="2026-11-18T08:00:00.000Z")
+    else:
+        marker.write_text(text, encoding="utf-8")
+
+    code, asked = stop_main(monkeypatch, tmp_path, alive=False)
+
+    assert code == 0 and asked == []
+    assert "떠 있는 뷰어가 없습니다" in capsys.readouterr().out
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("argv", [
+    ["--stop", "--summary", "latest"], ["--stop", "--open", "latest"],
+    ["--stop", "--export", "latest", "out.html"], ["--stop", "--prune", "--keep", "3"],
+])
+def test_stop_does_not_mix_with_the_other_modes(monkeypatch, tmp_path, argv):
+    no_server(monkeypatch)
+    with pytest.raises(SystemExit) as stopped:
+        view.main(["--runs", str(tmp_path), *argv])
+    assert stopped.value.code == 2
+
+
+def test_the_other_modes_write_no_instance_file(monkeypatch, tmp_path, capsys):
+    real_instance_file(monkeypatch)
+    no_server(monkeypatch)
+    runs = tmp_path / "runs"
+    write_run(runs, "20261107-120000")
+
+    view.main(["--runs", str(runs), "--summary", "latest"])
+    view.main(["--runs", str(runs), "--prune", "--keep", "5"])
+    view.main(["--runs", str(runs), "--export", "latest", str(tmp_path / "out.html")])
+
+    assert not (runs / instance_module.INSTANCE_FILE).exists()

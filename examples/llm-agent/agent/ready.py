@@ -7,6 +7,8 @@ process launch returned, or any window that was not open before the launch, so a
 process that opens the main screen in another process is followed. A window that was open
 before is a candidate only through the process launch returned, and when launch returns a
 process that already had a window, the system was already running and nothing is touched.
+A wait that is cancelled (the person stopped the run) ends before its next read as "cancelled";
+the app it launched stays open.
 
 Only the desktop client is used, so the run loop, the baseline and the environment check
 share it. The signal is never written into a reason: reasons come from READY_MESSAGES.
@@ -18,14 +20,16 @@ NO_WINDOW_S = 30
 READY_POLL_S = 1.0
 RUNNING_HINT_MAX_WINDOWS = 30
 SNAPSHOT_TIMEOUT_MS = "8000"
-READY_STATUSES = ("ready", "already_running", "no_new_window", "timeout", "launch_failed")
+READY_STATUSES = ("ready", "already_running", "no_new_window", "timeout", "launch_failed", "cancelled")
 READY_MESSAGES = {
     "already_running": "같은 시스템이 이미 떠 있습니다. 닫고 다시 실행해 주세요",
     "no_new_window_hint": "같은 시스템이 이미 떠 있는 것 같습니다. 닫고 다시 실행해 주세요",
     "no_new_window": "실행했지만 창이 뜨지 않았습니다",
     "timeout": "준비 신호가 정한 시간 안에 보이지 않았습니다",
     "launch_failed": "대상 앱을 띄우지 못했습니다",
+    "cancelled": "사용자가 실행을 멈췄습니다",
 }
+"""`cancelled` is the same text as agent.loop.USER_STOP_REASON."""
 
 
 @dataclass(frozen=True)
@@ -73,12 +77,15 @@ def ready_message(outcome):
     return message
 
 
-def wait_until_ready(desktop, exe, ready_text, timeout_s, clock, sleep, no_window_s=NO_WINDOW_S):
+def wait_until_ready(desktop, exe, ready_text, timeout_s, clock, sleep, no_window_s=NO_WINDOW_S, cancelled=None):
     """Launches `exe` and waits until a candidate window shows `ready_text` (see the module
     docstring). Gives up after `timeout_s`, or after `no_window_s` when no new window showed at
-    all. Each read is followed by READY_POLL_S of `sleep`. Never raises for what the desktop
-    answers: every end is a ReadyOutcome."""
+    all. Each read is followed by READY_POLL_S of `sleep`. When `cancelled()` is true before the
+    launch or before a round of reads, ends as "cancelled" without reading the hint. Never raises
+    for what the desktop answers: every end is a ReadyOutcome."""
     start = clock()
+    if cancelled is not None and cancelled():
+        return ReadyOutcome("cancelled")
     before = _windows(desktop)
     before_keys = {_key(row) for row in before}
     before_processes = {_process(row) for row in before}
@@ -99,6 +106,8 @@ def wait_until_ready(desktop, exe, ready_text, timeout_s, clock, sleep, no_windo
     seen_new = isinstance(launch_window, dict) and _key(launch_window) not in before_keys
     polls = 0
     while True:
+        if cancelled is not None and cancelled():
+            return ReadyOutcome("cancelled", waited_ms=elapsed_ms(), polls=polls)
         rows = _windows(desktop)
         polls += 1
         fresh = [row for row in rows if _key(row) not in before_keys]
