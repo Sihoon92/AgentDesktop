@@ -1,6 +1,9 @@
 using System;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace VirtualMesApp
@@ -46,11 +49,53 @@ namespace VirtualMesApp
                 return ExitBadInput;
             }
 
+            if (options.Main)
+            {
+                log.ContinueNumbering();
+            }
+
             Ui.Initialize();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm(new Session(options, log)));
+            if (options.SingleInstance && MainInstance.IsOpen())
+            {
+                log.Write("launcher_skipped", EventLog.Fields(
+                    "pid", Process.GetCurrentProcess().Id, "reason", "main_running"));
+                return ExitOk;
+            }
+            if (options.SplashMs.HasValue)
+            {
+                Application.Run(new SplashForm(log, options.SplashMs.Value));
+            }
+            if (options.Launcher)
+            {
+                return StartMain(options);
+            }
+            using (Mutex held = MainInstance.Hold())
+            {
+                Application.Run(new MainForm(new Session(options, log)));
+                GC.KeepAlive(held);
+            }
             return ExitOk;
+        }
+
+        /// <summary>Starts this exe again as the main window, with every option but the launch ones.</summary>
+        private static int StartMain(Options options)
+        {
+            ProcessStartInfo start = new ProcessStartInfo(Application.ExecutablePath, options.MainCommandLine());
+            start.UseShellExecute = false;
+            try
+            {
+                using (Process.Start(start))
+                {
+                }
+                return ExitOk;
+            }
+            catch (Win32Exception error)
+            {
+                WriteLine(Console.OpenStandardError(), "Could not start the main window: " + error.Message);
+                return ExitFailed;
+            }
         }
 
         /// <summary>Writes one screen's result for the given filters without creating a window.</summary>

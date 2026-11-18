@@ -3,7 +3,7 @@
 > **에이전트 작업자에게:** 작업마다 superpowers:test-driven-development를 따릅니다. 단계는 체크박스(`- [ ]`)로 표시합니다.
 
 - 날짜: 2026-11-18
-- 상태: 사용자 승인(2026-11-18), 구현 중
+- 상태: 사용자 승인(2026-11-18), 작업 1~8 수락, 통합 확인 끝(커밋 전, 실제 창 확인 전)
 - 설계: [시스템 골라 띄우고 준비될 때까지 기다리기 설계](../specs/2026-11-18-system-launch-ready-design.md) (사용자 승인 2026-11-18). 값과 규칙은 설계가 기준이고, 이 계획은 파일, 이름, 시그니처, 테스트, 순서를 정합니다. 구현하는 사람은 둘 다 읽습니다.
 
 **목표:** 설정 파일에 적은 시스템을 뷰어에서 골라 실행하면, 하니스가 그 exe를 띄우고 준비 신호(이름이 똑같은 요소)가 보이는 창을 찾을 때까지 기다린 뒤 모델의 첫 호출로 넘어갑니다.
@@ -21,7 +21,7 @@
 - 준비 판정: 후보 창의 트리에 `name`이 `ready_text`와 똑같은 요소가 있음(앞뒤 공백만 무시). 부분 문자열 아님.
 - 실행 뒤 30초 동안 새 창이 하나도 없으면 멈춤. 다시 읽는 간격은 읽기가 끝난 뒤 1초.
 - 고른 시스템이 이미 떠 있으면(`launch`가 돌려준 프로세스가 실행 전 창 목록에 있음) 건드리지 않고 멈춤. `launch --no-attach`는 쓰지 않음.
-- `ready_text`와 시스템 경로는 코드에 넣지 않고(`tests\test_application_agnostic.py`), `run.json`, 요약, `check.py` 출력에 넣지 않습니다. 시스템 이름은 지금의 `system`처럼 `run.json`에 남아도 됩니다. 이벤트의 글은 `events.jsonl`에만 둡니다.
+- `ready_text`와 시스템 경로는 코드에 넣지 않습니다(`tests\test_application_agnostic.py`). `ready_text`는 `run.json`, 요약, `check.py` 출력에 넣지 않고, 시스템 경로는 요약과 `check.py` 출력에 넣지 않습니다. `run.json`의 `exe`는 지금처럼 모든 실행에 남습니다(로컬 기록, 뷰어가 씀). 시스템 이름도 지금의 `system`처럼 남습니다. 이벤트의 글은 `events.jsonl`에만 둡니다.
 - 작업자는 커밋하지 않고, 실제 창을 띄우는 실행과 실제 모델 호출을 하지 않습니다(`VIRTUAL_MES_LIVE=1` 테스트 포함). 데스크톱은 가짜로 시험합니다.
 - 테스트는 `examples/llm-agent`에서 `/c/Users/sihoo/anaconda3/envs/AgentDesktop/python.exe -m pytest -q`(아래 `pytest`)로 돌립니다. 제출 전 전체 실패 0.
 

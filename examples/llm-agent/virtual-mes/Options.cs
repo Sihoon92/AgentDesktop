@@ -30,6 +30,33 @@ namespace VirtualMesApp
         internal string[] Headless;
         internal bool ParseOnly;
 
+        /// <summary>How long the small loading window stays up before the main window, or null for none.</summary>
+        internal int? SplashMs;
+
+        /// <summary>The loading window's process starts the main window as a second process and ends.</summary>
+        internal bool Launcher;
+
+        /// <summary>The launcher ends with no window when this exe's main window is already open.</summary>
+        internal bool SingleInstance;
+
+        /// <summary>The main window shows its menu only after this long, or at once when null.</summary>
+        internal int? MenuDelayMs;
+
+        /// <summary>
+        /// This process is the main window a launcher started: it never reads VirtualMes.args and
+        /// ignores the launch options, so it cannot start another launcher.
+        /// </summary>
+        internal bool Main;
+
+        /// <summary>Every argument except the launch options, which the launcher hands to the main process.</summary>
+        internal List<string> MainArgs = new List<string>();
+
+        /// <summary>True when any start-up option is in use, which turns on the start-up events.</summary>
+        internal bool UsesStartup
+        {
+            get { return this.SplashMs.HasValue || this.MenuDelayMs.HasValue || this.Main; }
+        }
+
         /// <summary>
         /// Where a filter box opens its list: only on its arrow (the default, as in the real
         /// MES), or anywhere on the box (the behaviour before the arrow became the default).
@@ -57,11 +84,33 @@ namespace VirtualMesApp
             int index = 0;
             while (index < args.Length)
             {
+                int start = index;
                 string flag = args[index];
                 index++;
+                bool launchOption = flag == "--splash-ms" || flag == "--launcher" || flag == "--single-instance";
                 if (flag == "--parse-only")
                 {
                     options.ParseOnly = true;
+                }
+                else if (flag == "--splash-ms")
+                {
+                    options.SplashMs = NonNegative(Value(args, ref index, flag), flag);
+                }
+                else if (flag == "--launcher")
+                {
+                    options.Launcher = true;
+                }
+                else if (flag == "--single-instance")
+                {
+                    options.SingleInstance = true;
+                }
+                else if (flag == "--menu-delay-ms")
+                {
+                    options.MenuDelayMs = NonNegative(Value(args, ref index, flag), flag);
+                }
+                else if (flag == "--main")
+                {
+                    options.Main = true;
                 }
                 else if (flag == "--profile")
                 {
@@ -98,6 +147,28 @@ namespace VirtualMesApp
                 {
                     throw new OptionsException("Unknown option: " + flag);
                 }
+                if (!launchOption && flag != "--main")
+                {
+                    for (int taken = start; taken < index; taken++)
+                    {
+                        options.MainArgs.Add(args[taken]);
+                    }
+                }
+            }
+
+            if (options.Main)
+            {
+                options.SplashMs = null;
+                options.Launcher = false;
+                options.SingleInstance = false;
+            }
+            if (options.Launcher && !options.SplashMs.HasValue)
+            {
+                throw new OptionsException("--launcher needs --splash-ms.");
+            }
+            if (options.SingleInstance && !options.Launcher)
+            {
+                throw new OptionsException("--single-instance needs --launcher and --splash-ms.");
             }
 
             options.Expose = Exposures.Profile(options.Profile);
@@ -127,7 +198,60 @@ namespace VirtualMesApp
             root["delay_ms"] = this.DelayMs.HasValue ? (object)this.DelayMs.Value : null;
             root["log"] = this.LogPath;
             root["combo_open"] = this.ComboOpen;
+            root["splash_ms"] = this.SplashMs.HasValue ? (object)this.SplashMs.Value : null;
+            root["launcher"] = this.Launcher;
+            root["single_instance"] = this.SingleInstance;
+            root["menu_delay_ms"] = this.MenuDelayMs.HasValue ? (object)this.MenuDelayMs.Value : null;
+            root["main"] = this.Main;
+            root["main_command_line"] = this.Launcher ? this.MainCommandLine() : null;
             return new JavaScriptSerializer().Serialize(root);
+        }
+
+        /// <summary>The arguments the launcher starts the main process with: --main, then every other option.</summary>
+        internal string MainCommandLine()
+        {
+            List<string> quoted = new List<string>();
+            quoted.Add("--main");
+            foreach (string arg in this.MainArgs)
+            {
+                quoted.Add(Quote(arg));
+            }
+            return string.Join(" ", quoted.ToArray());
+        }
+
+        /// <summary>
+        /// Quotes one argument so the Windows command-line splitting gives it back unchanged:
+        /// backslashes count only before a double quote, where they are doubled.
+        /// </summary>
+        private static string Quote(string arg)
+        {
+            if (arg.Length > 0 && arg.IndexOfAny(new[] { ' ', '\t', '"' }) < 0)
+            {
+                return arg;
+            }
+            StringBuilder text = new StringBuilder("\"");
+            int slashes = 0;
+            foreach (char ch in arg)
+            {
+                if (ch == '\\')
+                {
+                    slashes++;
+                    continue;
+                }
+                if (ch == '"')
+                {
+                    text.Append('\\', slashes * 2 + 1);
+                }
+                else
+                {
+                    text.Append('\\', slashes);
+                }
+                slashes = 0;
+                text.Append(ch);
+            }
+            text.Append('\\', slashes * 2);
+            text.Append('"');
+            return text.ToString();
         }
 
         private static string Value(string[] args, ref int index, string flag)

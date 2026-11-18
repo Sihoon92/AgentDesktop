@@ -25,6 +25,7 @@ from agent.recorder import RunRecorder
 from agent.registration import register_after_run
 from agent.settings import SettingsError, load_settings, settings_path
 from agent.summary import current_code, write_summary
+from agent.systems import apply_ready, system_exe, system_names
 from agent.task import TaskError, load_task, task_from_args
 from agent.tools import Toolbox
 from viewer.server import make_server
@@ -90,7 +91,8 @@ def main(argv=None):
     parser.add_argument("--baseline", action="store_true", help="Run fixed steps without the model")
     parser.add_argument("--approve", action="store_true", help="Ask on the terminal before every action")
     parser.add_argument("--view", action="store_true", help="Open the step viewer and follow this run live")
-    parser.add_argument("--system", help="Knowledge name of the target system; defaults to the exe name")
+    parser.add_argument("--system", help="Target system: a name in the settings file's systems picks its exe; "
+                                         "it is also the knowledge name (default: the exe name)")
     parser.add_argument("--knowledge-dir", help="Folder that holds the per-system knowledge")
     parser.add_argument("--profile", help="Load .env.<profile> before .env (default: AGENT_PROFILE)")
     args = parser.parse_args(argv)
@@ -241,23 +243,44 @@ def print_summary(run_dir):
 
 
 def _resolve_task(args, settings):
-    """The task from the command line, the task file and the settings, in that order of weight.
-    The settings' exe stands in for --exe only when there is no task file."""
+    """The task from the command line, the task file and the settings, in that order of weight,
+    with the settings' ready signal when its exe is one the settings name."""
+    return apply_ready(_chosen_task(args, settings), settings)
+
+
+def _chosen_task(args, settings):
+    """The exe comes from --exe, else the --system entry of `systems`, else the task file, else the
+    entry the settings' system names, else the settings' exe. A --system that names no entry is
+    only the knowledge name."""
+    named = system_exe(settings, args.system)
     if args.task is not None:
         if args.exe:
             raise TaskError("작업 파일과 --exe는 함께 쓸 수 없습니다. 작업 파일의 exe를 고쳐 주세요")
         task = load_task(args.task, defaults=settings, environ=os.environ)
+        if named:
+            task = replace(task, exe=named)
         return replace(task, goal=args.goal) if args.goal else task
-    exe = args.exe or settings.get("exe")
+    exe = args.exe or named or system_exe(settings, settings.get("system")) or settings.get("exe")
     if not exe:
-        raise TaskError("작업 파일이나 --exe를 지정해 주세요")
+        raise TaskError(_no_exe_reason(args, settings))
     if not args.goal:
         if args.exe:
             raise TaskError("--exe에는 --goal로 지시를 함께 주세요")
-        raise TaskError("작업 파일이 없으면 --goal로 지시를 주세요(실행 파일은 설정 파일의 exe를 씁니다)")
+        raise TaskError("작업 파일이 없으면 --goal로 지시를 주세요(실행 파일은 설정 파일에서 고릅니다)")
     if args.baseline:
         raise TaskError("--baseline은 성공 조건이 있는 작업 파일에서만 쓸 수 있습니다")
     return task_from_args(args.goal, exe, args.level, defaults=settings, environ=os.environ)
+
+
+def _no_exe_reason(args, settings):
+    names = system_names(settings)
+    if not names:
+        return "작업 파일이나 --exe를 지정해 주세요"
+    choices = ", ".join(names)
+    if args.system:
+        return (f"--system {args.system}은(는) 설정 파일의 systems에 없습니다(있는 이름: {choices}). "
+                "그 이름을 쓰거나 작업 파일이나 --exe를 지정해 주세요")
+    return f"--system으로 시스템을 고르거나(설정 파일의 systems: {choices}) 작업 파일이나 --exe를 지정해 주세요"
 
 
 if __name__ == "__main__":

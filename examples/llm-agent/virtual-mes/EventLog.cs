@@ -50,6 +50,37 @@ namespace VirtualMesApp
             }
         }
 
+        /// <summary>
+        /// Numbers the next line after the lines already in the file. A main window started by a
+        /// launcher uses it, so the two processes of one start write one run of `seq`.
+        /// </summary>
+        internal void ContinueNumbering()
+        {
+            if (this.path == null)
+            {
+                return;
+            }
+            lock (this.gate)
+            {
+                string text;
+                using (FileStream stream = new FileStream(
+                    this.path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (StreamReader reader = new StreamReader(stream, new UTF8Encoding(false)))
+                {
+                    text = reader.ReadToEnd();
+                }
+                int lines = 0;
+                foreach (string line in text.Split('\n'))
+                {
+                    if (line.Trim().Length > 0)
+                    {
+                        lines++;
+                    }
+                }
+                this.sequence = lines;
+            }
+        }
+
         /// <summary>Builds the field map from alternating names and values.</summary>
         internal static Dictionary<string, object> Fields(params object[] pairs)
         {

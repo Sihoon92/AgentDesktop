@@ -475,7 +475,8 @@ def test_status_reports_the_active_run_and_default_exe(tmp_path):
         manager.join(timeout=5)
 
     assert json.loads(idle) == {"can_start": True, "active": None, "default_exe": str(exe),
-                                 "can_answer": False, "default_system": None, "default_stage_call_limit": 8}
+                                 "can_answer": False, "default_system": None, "default_stage_call_limit": 8,
+                                 "systems": [], "default_choice": None}
     assert json.loads(busy)["active"] == started["run_id"]
 
 
@@ -486,7 +487,8 @@ def test_status_without_a_run_manager_says_runs_cannot_start(server):
 
     assert status == 200
     assert json.loads(body) == {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
-                                "default_system": None, "default_stage_call_limit": None}
+                                "default_system": None, "default_stage_call_limit": None,
+                                "systems": [], "default_choice": None}
 
 
 def test_favicon_request_is_answered_without_a_404(server):
@@ -1828,3 +1830,117 @@ def test_post_runs_with_a_bad_stage_call_limit_is_400(tmp_path, value):
     assert status == 400
     assert "단계별 호출 한도" in body["error"]
     assert runs_created(tmp_path) == []
+
+
+PATH_MARK = "경로표시"
+
+
+def systems_manager(tmp_path, chosen=None):
+    systems = {name: str(tmp_path / f"{PATH_MARK}-{index}" / "MES.exe")
+               for index, name in enumerate(["울산", "천안소형", "천안중대형"])}
+    defaults = {"systems": systems, **({"system": chosen} if chosen else {})}
+    return make_manager(tmp_path, GatedModel(), task_defaults=defaults)[0], systems
+
+
+def every_text(value):
+    if isinstance(value, dict):
+        return [text for item in value.items() for part in item for text in every_text(part)]
+    if isinstance(value, list):
+        return [text for item in value for text in every_text(item)]
+    return [value] if isinstance(value, str) else []
+
+
+@pytest.mark.parametrize(("chosen", "expected"), [("천안소형", "천안소형"), (None, "울산"), ("없는이름", "울산")])
+def test_status_lists_system_names_without_paths(tmp_path, chosen, expected):
+    manager, systems = systems_manager(tmp_path, chosen)
+    with serving(tmp_path / "runs", manager) as instance:
+        _, _, body = request(instance, "/api/status")
+
+    status = json.loads(body)
+    assert status["systems"] == ["울산", "천안소형", "천안중대형"]
+    assert status["default_choice"] == expected
+    texts = every_text(status)
+    assert not any(PATH_MARK in text for text in texts)
+    assert not any(path in text for path in systems.values() for text in texts)
+
+
+def test_status_without_a_run_manager_has_no_systems(server):
+    instance, _ = server
+
+    _, _, body = request(instance, "/api/status")
+
+    assert json.loads(body)["systems"] == [] and json.loads(body)["default_choice"] is None
+
+
+class RecordingManager:
+    """A run manager stand-in from before systems existed: it has no `systems` or `default_choice`,
+    and it records what start() was given."""
+
+    default_exe = None
+    default_system = None
+
+    def __init__(self):
+        self.started = []
+
+    def active(self):
+        return None
+
+    def can_answer(self):
+        return False
+
+    def start(self, goal, exe=None, level=3, approve=False, system=None, stage_call_limit=None):
+        self.started.append({"goal": goal, "exe": exe, "level": level, "approve": approve, "system": system})
+        return "20261118-000000"
+
+
+def test_status_of_an_older_manager_has_no_systems(tmp_path):
+    with serving(tmp_path / "runs", RecordingManager()) as instance:
+        status, _, body = request(instance, "/api/status")
+
+    assert status == 200
+    assert json.loads(body)["systems"] == [] and json.loads(body)["default_choice"] is None
+
+
+def test_start_with_only_a_system_name(tmp_path):
+    manager = RecordingManager()
+    with serving(tmp_path / "runs", manager) as instance:
+        status, body = post_json(instance, "/api/runs", {"goal": "g", "system": "울산"})
+
+    assert (status, body) == (201, {"run_id": "20261118-000000"})
+    assert manager.started == [{"goal": "g", "exe": None, "level": 3, "approve": False, "system": "울산"}]
+
+
+def test_status_lists_names_that_are_not_strings_out(tmp_path):
+    manager = RecordingManager()
+    manager.systems = ["울산", 3, None, "천안소형"]
+    manager.default_choice = 3
+    with serving(tmp_path / "runs", manager) as instance:
+        _, _, body = request(instance, "/api/status")
+
+    assert json.loads(body)["systems"] == ["울산", "천안소형"]
+    assert json.loads(body)["default_choice"] is None
+
+
+def test_page_has_the_system_list_and_the_ready_banner(server):
+    instance, _ = server
+
+    _, _, page = request(instance, "/", {"X-Agent-Token": None})
+    _, _, script = request(instance, "/static/app.js", {"X-Agent-Token": None})
+
+    html = page.decode("utf-8")
+    assert 'id="system-choice"' in html and 'id="ready-banner"' in html
+    code = script.decode("utf-8")
+    assert "renderReadyBanner" in code and "system-choice" in code
+
+
+
+def test_page_marks_where_the_vision_model_was_used(server):
+    instance, _ = server
+
+    _, _, page = request(instance, "/", {"X-Agent-Token": None})
+    _, _, script = request(instance, "/static/app.js", {"X-Agent-Token": None})
+
+    assert "V 다음 비전 스텝" in page.decode("utf-8")
+    code = script.decode("utf-8")
+    for name in ("vision-badge", "nextVisionStep", 'kind: "look"', "lookDetails", "비전 ${visionReads}회"):
+        assert name in code

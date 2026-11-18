@@ -9,6 +9,10 @@ Precedence where these values are used: command line > task file > settings file
 The text model's name has OPENAI_MODEL between the settings file and the code default, and
 vision_model beats VISION_MODEL. VISION_POINT_MODES repeats agent.vision.POINT_MODES so the two
 modules load independently; a test keeps them equal.
+
+`systems` is the one key whose value is a mapping (name -> exe path); agent.systems picks from it.
+ready_text and ready_timeout_s reach a task only through agent.systems.apply_ready, for an exe the
+settings name, never as task defaults.
 """
 
 import os
@@ -24,8 +28,9 @@ HERE = Path(__file__).resolve().parent.parent
 SETTINGS_ENV = "AGENT_SETTINGS"
 DEFAULT_PATH = HERE / "settings.local.yaml"
 KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
-        "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side", "vision_points")
-NUMBER_KEYS = ("stage_call_limit", "vision_max_side")
+        "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side", "vision_points",
+        "systems", "ready_text", "ready_timeout_s")
+NUMBER_KEYS = ("stage_call_limit", "vision_max_side", "ready_timeout_s")
 VISION_POINT_MODES = ("pixel", "normalized_1000")
 PATH_KEYS = ("knowledge_dir", "exe")
 QUOTE_HINT = "경로는 따옴표 없이 적거나 작은따옴표로 감싸세요"
@@ -114,11 +119,44 @@ def _parse(raw, target):
         if key in NUMBER_KEYS:
             loaded[key] = _number(key, raw[key])
             continue
+        if key == "systems":
+            loaded[key] = _systems(raw[key])
+            continue
         value = "off" if key == "image_mode" and raw[key] is False else raw[key]
         if not isinstance(value, str) or not value.strip():
             raise SettingsError(f"{key} 값은 비어 있지 않은 글이어야 합니다", f"{key} 값이 글이 아님")
         loaded[key] = _checked(key, value.strip(), target)
     return loaded
+
+
+def _systems(value):
+    """The systems as name -> exe path, in the file's order. A name follows the `system` rule and a
+    path the `exe` rule. Errors name the entry's place, never its name or path."""
+    if not isinstance(value, dict):
+        raise SettingsError("systems 값은 '이름: 실행 파일 경로' 줄의 묶음이어야 합니다",
+                            "systems 값이 이름과 경로의 묶음이 아님")
+    if not value:
+        raise SettingsError("systems 값이 비어 있습니다. 시스템을 하나 이상 적거나 systems 줄을 지우세요",
+                            "systems 값이 비어 있음")
+    return {name: _system_path(place, name, path) for place, (name, path) in enumerate(value.items(), start=1)}
+
+
+def _system_path(place, name, path):
+    entry = f"systems {place}번째 항목"
+    try:
+        system_name(name, "")
+    except KnowledgeError as error:
+        raise SettingsError(f"{entry}: 이름은 영문, 숫자, 한글, '.', '_', '-'로 64자까지 쓸 수 있습니다",
+                            f"{entry}: 이름 규칙에 맞지 않음") from error
+    if not isinstance(path, str) or not path.strip():
+        raise SettingsError(f"{entry}: 경로는 비어 있지 않은 글이어야 합니다", f"{entry}: 경로가 글이 아님")
+    path = path.strip()
+    if CONTROL_CHARACTERS.search(path):
+        raise SettingsError(f"{entry}: 경로에 제어 문자가 있습니다. 큰따옴표 안의 역슬래시가 특수 문자로 읽혔을 수 있습니다. "
+                            f"{QUOTE_HINT}", f"{entry}: 경로에 제어 문자 · {QUOTE_HINT}")
+    if not PureWindowsPath(path).is_absolute():
+        raise SettingsError(f"{entry}: 경로는 절대 경로여야 합니다", f"{entry}: 경로가 절대 경로가 아님")
+    return path
 
 
 def _number(key, value):

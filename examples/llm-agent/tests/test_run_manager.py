@@ -892,3 +892,169 @@ def test_the_environment_gives_viewer_runs_their_model(tmp_path):
         "env-model", "env")
     assert configured.build_task("g", None, 3).model_source == "설정 파일"
     assert without.build_task("g", None, 3).model_source == "기본값"
+
+
+def site_exes(tmp_path):
+    exes = {}
+    for key, folder, name in (("ulsan", "SiteA", "MES.exe"), ("cheonan", "SiteB", "MES.exe"), ("other", "Tools", "Other.exe")):
+        target = tmp_path / folder / name
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(b"")
+        exes[key] = target
+    return exes
+
+
+def systems_manager(tmp_path, monkeypatch, default_exe=None, **settings):
+    """A manager with no default exe unless given, whose settings name two systems; returns (manager, spy, exes)."""
+    monkeypatch.setattr(run_manager_module, "run_agent", lambda *args, **kwargs: RunResult("gave_up", 0, "test"))
+    exes = site_exes(tmp_path)
+    defaults = {"systems": {"울산": str(exes["ulsan"]), "천안소형": str(exes["cheonan"])}, **settings}
+    spy = FactorySpy()
+    manager = RunManager(tmp_path / "runs", "ad.exe", default_exe, lambda _task: GatedModel(), spy,
+                         desktop_factory=lambda: DesktopClient("ad.exe", "run1", runner=FakeCli()),
+                         knowledge_dir=tmp_path / "knowledge", task_defaults=defaults)
+    return manager, spy, exes
+
+
+def started(manager, *args, **kwargs):
+    run_id = manager.start("열어줘", *args, **kwargs)
+    manager.join(timeout=5)
+    return run_id
+
+
+def test_start_with_a_system_name_uses_its_exe(tmp_path, monkeypatch):
+    manager, spy, exes = systems_manager(tmp_path, monkeypatch)
+
+    run_id = started(manager, None, 2, system="천안소형")
+
+    [call] = spy.calls
+    assert call["task"].exe == str(exes["cheonan"])
+    assert call["knowledge"].system == "천안소형"
+    assert run_json(tmp_path, run_id)["system"] == "천안소형"
+
+
+def test_a_system_name_with_surrounding_spaces_still_finds_its_exe(tmp_path, monkeypatch):
+    manager, spy, exes = systems_manager(tmp_path, monkeypatch)
+
+    started(manager, None, 2, system=" 울산 ")
+
+    assert spy.calls[0]["task"].exe == str(exes["ulsan"]) and spy.calls[0]["knowledge"].system == "울산"
+
+
+def test_the_form_exe_beats_the_system_entry(tmp_path, monkeypatch):
+    manager, spy, exes = systems_manager(tmp_path, monkeypatch)
+
+    started(manager, str(exes["other"]), 2, system="울산")
+
+    assert spy.calls[0]["task"].exe == str(exes["other"])
+    assert spy.calls[0]["knowledge"].system == "울산"
+
+
+def test_without_a_default_exe_the_default_choice_runs(tmp_path, monkeypatch):
+    manager, spy, exes = systems_manager(tmp_path, monkeypatch, system="천안소형")
+
+    run_id = started(manager, None, 2)
+
+    assert spy.calls[0]["task"].exe == str(exes["cheonan"])
+    assert run_json(tmp_path, run_id)["system"] == "천안소형"
+
+
+def test_without_a_default_exe_or_settings_system_the_first_system_runs(tmp_path, monkeypatch):
+    manager, spy, exes = systems_manager(tmp_path, monkeypatch)
+
+    run_id = started(manager, None, 2, system="")
+
+    assert spy.calls[0]["task"].exe == str(exes["ulsan"])
+    assert run_json(tmp_path, run_id)["system"] == "울산"
+
+
+def test_a_default_exe_beats_the_default_choice_when_the_form_names_no_system(tmp_path, monkeypatch):
+    other = tmp_path / "Tools" / "Other.exe"
+    manager, spy, exes = systems_manager(tmp_path, monkeypatch, default_exe=str(other))
+
+    started(manager, None, 2)
+
+    assert spy.calls[0]["task"].exe == str(exes["other"])
+
+
+def test_an_unknown_system_with_a_default_exe_is_only_a_knowledge_name(tmp_path, monkeypatch):
+    other = tmp_path / "Tools" / "Other.exe"
+    manager, spy, exes = systems_manager(tmp_path, monkeypatch, default_exe=str(other))
+
+    started(manager, None, 2, system="공정")
+
+    assert spy.calls[0]["task"].exe == str(exes["other"]) and spy.calls[0]["knowledge"].system == "공정"
+
+
+def test_an_unknown_system_without_any_exe_is_invalid(tmp_path, monkeypatch):
+    manager, spy, _ = systems_manager(tmp_path, monkeypatch)
+
+    with pytest.raises(InvalidRun) as raised:
+        manager.start("열어줘", None, 2, system="부산")
+
+    assert "설정 파일의 systems에 없는 시스템" in str(raised.value)
+    assert manager.active() is None and spy.calls == []
+    assert not (tmp_path / "runs").exists()
+
+
+@pytest.mark.parametrize("system", [5, ["울산"]])
+def test_a_system_that_is_not_text_is_still_invalid_with_systems(tmp_path, monkeypatch, system):
+    manager, spy, _ = systems_manager(tmp_path, monkeypatch)
+
+    with pytest.raises(InvalidRun):
+        manager.start("열어줘", None, 2, system=system)
+
+    assert spy.calls == []
+
+
+def test_systems_and_default_choice_come_from_the_settings(tmp_path, monkeypatch):
+    with_system, _, _ = systems_manager(tmp_path, monkeypatch, system="천안소형")
+    first, _, _ = systems_manager(tmp_path, monkeypatch, system="공정")
+    plain = RunManager(tmp_path / "runs", "ad.exe", None, None, task_defaults={"system": "공정"})
+
+    assert with_system.systems == ["울산", "천안소형"]
+    assert (with_system.default_choice, first.default_choice) == ("천안소형", "울산")
+    assert (plain.systems, plain.default_choice) == ([], None)
+    assert (RunManager(tmp_path / "runs", "ad.exe", None, None).systems, ) == ([], )
+
+
+def test_viewer_run_gets_the_ready_signal_only_for_a_configured_exe(tmp_path, monkeypatch):
+    manager, spy, exes = systems_manager(tmp_path, monkeypatch, ready_text="생산운영", ready_timeout_s=90)
+    models_saw = []
+    manager._model_factory = lambda task: models_saw.append(task.ready_text) or GatedModel()
+
+    started(manager, None, 2, system="울산")
+    started(manager, str(exes["cheonan"]).upper(), 2)
+    started(manager, str(exes["other"]), 2, system="울산")
+
+    tasks = [call["task"] for call in spy.calls]
+    assert [(task.ready_text, task.ready_timeout_s) for task in tasks] == [
+        ("생산운영", 90), ("생산운영", 90), (None, 180)]
+    assert models_saw == ["생산운영", "생산운영", None]
+
+
+def test_the_settings_exe_as_default_gets_the_ready_signal(tmp_path, monkeypatch):
+    other = str(tmp_path / "Tools" / "Other.exe")
+    manager, spy, _ = systems_manager(tmp_path, monkeypatch, default_exe=other, exe=other, ready_text="생산운영")
+
+    started(manager, None, 2)
+
+    assert spy.calls[0]["task"].ready_text == "생산운영"
+
+
+def test_a_cli_default_exe_the_settings_do_not_name_gets_no_ready_signal(tmp_path, monkeypatch):
+    other = str(tmp_path / "Tools" / "Other.exe")
+    manager, spy, _ = systems_manager(tmp_path, monkeypatch, default_exe=other, ready_text="생산운영")
+
+    started(manager, None, 2)
+
+    assert spy.calls[0]["task"].ready_text is None
+
+
+def test_the_ready_text_stays_out_of_run_json(tmp_path, monkeypatch):
+    manager, _, _ = systems_manager(tmp_path, monkeypatch, ready_text="생산운영")
+
+    run_id = started(manager, None, 2, system="울산")
+
+    text = (tmp_path / "runs" / run_id / "run.json").read_text(encoding="utf-8")
+    assert "생산운영" not in text

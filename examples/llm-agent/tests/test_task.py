@@ -1,6 +1,6 @@
 import pytest
 
-from agent.task import MODEL_ENV, TaskError, load_task, model_choice, task_from_args
+from agent.task import DEFAULT_KEYS, MODEL_ENV, OPTIONAL_KEYS, TaskError, load_task, model_choice, task_from_args
 
 VALID = """
 goal: open settings
@@ -228,4 +228,36 @@ def test_omit_is_a_valid_effort(tmp_path, key):
 
     assert getattr(task, key) == "omit"
     assert getattr(task_from_args("열어", r"C:\a\b.exe", defaults={key: "omit"}), key) == "omit"
+
+
+def test_ready_defaults():
+    task = task_from_args("열어", r"C:\a\b.exe")
+
+    assert (task.ready_text, task.ready_timeout_s) == (None, 180)
+    assert "ready_text" in OPTIONAL_KEYS and "ready_timeout_s" in OPTIONAL_KEYS
+    assert "ready_text" not in DEFAULT_KEYS and "ready_timeout_s" not in DEFAULT_KEYS
+
+
+def test_task_file_may_set_ready_text_and_timeout(tmp_path):
+    task = load_task(write(tmp_path, VALID + "ready_text: 생산운영\nready_timeout_s: 60\n"))
+
+    assert (task.ready_text, task.ready_timeout_s) == ("생산운영", 60)
+
+
+def test_settings_ready_values_do_not_enter_through_defaults(tmp_path):
+    settings = {"ready_text": "생산운영", "ready_timeout_s": 60}
+
+    from_file = load_task(write(tmp_path, VALID), defaults=settings)
+    from_args = task_from_args("열어", r"C:\a\b.exe", defaults=settings)
+
+    assert (from_file.ready_text, from_file.ready_timeout_s) == (None, 180)
+    assert (from_args.ready_text, from_args.ready_timeout_s) == (None, 180)
+
+
+@pytest.mark.parametrize("line", ["ready_text: ''", "ready_text: '   '", "ready_text: 3", "ready_text: [a]",
+                                  "ready_timeout_s: 0", "ready_timeout_s: -5", "ready_timeout_s: '90'",
+                                  "ready_timeout_s: true", "ready_timeout_s: 2.5"])
+def test_bad_ready_values_in_a_task_file_are_refused(tmp_path, line):
+    with pytest.raises(TaskError):
+        load_task(write(tmp_path, VALID + line + "\n"))
 

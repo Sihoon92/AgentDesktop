@@ -21,7 +21,7 @@ from fake_cli import FakeCli, scene_window  # noqa: E402
 
 import check  # noqa: E402
 import run  # noqa: E402
-from agent import checks, settings as settings_module  # noqa: E402
+from agent import checks, ready, settings as settings_module  # noqa: E402
 from agent.survey import id_keys, kinds  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -840,3 +840,245 @@ def test_point_rng_range_keeps_the_two_rules_apart():
 ])
 def test_first_point_reads_the_reply(text, point):
     assert checks.first_point(text) == point
+
+
+SIGNAL = f"{MARK}-신호"
+LAUNCHED = json.loads((FIXTURES / "launch.json").read_text(encoding="utf-8"))["data"]
+SPLASH = scene_window("w-splash", f"{MARK} 팝업", box(0, 0, 320, 110))
+MAIN_ELSEWHERE = scene_window("w-main", f"{MARK} 메인", box(0, 0, 816, 608), pid=LAUNCHED["pid"] + 1)
+
+
+def splash_tree():
+    return {"role": "window", "name": SIGNAL, "bounds": box(0, 0, 320, 110),
+            "children": [{"role": "text", "name": f"{MARK} 불러오는 중 {SIGNAL}", "bounds": box(10, 10)}]}
+
+
+def signalled_tree():
+    tree = marked_tree()
+    tree["children"].append({"role": "button", "name": SIGNAL, "ref_id": "@e8", "bounds": box(10, 240)})
+    return tree
+
+
+class ReadyCli(CheckCli):
+    """CheckCli whose windows appear only after launch: `before` is listed until then, and each
+    list-windows after it takes the next entry of `timeline` (the last one repeats)."""
+
+    def __init__(self, timeline, before=()):
+        super().__init__()
+        self.scene["trees"] = {"w-splash": splash_tree(), "w-main": signalled_tree(), "w-1": signalled_tree()}
+        self.timeline = timeline
+        self.before = list(before)
+        self.launched = False
+        self.reads = 0
+
+    def _respond(self, words):
+        if words[0] == "launch":
+            self.launched = True
+            envelope = super()._respond(words)
+            first = self.timeline[0]
+            envelope["data"]["window"] = dict(first[0]) if first else None
+            if not first:
+                envelope["data"].pop("window")
+            return envelope
+        return super()._respond(words)
+
+    def _windows(self):
+        if not self.launched:
+            rows = self.before
+        else:
+            rows = self.timeline[min(self.reads, len(self.timeline) - 1)]
+            self.reads += 1
+            self.scene["windows"] = json.loads(json.dumps(rows)) or self.scene["windows"]
+        return {"version": "2.6", "ok": True, "command": "list-windows", "data": json.loads(json.dumps(rows))}
+
+
+class StepClock:
+    """Time moves only when the check sleeps, so the waited seconds are exact."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def run_ready(env, capsys, *argv, timeline=None, before=(), clock=None):
+    env.cli = ReadyCli(timeline if timeline is not None else [[SPLASH], [MAIN_ELSEWHERE]], before)
+    deps = env.deps()
+    if clock is not None:
+        deps.clock, deps.sleep = clock.clock, clock.sleep
+    code = check.main(["--skip", "llm", *argv], deps)
+    out = capsys.readouterr()
+    return code, out.out + out.err
+
+
+def systems_settings(env, *, system=None, ready=True, timeout=None, extra=""):
+    second = env.tmp / f"{MARK}둘" / "second.exe"
+    second.parent.mkdir(exist_ok=True)
+    second.write_bytes(b"")
+    third = env.tmp / f"{MARK}셋" / "third.exe"
+    lines = ["systems:", f"  {MARK}1: {env.exe}", f"  {MARK}2: {second}", f"  {MARK}3: {third}"]
+    if system:
+        lines.append(f"system: {system}")
+    if ready:
+        lines.append(f"ready_text: {SIGNAL}")
+    if timeout:
+        lines.append(f"ready_timeout_s: {timeout}")
+    env.settings("\n".join(lines) + "\n" + extra)
+    return second
+
+
+def launched_exes(env):
+    return [words[1] for words in env.cli.commands() if words[0] == "launch"]
+
+
+def test_settings_line_counts_systems_and_says_whether_a_signal_is_set(env, capsys):
+    systems_settings(env)
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app")
+    assert lines_of(out)["설정"] == (
+        "설정: 통과 (설정 파일 읽음 · 설정 파일에서 온 키: systems, ready_text · 시스템 3개 · 준비 신호 있음)")
+    assert MARK not in out and str(env.tmp) not in out
+    systems_settings(env, ready=False)
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app")
+    assert lines_of(out)["설정"].endswith("· 시스템 3개 · 준비 신호 없음)")
+
+
+def test_settings_line_says_a_signal_without_systems(env, capsys):
+    env.settings(f"exe: {env.exe}\nready_text: {SIGNAL}\n")
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app")
+    assert lines_of(out)["설정"].endswith("설정 파일에서 온 키: exe, ready_text · 시스템 0개 · 준비 신호 있음)")
+    assert SIGNAL not in out
+
+
+def test_system_option_picks_the_exe_to_check(env, capsys):
+    second = systems_settings(env, ready=False)
+    code, out = env.run(capsys, "--skip", "llm", "--system", f"{MARK}2")
+    assert launched_exes(env) == [str(second)]
+    assert code == 0, out
+    assert MARK not in out
+
+
+def test_exe_option_beats_the_system_option(env, capsys):
+    systems_settings(env, ready=False)
+    env.run(capsys, "--skip", "llm", "--system", f"{MARK}2", "--exe", str(env.exe))
+    assert launched_exes(env) == [str(env.exe)]
+
+
+@pytest.mark.parametrize(("system", "picked"), [(None, 0), (f"{MARK}2", 1)])
+def test_without_system_option_the_default_choice_is_checked(env, capsys, system, picked):
+    second = systems_settings(env, system=system, ready=False, extra=f"exe: {env.tmp / 'other.exe'}\n")
+    env.run(capsys, "--skip", "llm")
+    assert launched_exes(env) == [[str(env.exe), str(second)][picked]]
+
+
+def test_unknown_system_option_fails_without_launching(env, capsys):
+    systems_settings(env)
+    code, out = env.run(capsys, "--skip", "llm", "--system", f"{MARK}9")
+    assert code == 1
+    assert lines_of(out)["앱 관찰"] == "앱 관찰: 실패(SYSTEM_UNKNOWN)"
+    assert "launch" not in env.cli.command_names()
+    assert MARK not in out
+
+
+def test_ready_check_reports_seconds_and_switch(env, capsys):
+    systems_settings(env)
+    timeline = [[SPLASH]] * 12 + [[SPLASH, MAIN_ELSEWHERE]]
+    code, out = run_ready(env, capsys, timeline=timeline, clock=StepClock())
+    rows = lines_of(out)
+    assert rows["준비 신호"] == "준비 신호: 통과 (찾음 · 12초 · 대상 바뀜)"
+    assert rows["앱 관찰"].startswith("앱 관찰: 통과")
+    assert code == 0, out
+    snapshots = [words for words in env.cli.commands() if words[0] == "snapshot"]
+    assert snapshots[-1][:3] == ["snapshot", "--window-id", "w-main"]
+    assert MARK not in out and str(env.tmp) not in out
+
+
+def test_ready_check_in_the_same_process_says_the_target_stayed(env, capsys):
+    systems_settings(env)
+    main = scene_window("w-1", f"{MARK} 메인", box(0, 0, 816, 608))
+    _, out = run_ready(env, capsys, timeline=[[SPLASH], [main]], clock=StepClock())
+    assert lines_of(out)["준비 신호"] == "준비 신호: 통과 (찾음 · 1초 · 대상 그대로)"
+
+
+def test_ready_line_comes_before_the_app_line(env, capsys):
+    systems_settings(env)
+    _, out = run_ready(env, capsys)
+    names = [line.strip().split(":")[0] for line in out.splitlines() if line.startswith("  ")]
+    assert names == ["바이너리", "설정", "LLM 호출", "LLM 도구 호출", "LLM 그림 입력", "준비 신호", "앱 관찰", "id 유지"]
+
+
+@pytest.mark.parametrize(("status", "timeline", "before"), [
+    ("already_running", [[SPLASH]], [scene_window("w-old", f"{MARK} 메인", box(0, 0, 816, 608))]),
+    ("no_new_window", [[]], []),
+    ("timeout", [[SPLASH]], []),
+])
+def test_ready_check_failure_codes(env, capsys, status, timeline, before):
+    systems_settings(env, timeout=60)
+    code, out = run_ready(env, capsys, timeline=timeline, before=before, clock=StepClock())
+    rows = lines_of(out)
+    assert code == 1
+    assert rows["준비 신호"].startswith(f"준비 신호: 실패(READY_{status.upper()}) (")
+    assert ready.READY_MESSAGES[status] in rows["준비 신호"]
+    assert rows["앱 관찰"] == "앱 관찰: 건너뜀 (준비 신호 실패)"
+    assert rows["id 유지"] == "id 유지: 건너뜀 (관찰 없음)"
+    assert "screenshot" not in env.cli.command_names()
+    assert MARK not in out
+
+
+def test_failed_launch_while_waiting_gives_its_code(env, capsys):
+    systems_settings(env)
+    env.cli = ReadyCli([[SPLASH]])
+    env.cli.action_results["launch"] = {"ok": False, "error": {"code": "APP_NOT_FOUND", "message": MARK}}
+    original = env.cli._respond
+
+    def refusing(words):
+        return env.cli.action_results["launch"] if words[0] == "launch" else original(words)
+
+    env.cli._respond = refusing
+    code, out = env.run(capsys, "--skip", "llm")
+    assert code == 1
+    assert lines_of(out)["준비 신호"].startswith("준비 신호: 실패(READY_LAUNCH_FAILED) (")
+    assert MARK not in out
+
+
+def test_ready_waits_only_as_long_as_the_settings_say(env, capsys):
+    systems_settings(env, timeout=5)
+    clock = StepClock()
+    _, out = run_ready(env, capsys, timeline=[[SPLASH]], clock=clock)
+    assert lines_of(out)["준비 신호"].startswith("준비 신호: 실패(READY_TIMEOUT)")
+    assert 5 <= clock.now < 7
+
+
+def test_no_ready_line_without_a_signal(env, capsys):
+    systems_settings(env, ready=False)
+    code, out = env.run(capsys, "--skip", "llm")
+    rows = lines_of(out)
+    assert "준비 신호" not in rows
+    assert rows["앱 관찰"].startswith("앱 관찰: 통과")
+    assert code == 0, out
+
+
+def test_no_ready_line_for_an_exe_the_settings_do_not_name(env, capsys):
+    systems_settings(env)
+    other = env.tmp / "other" / "other.exe"
+    other.parent.mkdir()
+    other.write_bytes(b"")
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(other))
+    assert "준비 신호" not in lines_of(out)
+    assert launched_exes(env) == [str(other)]
+
+
+def test_skip_app_skips_the_ready_line_too(env, capsys):
+    systems_settings(env)
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app")
+    assert lines_of(out)["준비 신호"] == "준비 신호: 건너뜀"
+    assert env.cli.calls == [] or set(env.cli.command_names()) <= {"version"}
+
+
+def test_ids_of_a_chosen_system_are_kept_under_its_name(env, capsys):
+    systems_settings(env, ready=False)
+    env.run(capsys, "--skip", "llm", "--system", f"{MARK}2")
+    assert (env.check_dir / f"{MARK}2.json").exists()

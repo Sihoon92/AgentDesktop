@@ -29,8 +29,10 @@ from agent.images import image_items
 from agent.knowledge import KnowledgeError, system_name
 from agent.llm import (TEXT_URL_ENV, VISION_KEY_ENV, VISION_MODEL_ENV, VISION_URL_ENV, ModelSetupError,
                        text_responder, vision_setup)
+from agent.ready import ready_message, wait_until_ready
 from agent.settings import VISION_POINT_MODES, SettingsError, load_settings, settings_path
 from agent.survey import id_keys, kinds
+from agent.systems import apply_ready, default_choice, system_exe
 from agent.task import Task, model_choice
 from agent.vision import VISION_INSTRUCTIONS
 from run import BINARIES, ENV_FILES
@@ -58,6 +60,7 @@ IMAGE_MODE_IGNORED = "설정의 image_mode 무시"
 DIGITS_QUESTION = "Reply with only the digits the image shows, nothing else."
 POINT_QUESTION = ('Where is the red circle? It has no numbered box. Put its center in "points" '
                   'with the label "red circle".')
+READY = "준비 신호"
 APP = "앱 관찰"
 IDS = "id 유지"
 
@@ -97,6 +100,36 @@ def _openai_client(api_key, base_url):
     return OpenAI(**arguments)
 
 
+@dataclass(frozen=True)
+class Target:
+    """The app the check reads: its exe, the system it was picked as, and the ready signal
+    agent.systems.apply_ready gives it. `unknown` is a --system name the settings do not have."""
+
+    exe: str | None
+    system: str | None = None
+    ready_text: str | None = None
+    ready_timeout_s: int = next(item.default for item in fields(Task) if item.name == "ready_timeout_s")
+    unknown: bool = False
+
+
+def pick_target(exe, system, settings):
+    """The exe in the same order as a run: --exe, then the --system entry, then the default
+    choice's entry, then the settings exe. Only one system is ever picked."""
+    if exe:
+        target = Target(exe)
+    elif system is not None:
+        found = system_exe(settings, system)
+        if found is None:
+            return Target(None, unknown=True)
+        target = Target(found, system=system)
+    elif default_choice(settings) is not None:
+        chosen = default_choice(settings)
+        target = Target(system_exe(settings, chosen), system=chosen)
+    else:
+        target = Target(settings.get("exe"))
+    return apply_ready(target, settings) if target.exe else target
+
+
 @dataclass
 class Deps:
     """What the check reaches outside itself; tests replace each part."""
@@ -114,7 +147,8 @@ class Deps:
 
 def main(argv=None, deps=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--exe", help="Absolute path of the target executable; defaults to the settings' exe")
+    parser.add_argument("--exe", help="Absolute path of the target executable; defaults to the chosen system's exe")
+    parser.add_argument("--system", help="A name from the settings' systems to check; defaults to the viewer's choice")
     parser.add_argument("--skip", action="append", choices=SKIPPABLE, default=[], help="Skip the llm or app checks")
     parser.add_argument("--settings", help="Settings file; defaults to AGENT_SETTINGS, then settings.local.yaml")
     parser.add_argument("--profile", help="Load .env.<profile> before .env (default: AGENT_PROFILE)")
@@ -149,11 +183,12 @@ def run_checks(args, deps):
         results += _guarded(LLM_NAMES, lambda: check_llm(deps, settings, split))
         if vision_items:
             results += _guarded(VISION_NAMES, lambda: check_vision(deps, settings, split))
+    target = pick_target(args.exe, args.system, settings)
+    names = ([READY] if target.ready_text is not None else []) + [APP, IDS]
     if "app" in args.skip:
-        results += [skipped(APP), skipped(IDS)]
+        results += [skipped(name) for name in names]
     else:
-        exe = args.exe or settings.get("exe")
-        results += _guarded([APP, IDS], lambda: check_app(deps, binary, exe, settings))
+        results += _guarded(names, lambda: check_app(deps, binary, target, settings))
     return results
 
 
@@ -203,7 +238,10 @@ def check_settings(explicit, environ):
     if not path.is_file():
         return passed(SETTINGS, "설정 파일 없음 · 코드 기본값 사용"), settings
     keys = ", ".join(settings) if settings else "없음"
-    return passed(SETTINGS, f"설정 파일 읽음 · 설정 파일에서 온 키: {keys}"), settings
+    detail = f"설정 파일 읽음 · 설정 파일에서 온 키: {keys}"
+    if "systems" in settings or "ready_text" in settings:
+        detail += f" · {checks.systems_detail(settings)}"
+    return passed(SETTINGS, detail), settings
 
 
 def _env_set(environ, name):
@@ -384,32 +422,70 @@ def _check_image(responder, deps):
     return failed(LLM_IMAGE, "IMAGE_NOT_READ", detail)
 
 
-def check_app(deps, binary, exe, settings):
+def check_app(deps, binary, target, settings):
     """Reads the target's main window once, launching the app only when it is not running.
-    Nothing is clicked or typed, and an app the check launched stays open."""
+    Nothing is clicked or typed, and an app the check launched stays open.
+
+    With a ready signal the app is launched and waited for the way a run does
+    (agent.ready.wait_until_ready), and the ready window is the one read; a system that is
+    already running fails the wait instead of being read."""
     no_ids = skipped(IDS, "관찰 없음")
+    signal = target.ready_text is not None
+    not_waited = [skipped(READY, "띄우지 않음")] if signal else []
+    if target.unknown:
+        return [failed(APP, "SYSTEM_UNKNOWN"), no_ids]
+    exe = target.exe
     if not exe:
         return [failed(APP, "NO_EXE"), no_ids]
     if not Path(exe).exists():
-        return [failed(APP, "EXE_MISSING"), no_ids]
+        return not_waited + [failed(APP, "EXE_MISSING"), no_ids]
     if not binary.exists():
-        return [failed(APP, "BINARY_MISSING"), no_ids]
+        return not_waited + [failed(APP, "BINARY_MISSING"), no_ids]
     session = start_session(str(binary), f"check {datetime.now():%Y%m%d-%H%M%S}", deps.runner)
     if session is None:
-        return [failed(APP, "SESSION_FAILED"), no_ids]
+        return not_waited + [failed(APP, "SESSION_FAILED"), no_ids]
     desktop = DesktopClient(str(binary), session, deps.runner)
-    launched = desktop.run("launch", str(exe))
-    if not launched.get("ok"):
-        return [failed(APP, f"launch {checks.envelope_code(launched)}"), no_ids]
-    window = _main_window(desktop, launched.get("data") or {}, deps)
-    if window is None:
-        return [failed(APP, "NO_WINDOW"), no_ids]
+    if signal:
+        outcome = wait_until_ready(desktop, str(exe), target.ready_text, target.ready_timeout_s, deps.clock,
+                                   deps.sleep)
+        if outcome.status != "ready":
+            return [_ready_failure(outcome), skipped(APP, "준비 신호 실패"), no_ids]
+        waited = [passed(READY, checks.ready_detail(outcome.waited_ms, outcome.switched))]
+        window = (outcome.window or {}).get("id")
+        process = checks.process_mark(outcome.pid, outcome.instance)
+    else:
+        launched = desktop.run("launch", str(exe))
+        if not launched.get("ok"):
+            return [failed(APP, f"launch {checks.envelope_code(launched)}"), no_ids]
+        launched_data = launched.get("data") or {}
+        window = _main_window(desktop, launched_data, deps)
+        if window is None:
+            return [failed(APP, "NO_WINDOW"), no_ids]
+        waited = []
+        process = checks.process_mark(launched_data.get("pid"), launched_data.get("process_instance"))
+    app, keys = _observe(deps, desktop, window)
+    if keys is None:
+        return waited + [app, no_ids]
+    return waited + [app, _check_ids(deps, exe, target.system or settings.get("system"), keys, process)]
+
+
+def _ready_failure(outcome):
+    """READY_<STATUS> with the run's own reason (agent.ready.READY_MESSAGES) and the seconds waited.
+    The signal itself is never in the reason."""
+    detail = f"{ready_message(outcome)} · {checks.whole_seconds(outcome.waited_ms)}"
+    if outcome.status == "launch_failed":
+        detail += f" · launch {checks.envelope_code({'error': outcome.launch_error})}"
+    return failed(READY, f"READY_{outcome.status.upper()}", detail)
+
+
+def _observe(deps, desktop, window):
+    """(app result, element id keys) of one read of `window`; keys is None when the read failed."""
     started = deps.clock()
     snapshot = desktop.run("snapshot", "--window-id", window, "--compact", "--include-bounds",
                            "--timeout-ms", OBSERVE_TIMEOUT_MS)
     elapsed = deps.clock() - started
     if not snapshot.get("ok"):
-        return [failed(APP, f"snapshot {checks.envelope_code(snapshot)}", checks.seconds(elapsed)), no_ids]
+        return failed(APP, f"snapshot {checks.envelope_code(snapshot)}", checks.seconds(elapsed)), None
     data = snapshot.get("data") or {}
     tree = data.get("tree") or {}
     counted, keys = kinds(tree), id_keys(tree)
@@ -418,9 +494,7 @@ def check_app(deps, binary, exe, settings):
     detail = checks.observation_detail(counted, data.get("complete"), elapsed, shot_data)
     app = (passed(APP, detail) if shot.get("ok")
            else failed(APP, f"screenshot {checks.envelope_code(shot)}", detail))
-    launched_data = launched.get("data") or {}
-    process = checks.process_mark(launched_data.get("pid"), launched_data.get("process_instance"))
-    return [app, _check_ids(deps, exe, settings, keys, process)]
+    return app, keys
 
 
 def _main_window(desktop, launched, deps):
@@ -448,11 +522,12 @@ def _screenshot(desktop, window):
         return desktop.run("screenshot", "--window-id", window, str(Path(folder) / "window.png"))
 
 
-def _check_ids(deps, exe, settings, keys, process):
+def _check_ids(deps, exe, system, keys, process):
     """Compares the element ids with the last check of this system when the app was started
-    again since then. A check of the same process proves nothing and keeps the saved ids."""
+    again since then. A check of the same process proves nothing and keeps the saved ids.
+    `system` is the chosen system's name, else the settings' system (else the exe's name)."""
     try:
-        system = system_name(settings.get("system"), exe)
+        system = system_name(system, exe)
     except KnowledgeError:
         return failed(IDS, "SYSTEM_NAME_INVALID")
     path = checks.ids_path(deps.check_dir, system)

@@ -1018,3 +1018,161 @@ def test_env_example_is_not_ignored_by_git():
 
     assert result.returncode == 1
     assert ignored_env.returncode == 0
+
+
+def site_exes(tmp_path):
+    """Two configured systems' executables and one app the settings do not name."""
+    paths = {}
+    for name, folder in (("ulsan", "SiteA"), ("cheonan", "SiteB"), ("other", "Tools")):
+        target = tmp_path / folder / ("Other.exe" if name == "other" else "MES.exe")
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("", encoding="utf-8")
+        paths[name] = target
+    return paths
+
+
+def systems_settings(monkeypatch, tmp_path, extra=""):
+    exes = site_exes(tmp_path)
+    settings_file(monkeypatch, tmp_path,
+                  f"systems:\n  울산: '{exes['ulsan']}'\n  천안소형: '{exes['cheonan']}'\n" + extra)
+    return exes
+
+
+def test_system_option_picks_its_exe(monkeypatch, tmp_path):
+    exes = systems_settings(monkeypatch, tmp_path)
+
+    code, toolbox, _ = wired(monkeypatch, tmp_path, "--system", "천안소형", "--goal", "x")
+
+    assert code == 3
+    assert toolbox._task.exe == str(exes["cheonan"])
+    assert toolbox.knowledge.system == "천안소형"
+    [(meta, _)] = recorded_runs(tmp_path)
+    assert meta["system"] == "천안소형"
+
+
+def test_exe_option_beats_the_system_entry(monkeypatch, tmp_path):
+    exes = systems_settings(monkeypatch, tmp_path)
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, "--exe", exes["other"], "--system", "울산", "--goal", "x")
+
+    assert toolbox._task.exe == str(exes["other"])
+    assert toolbox.knowledge.system == "울산"
+
+
+def test_system_option_beats_the_task_files_exe(monkeypatch, tmp_path):
+    exes = systems_settings(monkeypatch, tmp_path)
+    task = write_task(tmp_path, exes["other"])
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, task, "--system", "울산")
+
+    assert toolbox._task.exe == str(exes["ulsan"])
+    assert toolbox._task.require == [{"role": "switch"}]
+    assert toolbox.knowledge.system == "울산"
+
+
+def test_task_files_exe_beats_the_settings_system_entry(monkeypatch, tmp_path):
+    exes = systems_settings(monkeypatch, tmp_path, "system: 울산\n")
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, write_task(tmp_path, exes["other"]))
+
+    assert toolbox._task.exe == str(exes["other"])
+
+
+def test_settings_system_picks_its_entry_before_the_settings_exe(monkeypatch, tmp_path):
+    exes = site_exes(tmp_path)
+    settings_file(monkeypatch, tmp_path, f"exe: '{exes['other']}'\nsystem: 천안소형\n"
+                                         f"systems:\n  울산: '{exes['ulsan']}'\n  천안소형: '{exes['cheonan']}'\n")
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, "--goal", "x")
+
+    assert toolbox._task.exe == str(exes["cheonan"])
+    assert toolbox.knowledge.system == "천안소형"
+
+
+def test_settings_exe_stays_when_the_settings_system_names_no_entry(monkeypatch, tmp_path):
+    exes = site_exes(tmp_path)
+    settings_file(monkeypatch, tmp_path, f"exe: '{exes['other']}'\nsystem: 공정\nsystems:\n  울산: '{exes['ulsan']}'\n")
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, "--goal", "x")
+
+    assert toolbox._task.exe == str(exes["other"])
+    assert toolbox.knowledge.system == "공정"
+
+
+def test_unknown_system_name_is_only_a_knowledge_name(monkeypatch, tmp_path):
+    exes = systems_settings(monkeypatch, tmp_path, f"exe: '{tmp_path / 'Tools' / 'Other.exe'}'\n")
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, "--system", "공정", "--goal", "x")
+
+    assert toolbox._task.exe == str(exes["other"])
+    assert toolbox.knowledge.system == "공정"
+
+
+def test_unknown_system_name_without_exe_is_refused(monkeypatch, tmp_path, capsys):
+    systems_settings(monkeypatch, tmp_path)
+
+    code, toolbox, _ = wired(monkeypatch, tmp_path, "--system", "부산", "--goal", "x")
+
+    assert code == 2 and toolbox is None
+    err = capsys.readouterr().err
+    assert "systems에 없습니다" in err and "울산" in err and "천안소형" in err
+    assert "시스템 이름을 쓸 수 없습니다" not in err
+    assert not (tmp_path / "runs").exists()
+
+
+def test_systems_without_a_chosen_one_ask_for_system_or_exe(monkeypatch, tmp_path, capsys):
+    systems_settings(monkeypatch, tmp_path)
+
+    code, toolbox, _ = wired(monkeypatch, tmp_path, "--goal", "x")
+
+    assert code == 2 and toolbox is None
+    err = capsys.readouterr().err
+    assert "--system" in err and "--exe" in err
+
+
+def test_ready_text_reaches_the_task_for_a_configured_exe(monkeypatch, tmp_path):
+    exes = systems_settings(monkeypatch, tmp_path, "ready_text: 생산운영\nready_timeout_s: 90\n")
+
+    by_name = wired(monkeypatch, tmp_path, "--system", "울산", "--goal", "x")[1]._task
+    by_path = wired(monkeypatch, tmp_path, "--exe", str(exes["cheonan"]).upper(), "--goal", "x")[1]._task
+
+    assert (by_name.ready_text, by_name.ready_timeout_s) == ("생산운영", 90)
+    assert (by_path.ready_text, by_path.ready_timeout_s) == ("생산운영", 90)
+
+
+def test_ready_text_reaches_the_task_for_the_settings_exe(monkeypatch, tmp_path):
+    exes = site_exes(tmp_path)
+    settings_file(monkeypatch, tmp_path, f"exe: '{exes['other']}'\nready_text: 생산운영\n")
+
+    task = wired(monkeypatch, tmp_path, "--goal", "x")[1]._task
+
+    assert (task.ready_text, task.ready_timeout_s) == ("생산운영", 180)
+
+
+def test_ready_text_does_not_reach_another_exe(monkeypatch, tmp_path):
+    exes = systems_settings(monkeypatch, tmp_path, "ready_text: 생산운영\n")
+
+    by_exe = wired(monkeypatch, tmp_path, "--exe", exes["other"], "--goal", "x")[1]._task
+    by_task_file = wired(monkeypatch, tmp_path, write_task(tmp_path, exes["other"]))[1]._task
+
+    assert by_exe.ready_text is None and by_task_file.ready_text is None
+
+
+def test_task_files_ready_text_beats_the_settings(monkeypatch, tmp_path):
+    exes = systems_settings(monkeypatch, tmp_path, "ready_text: 생산운영\nready_timeout_s: 90\n")
+    task = write_task(tmp_path, exes["ulsan"])
+    task.write_text(task.read_text(encoding="utf-8") + "ready_text: 메뉴\nready_timeout_s: 20\n", encoding="utf-8")
+
+    seen = wired(monkeypatch, tmp_path, task)[1]._task
+
+    assert (seen.ready_text, seen.ready_timeout_s) == ("메뉴", 20)
+
+
+def test_the_ready_text_and_system_paths_are_not_printed(monkeypatch, tmp_path, capsys):
+    systems_settings(monkeypatch, tmp_path, "ready_text: 생산운영\n")
+
+    wired(monkeypatch, tmp_path, "--system", "울산", "--goal", "x")
+
+    out = capsys.readouterr().out
+    assert "생산운영" not in out and "SiteA" not in out and "SiteB" not in out
+    assert "systems, ready_text" in out

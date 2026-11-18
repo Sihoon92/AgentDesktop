@@ -1,4 +1,5 @@
 import json
+import subprocess
 
 import pytest
 
@@ -195,3 +196,84 @@ def test_process_summary_is_the_same_for_the_same_filters(tmp_path):
     first = rows(tmp_path, "process-summary", {"period": "기간", "from": "2026-11-02", "to": "2026-11-06"})
     again = rows(tmp_path, "process-summary", {"period": "기간", "from": "2026-11-02", "to": "2026-11-06"})
     assert first == again != rows(tmp_path, "process-summary", {})
+
+
+STARTUP_OFF = {"splash_ms": None, "launcher": False, "single_instance": False, "menu_delay_ms": None,
+               "main": False, "main_command_line": None}
+
+
+def startup(out):
+    return {key: out.get(key, "missing") for key in STARTUP_OFF}
+
+
+def test_startup_options_parse():
+    out = parsed("--splash-ms", "1500", "--launcher", "--single-instance", "--menu-delay-ms", "2000")
+    assert (out["splash_ms"], out["launcher"], out["single_instance"], out["menu_delay_ms"], out["main"]) == (
+        1500, True, True, 2000, False)
+    assert startup(parsed()) == STARTUP_OFF
+
+
+def test_splash_without_a_launcher_stays_in_one_process():
+    out = parsed("--splash-ms", "0", "--menu-delay-ms", "0")
+    assert (out["splash_ms"], out["launcher"], out["menu_delay_ms"], out["main_command_line"]) == (0, False, 0, None)
+
+
+@pytest.mark.parametrize("args", [
+    ["--launcher"], ["--single-instance"], ["--splash-ms", "-1"], ["--menu-delay-ms", "x"],
+    ["--launcher", "--single-instance"], ["--splash-ms", "1000", "--single-instance"], ["--splash-ms"],
+    ["--menu-delay-ms", "-5"]])
+def test_bad_startup_options_exit_2(args):
+    done = run_exe(*args, "--parse-only")
+    assert done.returncode == 2
+    assert done.stderr.strip()
+
+
+def test_main_flag_ignores_the_args_file(tmp_path):
+    copy = tmp_path / EXE.name
+    copy.write_bytes(EXE.read_bytes())
+    (tmp_path / "VirtualMes.args").write_text("--splash-ms 1000 --launcher --parse-only", encoding="utf-8")
+    from_file = json.loads(run_exe(exe=copy).stdout)
+    assert (from_file["splash_ms"], from_file["launcher"]) == (1000, True)
+    out = parsed_with(copy, "--main")
+    assert (out["splash_ms"], out["launcher"], out["main"]) == (None, False, True)
+
+
+def parsed_with(exe, *args):
+    done = run_exe(*args, "--parse-only", exe=exe)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_main_flag_ignores_startup_options_it_is_given():
+    out = parsed("--main", "--splash-ms", "1000", "--launcher", "--single-instance", "--menu-delay-ms", "700")
+    assert (out["splash_ms"], out["launcher"], out["single_instance"], out["main"]) == (None, False, False, True)
+    assert out["menu_delay_ms"] == 700 and out["main_command_line"] is None
+
+
+def run_command_line(command_line):
+    """Runs the exe with a raw command line, so the app's own argument splitting reads it."""
+    done = subprocess.run(f'"{EXE}" {command_line} --parse-only', capture_output=True, encoding="utf-8",
+                          errors="replace", stdin=subprocess.DEVNULL, timeout=60)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+@pytest.mark.parametrize("log", [r"C:\a b\x.jsonl", "C:\\a b\\", r"C:\plain.jsonl", r'C:\say "hi"\x.jsonl'])
+def test_launcher_hands_the_main_process_every_option_but_the_launch_ones(log):
+    out = parsed("--profile", "easy", "--splash-ms", "1500", "--launcher", "--single-instance",
+                 "--menu-delay-ms", "2000", "--seed", "7", "--log", log)
+    assert not {"--splash-ms", "1500", "--launcher", "--single-instance"} & set(out["main_command_line"].split())
+    main = run_command_line(out["main_command_line"])
+    assert main["main"] is True
+    assert (main["splash_ms"], main["launcher"], main["single_instance"]) == (None, False, False)
+    assert (main["profile"], main["menu_delay_ms"], main["seed"], main["log"]) == ("easy", 2000, 7, log)
+
+
+def test_launcher_from_the_args_file_hands_those_options_on(tmp_path):
+    copy = tmp_path / EXE.name
+    copy.write_bytes(EXE.read_bytes())
+    (tmp_path / "VirtualMes.args").write_text(
+        r'--profile hard --splash-ms 500 --launcher --parse-only --log "C:\a b\x.jsonl"', encoding="utf-8")
+    out = json.loads(run_exe(exe=copy).stdout)
+    main = run_command_line(out["main_command_line"])
+    assert (main["profile"], main["log"], main["main"], main["splash_ms"]) == ("hard", r"C:\a b\x.jsonl", True, None)

@@ -1001,3 +1001,79 @@ def test_vision_texts_stay_in_events_jsonl_alone(tmp_path):
     assert MARK not in (recorder.path / "run.json").read_text(encoding="utf-8")
     summary = "\n".join(summary_of(recorder.path))
     assert MARK not in summary and "비전 호출 1 · 비전 토큰 812" in summary
+
+
+READY_MARK = "준비신호글자"
+
+
+def ready_end(**fields):
+    return {"type": "ready", "phase": "end", "status": "ready", "waited_ms": 12400, "polls": 9, "switched": True,
+            "running_hint": False, **fields}
+
+
+def test_ready_events_are_kept_and_the_end_goes_to_run_json(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event({"type": "ready", "phase": "start"})
+    assert "ready" not in run_json(recorder)
+    recorder.on_event(ready_end())
+
+    kept = [event for event in events(recorder) if event["type"] == "ready"]
+    assert kept == [{"type": "ready", "phase": "start"}, ready_end()]
+    assert run_json(recorder)["ready"] == {"status": "ready", "waited_s": 12, "switched": True}
+    recorder.finish(RunResult("verified", 1, "opened", 100))
+    assert run_json(recorder)["ready"] == {"status": "ready", "waited_s": 12, "switched": True}
+
+
+def test_ready_seconds_are_rounded_and_the_last_end_wins(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event(ready_end(waited_ms=12600, switched=False))
+    assert run_json(recorder)["ready"] == {"status": "ready", "waited_s": 13, "switched": False}
+    recorder.on_event(ready_end(status="timeout", waited_ms=180000, switched=False))
+    assert run_json(recorder)["ready"] == {"status": "timeout", "waited_s": 180, "switched": False}
+
+
+@pytest.mark.parametrize("fields", [{"status": "x"}, {"status": None}, {"waited_ms": "12400"}, {"waited_ms": True},
+                                    {"waited_ms": -1}, {"switched": "yes"}])
+def test_unknown_ready_status_is_not_written(tmp_path, fields):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event(ready_end(**fields))
+    assert "ready" not in run_json(recorder)
+
+
+def test_run_json_ready_holds_no_text(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event(ready_end(note=READY_MARK))
+    assert set(run_json(recorder)["ready"]) == {"status", "waited_s", "switched"}
+    assert READY_MARK not in (recorder.path / "run.json").read_text(encoding="utf-8")
+
+
+def test_a_run_without_ready_has_no_ready_key(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.finish(RunResult("verified", 1, "opened", 100))
+    assert "ready" not in run_json(recorder)
+
+
+def test_a_ready_run_is_recorded_from_the_toolbox_to_the_summary(tmp_path):
+    from test_loop import GIVE_UP
+    from test_loop_ready import splash_then_main, task
+
+    from agent.summary import summary_of
+    from tests.ready_support import SIGNAL, FakeClock
+
+    clock = FakeClock()
+    desktop = splash_then_main(clock)
+    recorder = new_recorder(tmp_path, desktop)
+    the_task = task()
+    toolbox = Toolbox(desktop, the_task, confirm=lambda _p: False, sleep=clock.sleep, clock=clock, observer=recorder)
+    result = run_agent(ScriptedModel([GIVE_UP]), toolbox, the_task, log=recorder.on_event)
+    recorder.finish(result)
+
+    recorded_events = events(recorder)
+    assert [(event["type"], event.get("phase")) for event in recorded_events[:3]] == [
+        ("ready", "start"), ("observation", None), ("ready", "end")]
+    assert recorded_events[1]["source"] == "ready"
+    assert run_json(recorder)["ready"] == {"status": "ready", "waited_s": 4, "switched": True}
+    assert SIGNAL not in (recorder.path / "run.json").read_text(encoding="utf-8")
+    summary = summary_of(recorder.path)
+    assert "  준비: ready · 4초 · 대상 바뀜" in summary
+    assert SIGNAL not in "\n".join(summary)

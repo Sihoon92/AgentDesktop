@@ -132,6 +132,9 @@ h1, h2, h3 { margin: 0; font-weight: 650; }
 .goal-field { flex: 3 1 280px; }
 .exe-field { flex: 2 1 220px; }
 .system-field { flex: 1 1 140px; }
+.system-choice-field { flex: 1 1 160px; }
+.system-choice-field select { width: 100%; }
+.field[hidden] { display: none; }
 .stage-limit-field { flex: 0 1 130px; }
 .stage-limit-field input { width: 100%; }
 button.primary { background: var(--focus); border-color: var(--focus); color: #fff; padding: 6px 16px; font-weight: 600; }
@@ -297,6 +300,18 @@ button.primary:disabled { opacity: 0.5; cursor: default; }
   color: var(--warn-text);
   border: 1px solid var(--warn);
 }
+
+.ready-banner {
+  margin: 10px 12px 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--focus);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.ready-banner[hidden] { display: none; }
 
 .stage-toolbar {
   display: flex;
@@ -876,3 +891,16 @@ pre {
 .vision-dot { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--target); box-shadow: 0 0 0 2px var(--halo); }
 .vision-label { position: absolute; transform: translate(8px, -50%); max-width: 60%; padding: 1px 4px; border-radius: 3px; background: var(--target); color: #fff; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vision-label.flip { transform: translate(calc(-100% - 8px), -50%); }
+
+.vision-badge {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  color: #fff;
+  background: var(--focus);
+}
+.timeline button[aria-current="step"] .vision-badge { background: #fff; color: var(--focus); }
+.timeline .dot.look { background: var(--focus); border-radius: 2px; }

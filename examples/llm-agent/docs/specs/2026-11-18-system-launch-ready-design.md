@@ -1,7 +1,7 @@
 # 시스템 골라 띄우고 준비될 때까지 기다리기 설계
 
 - 날짜: 2026-11-18
-- 상태: 사용자 승인(2026-11-18). 구현 계획: [2026-11-18-system-launch-ready](../plans/2026-11-18-system-launch-ready.md)
+- 상태: 사용자 승인(2026-11-18), 구현됨(커밋 전, 실제 창 확인 전). 구현 계획: [2026-11-18-system-launch-ready](../plans/2026-11-18-system-launch-ready.md)
 - 대상: `examples/llm-agent`의 설정(`agent/settings.py`), 작업 만들기(`agent/task.py`), 대상 앱 띄우기(`agent/tools.py`), 루프 시작(`agent/loop.py`), 실행 시작(`run.py`, `viewer/run_manager.py`, `viewer/server.py`, `viewer/static/`), 점검(`check.py`), 기록과 요약, 가상 MES(`virtual-mes/`). `agent-desktop` CLI는 고치지 않습니다.
 - 앞선 설계: [관찰, 묻기, 배우기](2026-11-13-observe-ask-learn-design.md), [단계로 나눠 실행하기](2026-11-14-staged-run-design.md), [텍스트 모델과 비전 모델 나눠 쓰기](2026-11-16-text-and-vision-models-design.md). 원칙은 그대로입니다.
 

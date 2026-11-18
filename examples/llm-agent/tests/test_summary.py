@@ -506,3 +506,42 @@ def test_summary_has_no_vision_line_without_vision(run):
     lines = summarize(run, [VISION_EVENT])
 
     assert not any("비전" in line for line in lines)
+
+
+READY_MARK = "준비신호글자"
+
+
+def ready_line(lines):
+    return [line for line in lines if line.startswith("  준비:")]
+
+
+def test_summary_has_a_ready_line():
+    run = {"status": "verified", "ready": {"status": "ready", "waited_s": 12, "switched": True}}
+    lines = summarize(run, [])
+    assert ready_line(lines) == ["  준비: ready · 12초 · 대상 바뀜"]
+    assert lines.index("  준비: ready · 12초 · 대상 바뀜") == 3
+    stopped = {"status": "stopped", "ready": {"status": "timeout", "waited_s": 180, "switched": False}}
+    assert ready_line(summarize(stopped, [])) == ["  준비: timeout · 180초 · 대상 그대로"]
+
+
+def test_summary_without_ready_has_no_line():
+    assert ready_line(summarize({"status": "verified"}, [])) == []
+
+
+@pytest.mark.parametrize("ready", [{"status": "x", "waited_s": 1, "switched": True}, "ready",
+                                   {"status": "ready", "waited_s": "12", "switched": True},
+                                   {"status": "ready", "waited_s": 12, "switched": "yes"}])
+def test_odd_ready_values_leave_the_line_out_or_unknown(ready):
+    lines = ready_line(summarize({"status": "stopped", "ready": ready}, []))
+    assert lines == [] or "알 수 없음" in lines[0] or "기타" in lines[0]
+    assert all("x" not in line and "yes" not in line for line in lines)
+
+
+def test_summary_never_shows_the_ready_text():
+    events = [{"type": "ready", "phase": "start", "text": READY_MARK},
+              {"type": "ready", "phase": "end", "status": "ready", "waited_ms": 1000, "polls": 2,
+               "switched": False, "running_hint": False, "note": READY_MARK}]
+    run = {"status": "verified", "ready": {"status": "ready", "waited_s": 1, "switched": False, "text": READY_MARK}}
+    summary_text = "\n".join(summarize(run, events))
+    assert READY_MARK not in summary_text
+    assert "  준비: ready · 1초 · 대상 그대로" in summary_text

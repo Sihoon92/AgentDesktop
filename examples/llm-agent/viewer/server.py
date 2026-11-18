@@ -98,6 +98,15 @@ def read_events(events_path, since):
     return events, max(len(lines), since)
 
 
+def _system_choices(manager):
+    """(system names, default choice) for the start form. Only names are sent, never their exe
+    paths; a manager from before systems existed has neither, which reads as no list."""
+    names = getattr(manager, "systems", None)
+    names = [name for name in names if isinstance(name, str)] if isinstance(names, (list, tuple)) else []
+    choice = getattr(manager, "default_choice", None)
+    return names, choice if choice in names else None
+
+
 class BadAnswer(ValueError):
     """The answer body cannot be used; the message says why, in Korean, for the viewer."""
 
@@ -348,10 +357,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
         manager = self.server.run_manager
         if manager is None:
             return {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
-                    "default_system": None, "default_stage_call_limit": None}
+                    "default_system": None, "default_stage_call_limit": None, "systems": [], "default_choice": None}
+        systems, choice = _system_choices(manager)
         return {"can_start": True, "active": manager.active(), "default_exe": manager.default_exe,
                 "can_answer": manager.can_answer(), "default_system": manager.default_system,
-                "default_stage_call_limit": getattr(manager, "default_stage_call_limit", None)}
+                "default_stage_call_limit": getattr(manager, "default_stage_call_limit", None),
+                "systems": systems, "default_choice": choice}
 
     def _start_run(self):
         manager = self.server.run_manager

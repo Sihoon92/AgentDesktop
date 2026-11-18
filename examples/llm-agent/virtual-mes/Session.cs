@@ -39,6 +39,27 @@ namespace VirtualMesApp
             get { return this.options; }
         }
 
+        /// <summary>Records that the main window exists. Only a start with start-up options records it.</summary>
+        internal void MainStarted()
+        {
+            if (this.options.UsesStartup)
+            {
+                this.log.Write("main_started", EventLog.Fields(
+                    "by", this.options.Main ? "launcher" : "direct",
+                    "pid", System.Diagnostics.Process.GetCurrentProcess().Id));
+            }
+        }
+
+        /// <summary>Records that the menu is filled. Only a start with start-up options records it.</summary>
+        internal void MenuReady()
+        {
+            if (this.options.UsesStartup)
+            {
+                this.log.Write("menu_ready", EventLog.Fields(
+                    "delay_ms", this.options.MenuDelayMs.HasValue ? this.options.MenuDelayMs.Value : 0));
+            }
+        }
+
         internal Exposure ExposureOf(UiRegion region)
         {
             return this.options.Expose[region];

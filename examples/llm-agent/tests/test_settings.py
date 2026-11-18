@@ -27,7 +27,7 @@ def test_contract_names():
     assert DEFAULT_PATH == HERE / "settings.local.yaml"
     assert KEYS == ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
                     "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side",
-                    "vision_points")
+                    "vision_points", "systems", "ready_text", "ready_timeout_s")
 
 
 def test_every_key_is_read(tmp_path):
@@ -333,3 +333,96 @@ def test_example_file_tells_about_omit_and_the_env_model():
 
     assert "omit" in text
     assert "OPENAI_MODEL" in text
+
+
+SYSTEMS = f"systems:\n  울산: C:{B}A{B}MES.exe\n  천안소형: '  C:{B}B{B}MES.exe  '\n"
+NAME_OR_PATH_MARKS = ("울산", "천안", "MES.exe", "C:\\", "a.exe", "rel.exe", "a b")
+
+
+def test_systems_keep_their_order_and_paths(tmp_path):
+    loaded = load_settings(write(tmp_path, SYSTEMS), environ={})
+
+    assert loaded == {"systems": {"울산": f"C:{B}A{B}MES.exe", "천안소형": f"C:{B}B{B}MES.exe"}}
+    assert list(loaded["systems"]) == ["울산", "천안소형"]
+
+
+def test_systems_read_beside_the_other_keys(tmp_path):
+    loaded = load_settings(write(tmp_path, FULL + SYSTEMS), environ={})
+
+    assert loaded["exe"] == "C:\\apps\\Tool.exe" and list(loaded["systems"]) == ["울산", "천안소형"]
+
+
+def test_ready_keys_are_read(tmp_path):
+    loaded = load_settings(write(tmp_path, "ready_text: '  생산운영 '\nready_timeout_s: 90\n"), environ={})
+
+    assert loaded == {"ready_text": "생산운영", "ready_timeout_s": 90}
+
+
+@pytest.mark.parametrize(("body", "reason"), [
+    (f"systems: C:{B}A.exe", "systems 값이 이름과 경로의 묶음이 아님"),
+    ("systems: [a, b]", "systems 값이 이름과 경로의 묶음이 아님"),
+    ("systems: {}", "systems 값이 비어 있음"),
+    (f"systems: {{울산: D{B}rel.exe}}", "systems 1번째 항목: 경로가 절대 경로가 아님"),
+    (f"systems: {{'a b': C:{B}A.exe}}", "systems 1번째 항목: 이름 규칙에 맞지 않음"),
+    (f"systems: {{3: C:{B}A.exe}}", "systems 1번째 항목: 이름 규칙에 맞지 않음"),
+    ("systems: {울산: 3}", "systems 1번째 항목: 경로가 글이 아님"),
+    ("systems: {울산: }", "systems 1번째 항목: 경로가 글이 아님"),
+    ("systems: {울산: '  '}", "systems 1번째 항목: 경로가 글이 아님"),
+    (f"systems:\n  울산: C:{B}A{B}MES.exe\n  천안소형: D{B}rel.exe", "systems 2번째 항목: 경로가 절대 경로가 아님"),
+    (f"systems:\n  울산: C:{B}A{B}MES.exe\n  천안소형: C:{B}B{B}MES.exe\n  'a b': C:{B}C{B}MES.exe",
+     "systems 3번째 항목: 이름 규칙에 맞지 않음"),
+    (f'systems:\n  울산: C:{B}A{B}MES.exe\n  천안소형: "C:{B}new{B}tools{B}a.exe"',
+     f"systems 2번째 항목: 경로에 제어 문자 · {settings.QUOTE_HINT}"),
+    (f'systems: {{울산: "C:{B}new{B}MES.exe"}}', f"YAML 형식 오류 1행 · 큰따옴표 안의 역슬래시 · {settings.QUOTE_HINT}"),
+])
+def test_bad_systems_are_refused_without_names_or_paths(tmp_path, body, reason):
+    error = reason_of(tmp_path, body + "\n")
+
+    assert error.reason == reason
+    assert str(tmp_path) in str(error)
+    message = str(error).replace(str(tmp_path), "")
+    for mark in NAME_OR_PATH_MARKS:
+        assert mark not in error.reason
+        assert mark not in message
+
+
+def test_control_characters_in_a_system_path_get_the_quote_hint_in_the_message(tmp_path):
+    error = reason_of(tmp_path, f'systems:\n  울산: "C:{B}new{B}tools{B}a.exe"\n')
+
+    assert "systems 1번째 항목" in str(error) and settings.QUOTE_HINT in str(error)
+    assert "큰따옴표 안의 역슬래시" in str(error)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "'90'", "soon", "true", "2.5"])
+def test_ready_timeout_must_be_a_positive_whole_number(tmp_path, value):
+    error = reason_of(tmp_path, f"ready_timeout_s: {value}\n")
+
+    assert error.reason == "ready_timeout_s 값이 1 이상의 정수가 아님"
+
+
+@pytest.mark.parametrize("value", ["''", "'   '", "[a]", "3"])
+def test_ready_text_must_be_non_empty_text(tmp_path, value):
+    error = reason_of(tmp_path, f"ready_text: {value}\n")
+
+    assert error.reason == "ready_text 값이 글이 아님"
+
+
+def test_example_file_shows_systems_with_made_up_names():
+    text = (HERE / "settings.example.yaml").read_text(encoding="utf-8")
+    block = text.split("# systems:")[1].split("\n\n")[0]
+
+    assert "공장A" in block
+    assert "따옴표 없이 적습니다. 큰따옴표 안에서는 역슬래시가 특수 문자입니다" in text.split("# systems:")[0].rsplit("\n\n", 1)[-1]
+    for real in ("울산", "천안"):
+        assert real not in text
+    assert "# ready_text:" in text and "# ready_timeout_s:" in text
+
+
+def test_uncommented_example_systems_block_is_valid(tmp_path):
+    text = (HERE / "settings.example.yaml").read_text(encoding="utf-8")
+    block = text.split("# systems:")[1].split("\n\n")[0]
+    lines = ["systems:"] + [line[1:] for line in block.splitlines() if line.startswith("#   ")]
+
+    loaded = load_settings(write(tmp_path, "\n".join(lines) + "\n"), environ={})
+
+    assert "공장A" in loaded["systems"]

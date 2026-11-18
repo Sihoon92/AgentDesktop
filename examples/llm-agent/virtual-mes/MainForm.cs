@@ -58,8 +58,32 @@ namespace VirtualMesApp
             this.Controls.Add(this.status);
             this.Controls.Add(this.menuBar);
 
-            this.BuildMenuBar();
             this.SetStatus("준비");
+            session.MainStarted();
+            if (options.MenuDelayMs.HasValue)
+            {
+                this.FillMenuLater(options.MenuDelayMs.Value);
+            }
+            else
+            {
+                this.BuildMenuBar();
+                this.Shown += delegate { session.MenuReady(); };
+            }
+        }
+
+        /// <summary>Shows the window with an empty menu bar and fills it after the delay.</summary>
+        private void FillMenuLater(int delayMs)
+        {
+            Timer timer = new Timer();
+            timer.Interval = Math.Max(1, delayMs);
+            timer.Tick += delegate
+            {
+                timer.Stop();
+                timer.Dispose();
+                this.BuildMenuBar();
+                this.session.MenuReady();
+            };
+            this.Shown += delegate { timer.Start(); };
         }
 
         internal QueryRunner Runner

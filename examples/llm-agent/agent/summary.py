@@ -6,7 +6,8 @@ summary is built only from counts, codes, tool names and verdicts. Every printed
 from this module or passes CODE: a status, tool name or error code that is not a plain
 identifier is printed as OTHER instead. The counts come from events.jsonl, except the stage
 counts, which come from run.json's `stages` (numbers only, written when the run ends), and the
-vision counts of a split-mode run, from run.json's `vision_calls` and `vision_tokens`; a value
+vision counts of a split-mode run, from run.json's `vision_calls` and `vision_tokens`, and the
+ready wait, from run.json's `ready` (a status, seconds and whether the target changed); a value
 the record does not hold is printed as UNKNOWN or its line is left out. The texts of a plan and
 its stages are never read.
 
@@ -20,6 +21,8 @@ import subprocess
 import time
 from collections import Counter
 from pathlib import Path
+
+from agent.ready import READY_STATUSES
 
 HEADER = "요약 (화면 내용 없음)"
 UNKNOWN = "알 수 없음"
@@ -51,6 +54,9 @@ def summarize(run, events, code=None):
         f"  코드: {code if isinstance(code, str) and VERSION.fullmatch(code) else UNKNOWN}",
         "  판정: " + _verdict(run, events),
     ]
+    ready = _ready(run.get("ready"))
+    if ready:
+        lines.append("  준비: " + ready)
     if actions:
         lines.append("  마지막 동작: " + _last_action(actions[-1]))
     lines += [
@@ -280,6 +286,17 @@ def _knowledge(events):
         return None
     shown = sum(len(event["ids"]) for event in loaded if isinstance(event.get("ids"), list))
     return SEPARATOR.join([f"불러옴 {shown}", f"참고 {used}", f"참고 뒤 실패 {failed}"])
+
+
+def _ready(ready):
+    """`ready · 12초 · 대상 바뀜` from run.json's `ready`, or None when the run had no ready wait
+    or its status is not one of READY_STATUSES. The signal itself is never in run.json."""
+    if not isinstance(ready, dict) or ready.get("status") not in READY_STATUSES:
+        return None
+    seconds = _count(ready.get("waited_s"))
+    switched = ready.get("switched")
+    moved = "대상 바뀜" if switched is True else "대상 그대로" if switched is False else f"대상 {UNKNOWN}"
+    return SEPARATOR.join([ready["status"], f"{UNKNOWN if seconds is None else seconds}초", moved])
 
 
 def _last_observation(events):

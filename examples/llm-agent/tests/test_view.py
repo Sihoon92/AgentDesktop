@@ -455,13 +455,14 @@ def clear_model_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def viewer_manager(monkeypatch, tmp_path, env, settings_text=""):
-    """Starts view.main with fake clients and a recording agent; returns (manager, seen, made)."""
+def viewer_manager(monkeypatch, tmp_path, env, settings_text="", exe_line=True):
+    """Starts view.main with fake clients and a recording agent; returns (manager, seen, made).
+    Without exe_line the settings file names no exe."""
     exe = tmp_path / "Tool.exe"
     exe.write_bytes(b"")
     binary = tmp_path / "agent-desktop.exe"
     binary.write_bytes(b"")
-    settings_file(monkeypatch, tmp_path, f"{settings_text}exe: '{exe}'\n")
+    settings_file(monkeypatch, tmp_path, settings_text + (f"exe: '{exe}'\n" if exe_line else ""))
     monkeypatch.setenv("AGENT_DESKTOP_BIN", str(binary))
     clear_model_env(monkeypatch)
     for name, value in env.items():
@@ -525,6 +526,50 @@ def test_the_viewer_still_needs_the_text_key(monkeypatch, tmp_path):
         manager.start("g")
 
     assert "OPENAI_API_KEY" in str(raised.value)
+
+
+def systems_text(tmp_path, extra=""):
+    paths = []
+    for folder in ("SiteA", "SiteB"):
+        target = tmp_path / folder / "MES.exe"
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(b"")
+        paths.append(target)
+    return f"systems:\n  울산: '{paths[0]}'\n  천안소형: '{paths[1]}'\n{extra}", paths
+
+
+def test_a_viewer_without_a_default_exe_runs_a_system_from_the_settings(monkeypatch, tmp_path):
+    text, paths = systems_text(tmp_path, "system: 천안소형\nready_text: 생산운영\n")
+    manager, seen, _made = viewer_manager(monkeypatch, tmp_path, {"OPENAI_API_KEY": "test"}, text, exe_line=False)
+
+    assert manager is not None and manager.default_exe is None
+    assert (manager.systems, manager.default_choice) == (["울산", "천안소형"], "천안소형")
+    manager.start("g", system="울산")
+    manager.join(5)
+
+    assert seen["task"].exe == str(paths[0])
+    assert seen["toolbox"].knowledge.system == "울산"
+    assert seen["task"].ready_text == "생산운영"
+
+
+def test_a_viewer_without_a_default_exe_starts_the_default_choice(monkeypatch, tmp_path):
+    text, paths = systems_text(tmp_path, "system: 천안소형\n")
+    manager, seen, _made = viewer_manager(monkeypatch, tmp_path, {"OPENAI_API_KEY": "test"}, text, exe_line=False)
+
+    manager.start("g")
+    manager.join(5)
+
+    assert seen["task"].exe == str(paths[1])
+    assert seen["toolbox"].knowledge.system == "천안소형"
+
+
+def test_the_viewer_names_the_systems_key_but_prints_no_system_path(monkeypatch, tmp_path, capsys):
+    text, _paths = systems_text(tmp_path, "ready_text: 생산운영\n")
+    viewer_manager(monkeypatch, tmp_path, {"OPENAI_API_KEY": "test"}, text, exe_line=False)
+
+    out = capsys.readouterr().out
+    assert "(systems, ready_text)" in out
+    assert "SiteA" not in out and "SiteB" not in out and "생산운영" not in out
 
 
 QUESTIONS_RUN = "20261113-101500"

@@ -229,6 +229,22 @@ def observation_detail(kinds, complete, elapsed, shot):
     return " · ".join(parts)
 
 
+def systems_detail(settings):
+    """How many systems the settings name and whether a ready signal is set, never which."""
+    count = len(settings.get("systems") or {})
+    return f"시스템 {count}개 · 준비 신호 {'있음' if settings.get('ready_text') else '없음'}"
+
+
+def whole_seconds(milliseconds):
+    return f"{round(milliseconds / 1000)}초"
+
+
+def ready_detail(waited_ms, switched):
+    """`찾음 · 12초 · 대상 바뀜`: the wait found the signal, how long it took, and whether the
+    ready window belongs to another process than the one launch returned."""
+    return f"찾음 · {whole_seconds(waited_ms)} · {'대상 바뀜' if switched else '대상 그대로'}"
+
+
 def ids_path(folder, system):
     return Path(folder) / f"{system}.json"
 

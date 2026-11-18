@@ -18,7 +18,7 @@
       <button type="button" id="show-runs" aria-pressed="true">실행</button>
       <button type="button" id="show-knowledge" aria-pressed="false">지식</button>
     </div>
-    <p class="hint" id="key-hint">← → 스텝 이동 · B 동작 전/후 · A 전체 요소/대상만 · T 텍스트 박스</p>
+    <p class="hint" id="key-hint">← → 스텝 이동 · B 동작 전/후 · A 전체 요소/대상만 · T 텍스트 박스 · V 다음 비전 스텝</p>
   </header>
 
   <div id="export-warning" class="export-warning" role="note" hidden></div>
@@ -35,11 +35,15 @@
       <button type="submit" id="start-run" class="primary">실행</button>
     </div>
     <div id="start-settings" class="start-settings" hidden>
-      <label class="field exe-field">
+      <label id="system-choice-field" class="field system-choice-field" hidden>
+        <span>시스템</span>
+        <select id="system-choice" name="system_choice" title="설정 파일의 systems에 적은 시스템. 고르면 그 실행 파일을 띄웁니다"></select>
+      </label>
+      <label id="exe-field" class="field exe-field">
         <span>실행 파일</span>
         <input id="exe" name="exe" type="text" spellcheck="false">
       </label>
-      <label class="field system-field">
+      <label id="system-field" class="field system-field">
         <span>시스템</span>
         <input id="system" name="system" type="text" maxlength="64" spellcheck="false" placeholder="비우면 실행 파일 이름" title="지식을 나눠 두는 이름. 영문, 숫자, 한글, '.', '_', '-'">
       </label>
@@ -93,6 +97,7 @@
 
     <main class="stage-area">
       <div id="banner" class="banner" role="status" hidden></div>
+      <div id="ready-banner" class="ready-banner" role="status" aria-live="polite" hidden></div>
       <div class="stage-toolbar">
         <div class="segmented" role="group" aria-label="프레임">
           <button type="button" id="show-before" aria-pressed="true">동작 전</button>

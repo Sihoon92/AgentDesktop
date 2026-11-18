@@ -31,6 +31,8 @@ class Task:
     stage_call_limit: int = 8
     plan_reasoning_effort: str = "medium"
     model_source: str = "기본값"
+    ready_text: str | None = None
+    ready_timeout_s: int = 180
 
 
 DEFAULT_MODEL = Task.model
@@ -38,7 +40,7 @@ MODEL_ENV = "OPENAI_MODEL"
 ARGS_MAX_STEPS = 60
 OPTIONAL_KEYS = ("max_steps", "token_budget", "model", "reasoning_effort", "baseline_target",
                  "system", "knowledge_dir", "image_mode", "ask_timeout_s", "mismatch_limit",
-                 "stage_call_limit", "plan_reasoning_effort")
+                 "stage_call_limit", "plan_reasoning_effort", "ready_text", "ready_timeout_s")
 DEFAULT_KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "system", "stage_call_limit",
                 "plan_reasoning_effort")
 
@@ -102,10 +104,14 @@ def _defaults(defaults):
 def _check_optional(optional):
     if optional.get("image_mode", "user_message") not in IMAGE_MODES:
         raise TaskError(f"image_mode must be one of {', '.join(IMAGE_MODES)}")
-    for key in ("ask_timeout_s", "mismatch_limit", "stage_call_limit"):
+    for key in ("ask_timeout_s", "mismatch_limit", "stage_call_limit", "ready_timeout_s"):
         value = optional.get(key, 1)
         if type(value) is not int or value < 1:
             raise TaskError(f"{key} must be a whole number of at least 1")
     for key in ("model", "reasoning_effort", "plan_reasoning_effort", "system", "knowledge_dir"):
         if key in optional and not isinstance(optional[key], str):
             raise TaskError(f"{key} must be text")
+    if "ready_text" in optional:
+        if not isinstance(optional["ready_text"], str) or not optional["ready_text"].strip():
+            raise TaskError("ready_text must be non-empty text")
+        optional["ready_text"] = optional["ready_text"].strip()

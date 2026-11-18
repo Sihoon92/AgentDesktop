@@ -28,8 +28,12 @@ powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1
 | `--seed <N>` | 대기 시간 순서의 시드. 기본 `20261112`. 같은 시드면 같은 순서 |
 | `--combo-open arrow\|anywhere` | 필터 칸이 목록을 여는 방식. 기본 `arrow`(칸 오른쪽 끝의 화살표 버튼으로만 열림, 아래 "선택 칸 여는 방식"). `anywhere`는 칸 어디를 눌러도 열리는 옛 동작으로, 비교할 때만 씀 |
 | `--log <경로>` | 이벤트 기록을 이 파일에 덧붙임 |
+| `--splash-ms <N>` | 작은 팝업 창(제목 `VirtualMes`, 글 `불러오는 중`)을 N밀리초 띄운 뒤 닫고 메인 화면을 띄움. 아래 "시작 과정" |
+| `--launcher` | `--splash-ms`와 함께. 팝업을 띄운 프로세스가 메인 화면을 다른 프로세스로 띄우고 끝남 |
+| `--single-instance` | `--launcher`와 함께. 같은 exe의 메인 화면이 이미 떠 있으면 실행기가 팝업도 새 창도 없이 끝남 |
+| `--menu-delay-ms <N>` | 메인 화면이 뜬 뒤 N밀리초 지나서 메뉴를 채움. 그동안 메뉴 줄은 비어 있음 |
 | `--export-headless <화면> <필터 JSON> <출력 .xlsx>` | 창 없이 그 화면의 조회 결과를 저장하고 끝남 |
-| `--parse-only` | 테스트용. 옵션을 해석한 결과를 JSON 한 줄로 출력하고 끝남 |
+| `--parse-only` | 테스트용. 옵션을 해석한 결과를 JSON 한 줄로 출력하고 끝남. `--launcher`면 메인 화면을 띄울 인자(`main_command_line`)도 나옴 |
 
 종료 코드는 `0` 성공, `1` 파일을 쓰지 못함, `2` 옵션이나 필터가 틀림입니다. 틀린 이유는 표준 오류에 나옵니다.
 
@@ -38,6 +42,22 @@ powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1
 ```powershell
 Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' -Encoding utf8
 ```
+
+### 시작 과정
+
+회사 MES는 실행하면 작은 팝업 창이 먼저 뜨고, 그다음 메인 화면이 뜨며, 메뉴가 보여야 다 열린 것입니다. 하니스의 준비 기다리기(설계 [`../docs/specs/2026-11-18-system-launch-ready-design.md`](../docs/specs/2026-11-18-system-launch-ready-design.md))를 집에서 시험하려고 이 과정을 옵션으로 흉내 냅니다. 시작 옵션이 하나도 없으면 지금처럼 메인 화면만 곧바로 뜹니다.
+
+```powershell
+Set-Content build\VirtualMes.args '--splash-ms 2000 --launcher --menu-delay-ms 2000' -Encoding utf8   # 다른 프로세스
+Set-Content build\VirtualMes.args '--splash-ms 2000 --menu-delay-ms 2000' -Encoding utf8              # 같은 프로세스
+Set-Content build\VirtualMes.args '--splash-ms 2000 --launcher --single-instance' -Encoding utf8      # 다시 눌러도 새 창 없음
+```
+
+- **같은 프로세스(`--splash-ms`만):** 팝업이 닫히면 같은 프로세스가 메인 화면을 띄웁니다.
+- **다른 프로세스(`--launcher`):** 팝업이 닫히면 같은 exe를 숨은 옵션 `--main`과 나머지 인자로 띄우고 실행기는 끝납니다. 나머지 인자는 받은 인자(옵션 파일에서 읽었으면 그 줄)에서 `--splash-ms`, `--launcher`, `--single-instance`를 뺀 것이라 `--profile`, `--log`, `--menu-delay-ms`는 메인 화면에도 그대로 적용됩니다. `--main`을 받은 프로세스는 옵션 파일을 읽지 않고 그 세 옵션을 무시하므로 실행기가 다시 뜨지 않습니다. `agent-desktop launch`가 돌려주는 pid는 실행기(팝업)의 것이고, 메인 화면은 다른 pid입니다.
+- **이미 떠 있을 때(`--single-instance`):** 메인 화면 프로세스는 언제나 exe 전체 경로의 해시를 이름에 넣은 Mutex를 잡습니다. `--single-instance` 실행기는 그 Mutex가 있으면 팝업 없이 곧바로 끝납니다(`launcher_skipped`). 다른 폴더에 복사한 exe는 경로가 달라 막지 않습니다.
+- **메뉴 늦게 채우기(`--menu-delay-ms`):** 메인 화면은 메뉴 줄이 빈 채로 뜨고, 창이 보인 뒤 N밀리초가 지나면 메뉴가 채워집니다. 창이 떴다고 준비된 것이 아님을 시험합니다.
+- 팝업의 제목(`VirtualMes`)과 글(`불러오는 중`)은 메뉴 이름과 겹치지 않습니다.
 
 ## 노출 방식
 
@@ -111,7 +131,12 @@ Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' 
 
 | `event` | 그 밖의 필드 |
 | --- | --- |
+| `splash_shown` | `pid`, `splash_ms`. 팝업 창이 보였을 때(시작 옵션) |
+| `splash_closed` | `pid`. 팝업 창이 닫혔을 때 |
+| `launcher_skipped` | `pid`, `reason`(`main_running`). `--single-instance` 실행기가 메인 화면이 떠 있어 창 없이 끝났을 때 |
 | `app_started` | `profile`, `expose`, `seed`, `combo_open` |
+| `main_started` | `by`(`launcher`, `direct`), `pid`. 시작 옵션이 있을 때만. `launcher`는 실행기가 띄운 프로세스 |
+| `menu_ready` | `delay_ms`. 시작 옵션이 있을 때만. 메인 화면이 보이고 메뉴가 채워졌을 때 |
 | `menu_opened` | `category` |
 | `screen_opened` | `screen`, `title` |
 | `filter_changed` | `screen`, `filter`, `value`, `closed_by`(`item_click`, `select_button`, `outside_click`, `deactivated`, `typed`) |
@@ -128,6 +153,8 @@ Set-Content build\VirtualMes.args '--profile hard --log "C:\temp\events.jsonl"' 
 | `export_saved` | `path`, `source`, `rows`, `screen`, `filters`(저장한 표를 조회했을 때의 필터. 조회 뒤에 바꾼 필터는 들어가지 않음) |
 | `export_failed` | `path`, `reason` |
 | `export_rejected` | `reason`(`no_data`) |
+
+시작 옵션이 없으면 `splash_*`, `main_started`, `menu_ready`는 기록되지 않아 기록이 예전과 같습니다. `--launcher`로 띄운 메인 화면은 실행기가 쓴 줄 다음 번호부터 `seq`를 이어 씁니다(파일에 이미 있는 줄 수 다음).
 
 `filter_changed`의 `filter`는 `shop-1`, `shop-2`, `shop-3`, `process`, `product`, `equipment`, `period`, `from`, `to`입니다. `combo_*_clicked`의 `filter`도 같은 이름을 씁니다(날짜 칸 제외). Shop 칸의 `value`는 코드 배열입니다. 값이 그대로면 기록하지 않습니다.
 

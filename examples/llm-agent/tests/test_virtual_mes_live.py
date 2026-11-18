@@ -1,8 +1,15 @@
 """Tests that open the real VirtualMes window. They run only with VIRTUAL_MES_LIVE=1."""
 
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+
 import pytest
 
-from virtual_mes_support import LiveApp, export, live, read_xlsx, requires_exe
+from virtual_mes_support import (
+    LiveApp, export, find_agent_desktop, live, prepare_exe, read_events, read_xlsx, requires_exe, wait_for_logged)
 
 pytestmark = [requires_exe, live]
 
@@ -835,3 +842,111 @@ def test_clicking_a_number_cell_logs_row_and_column_and_opens_the_popup(tmp_path
         label = next(n for n in table if n.get("name") == "코팅")
         app.click(label["ref"])
         assert len([e for e in app.events() if e["event"] == "cell_clicked"]) == 1
+
+
+MAIN_TITLE = "MES (가상)"
+SPLASH_TITLE = "VirtualMes"
+
+
+class StartedCopy:
+    """A private copy of VirtualMes.exe with its options in VirtualMes.args, started the way the
+    agent starts its target (agent-desktop launch, no arguments). On exit it ends every process
+    the event log names, because a launcher leaves its main window in another process."""
+
+    def __init__(self, folder, *args):
+        self.folder = Path(folder)
+        self.exe, self.log = prepare_exe(self.folder, *args)
+        self._binary = find_agent_desktop()
+        self._env = {**os.environ, "AGENT_DESKTOP_HOME": str(self.folder / "state")}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        for pid in {event["pid"] for event in read_events(self.log) if "pid" in event}:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+
+    def cli(self, *args):
+        done = subprocess.run(
+            [str(self._binary), *[str(arg) for arg in args]], capture_output=True, encoding="utf-8",
+            errors="replace", stdin=subprocess.DEVNULL, timeout=90, env=self._env)
+        envelope = json.loads(done.stdout)
+        assert envelope.get("ok"), f"{args}: {json.dumps(envelope.get('error'), ensure_ascii=False)}"
+        return envelope.get("data")
+
+    def titles_of(self, pid):
+        return {row.get("title") for row in self.cli("list-windows") or [] if row.get("pid") == pid}
+
+    def window_of(self, pid, title, timeout_s=10):
+        """Waits for the process's window with this title and returns its id."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            for row in self.cli("list-windows") or []:
+                if row.get("pid") == pid and row.get("title") == title:
+                    return row["id"]
+            assert time.monotonic() < deadline, f"no window {title!r} of pid {pid} within {timeout_s}s"
+            time.sleep(0.2)
+
+    def run_again(self):
+        """Starts the copy once more without arguments, as a person double-clicking it would."""
+        return subprocess.run([str(self.exe)], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+
+
+def logged(copy):
+    return [event["event"] for event in read_events(copy.log)]
+
+
+def test_launcher_hands_the_main_window_to_another_process(tmp_path):
+    with StartedCopy(tmp_path, "--splash-ms", "1500", "--launcher", "--menu-delay-ms", "1000") as copy:
+        launched = copy.cli("launch", copy.exe)
+        splash = wait_for_logged(copy.log, "splash_shown")
+        main = wait_for_logged(copy.log, "main_started", timeout_s=30)
+        wait_for_logged(copy.log, "menu_ready", timeout_s=30)
+        assert launched["pid"] == splash["pid"] != main["pid"]
+        assert main["by"] == "launcher"
+        assert MAIN_TITLE in copy.titles_of(main["pid"])
+        assert SPLASH_TITLE not in copy.titles_of(splash["pid"])
+        assert logged(copy) == ["splash_shown", "splash_closed", "app_started", "main_started", "menu_ready"]
+        assert [event["seq"] for event in read_events(copy.log)] == [1, 2, 3, 4, 5]
+
+
+def test_menu_delay_shows_the_main_window_before_its_menu(tmp_path):
+    with StartedCopy(tmp_path, "--profile", "easy", "--menu-delay-ms", "4000") as copy:
+        copy.cli("launch", copy.exe)
+        main = wait_for_logged(copy.log, "main_started")
+        assert main["by"] == "direct"
+        window = copy.window_of(main["pid"], MAIN_TITLE)
+        early = copy.cli("snapshot", "--window-id", window, "--compact")
+        assert "생산운영" not in json.dumps(early, ensure_ascii=False)
+        wait_for_logged(copy.log, "menu_ready", timeout_s=15)
+        late = copy.cli("snapshot", "--window-id", window, "--compact")
+        assert "생산운영" in json.dumps(late, ensure_ascii=False)
+
+
+def test_splash_without_a_launcher_keeps_one_process(tmp_path):
+    with StartedCopy(tmp_path, "--splash-ms", "1000") as copy:
+        launched = copy.cli("launch", copy.exe)
+        main = wait_for_logged(copy.log, "main_started", timeout_s=30)
+        assert launched["pid"] == main["pid"] and main["by"] == "direct"
+        assert logged(copy)[:2] == ["splash_shown", "splash_closed"]
+
+
+def test_single_instance_launcher_shows_no_window_when_main_is_open(tmp_path):
+    with StartedCopy(tmp_path, "--splash-ms", "500", "--launcher", "--single-instance") as copy:
+        copy.cli("launch", copy.exe)
+        wait_for_logged(copy.log, "menu_ready", timeout_s=30)
+        before = {row["id"] for row in copy.cli("list-windows")}
+        assert copy.run_again().returncode == 0
+        assert wait_for_logged(copy.log, "launcher_skipped")["reason"] == "main_running"
+        assert {row["id"] for row in copy.cli("list-windows")} == before
+        assert logged(copy).count("splash_shown") == 1
+
+
+def test_single_instance_does_not_block_a_copy_in_another_folder(tmp_path):
+    with StartedCopy(tmp_path / "first", "--menu-delay-ms", "0") as first:
+        first.cli("launch", first.exe)
+        wait_for_logged(first.log, "menu_ready")
+        with StartedCopy(tmp_path / "second", "--splash-ms", "500", "--launcher", "--single-instance") as second:
+            second.cli("launch", second.exe)
+            assert wait_for_logged(second.log, "main_started", timeout_s=30)["by"] == "launcher"
+            assert "launcher_skipped" not in logged(second)

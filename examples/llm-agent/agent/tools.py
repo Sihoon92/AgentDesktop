@@ -12,6 +12,7 @@ from agent.asking import AskingTools
 from agent.effects import EXPECTATIONS
 from agent.guard import ActionGuard, signature
 from agent.observe import render_marked
+from agent.ready import ready_message, wait_until_ready
 from agent.results import refused as _refused
 from agent.screen_tools import UNCONFIRMED, ScreenTools
 from agent.tool_schemas import READ_ONLY_TOOLS, SCHEMAS, definitions_for
@@ -90,9 +91,9 @@ class Toolbox(AskingTools, ScreenTools):
         """observer gets on_observation(window, envelope, text, source=..., wait=...) for each tree
         the agent reads, and on_action(tool, arguments, target, result) for each other tool call,
         before the re-read is reported. source names what made the observation ("observe", "action",
-        "question" or "wait_for_text"); wait is set only for wait_for_text, which reports one
+        "question", "wait_for_text" or "ready"); wait is set only for wait_for_text, which reports one
         observation per call. An observer with on_event(event) also gets the capture, question,
-        answer, knowledge and completion events. Captures go to captures_dir, or a temporary folder
+        answer, knowledge, completion and ready events. Captures go to captures_dir, or a temporary folder
         when it is None. asker answers questions; knowledge is the system's KnowledgeStore.
 
         vision, when given, reads pictures for a text model that cannot (split mode): an object
@@ -109,6 +110,7 @@ class Toolbox(AskingTools, ScreenTools):
         self._pid = None
         self._instance = None
         self._current_window = None
+        self._ready = False
         self._refs = {}
         self._view_origin = None
         self._last_read = None
@@ -253,7 +255,33 @@ class Toolbox(AskingTools, ScreenTools):
         if self._last_read is not None:
             self._observer.on_observation(*self._last_read, source="wait_for_text", wait=wait)
 
+    def launch_ready(self):
+        """Launches the target and waits until a window shows the task's ready signal (agent/ready.py),
+        then makes that window's process the target and that window the current one. Sends a ready
+        start and end event, and records the ready window as one observation with source "ready",
+        from the very read that found the signal. Returns {"ok": True, "pid", "windows", "ready":
+        {"waited_ms", "switched"}}, or {"ok": False, "code": "READY_<STATUS>", "message"} with the
+        reason in the words of READY_MESSAGES. No approval is asked: starting the run asked for it."""
+        self._emit({"type": "ready", "phase": "start"})
+        outcome = wait_until_ready(self._desktop, self._task.exe, self._task.ready_text, self._task.ready_timeout_s,
+                                   self.clock, self.sleep)
+        if outcome.status == "ready":
+            self._pid = outcome.pid
+            self._instance = outcome.instance
+            self._ready = True
+            self._record_read(outcome.window, outcome.tree_envelope, source="ready")
+        self._emit({"type": "ready", "phase": "end", "status": outcome.status, "waited_ms": outcome.waited_ms,
+                    "polls": outcome.polls, "switched": outcome.switched, "running_hint": outcome.running_hint})
+        if outcome.status != "ready":
+            return {"ok": False, "code": f"READY_{outcome.status.upper()}", "message": ready_message(outcome)}
+        return {"ok": True, "pid": self._pid, "windows": self._window_summaries(),
+                "ready": {"waited_ms": outcome.waited_ms, "switched": outcome.switched}}
+
     def _launch(self):
+        """Launches the exe, or after a ready wait reports the target as it is: launching again
+        would start the launcher a second time."""
+        if self._ready:
+            return {"ok": True, "pid": self._pid, "windows": self._window_summaries()}
         envelope = self._desktop.run("launch", self._task.exe)
         if not envelope.get("ok"):
             return _summary(envelope)
@@ -290,10 +318,15 @@ class Toolbox(AskingTools, ScreenTools):
 
     def _observe(self, window, root_ref=None, surface=None, include_bounds=False, source="observe"):
         """Reads one window. A None source reads quietly: no observer call, only _last_read."""
-        window_id = window["id"]
-        envelope = self._snapshot(window_id, root_ref, surface)
+        envelope = self._snapshot(window["id"], root_ref, surface)
         if not envelope.get("ok"):
             return {"observation_error": _summary(envelope)}
+        return self._record_read(window, envelope, root_ref, surface, include_bounds, source)
+
+    def _record_read(self, window, envelope, root_ref=None, surface=None, include_bounds=False, source="observe"):
+        """Makes a successful snapshot of `window` the latest view (refs, marks, origin, current
+        window) and reports it to the observer under `source`, unless `source` is None."""
+        window_id = window["id"]
         data = envelope["data"]
         text, refs, self._marks = render_marked(data["tree"], include_bounds)
         self._refs = {**self._refs, **refs} if root_ref else refs
@@ -444,6 +477,8 @@ class Toolbox(AskingTools, ScreenTools):
             if self.clock() >= deadline:
                 return {"ok": False, "code": "RESTART_TIMEOUT", "message": "The app is still open; it may be prompting"}
             self.sleep(POLL_S)
+        if self._task.ready_text:
+            return self.launch_ready()
         return self._launch()
 
 

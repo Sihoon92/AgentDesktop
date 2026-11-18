@@ -22,6 +22,8 @@ from agent.loop import RunResult, run_agent
 from agent.recorder import RunRecorder
 from agent.registration import register_after_run
 from agent.summary import current_code, write_summary
+from agent.systems import apply_ready, system_exe, system_names
+from agent.systems import default_choice as settings_default_choice
 from agent.task import Task, TaskError, task_from_args
 from agent.tools import Toolbox
 
@@ -66,8 +68,9 @@ class RunManager:
     def __init__(self, runs_dir, binary, default_exe, model_factory, toolbox_factory=default_toolbox,
                  desktop_factory=None, gate_factory=ApprovalGate, ask_gate_factory=AskGate, knowledge_dir=None,
                  task_defaults=None, environ=None):
-        """task_defaults are the settings file's values that every new run's task starts from;
-        environ supplies OPENAI_MODEL below them (None reads no env). model_factory(task) returns
+        """task_defaults are the settings file's values that every new run's task starts from; their
+        systems give the runs a target by name and their ready signal reaches only the exes they
+        name. environ supplies OPENAI_MODEL below them (None reads no env). model_factory(task) returns
         an agent.llm.Models, or a bare text model, and may raise ModelSetupError."""
         self.runs_dir = Path(runs_dir)
         self.binary = str(binary)
@@ -94,6 +97,16 @@ class RunManager:
     def default_system(self):
         """The settings file's system name that a form left empty falls back to, or None."""
         return self._task_defaults.get("system") or None
+
+    @property
+    def systems(self):
+        """The settings file's system names in its order. The viewer lists these, never their paths."""
+        return system_names(self._task_defaults)
+
+    @property
+    def default_choice(self):
+        """The system the viewer's list starts on: the settings system when it names an entry, else the first."""
+        return settings_default_choice(self._task_defaults)
 
     @property
     def default_stage_call_limit(self):
@@ -128,9 +141,11 @@ class RunManager:
     def start(self, goal, exe=None, level=3, approve=False, system=None, stage_call_limit=None):
         """Returns the new run id once its folder exists; the run continues in the background.
         With approve, every app-changing action waits for decide() or times out as a stop.
-        `system` names the knowledge folder; empty means the exe file name. `stage_call_limit`
-        is the calls each stage gets; None means the settings file's value or the default."""
-        task = self.build_task(goal, exe, level, stage_call_limit)
+        `system` names the knowledge folder; empty means the exe file name. Without `exe`, a
+        `system` the settings file's systems hold picks its exe. `stage_call_limit` is the calls
+        each stage gets; None means the settings file's value or the default."""
+        exe, system = self._target(exe, system)
+        task = apply_ready(self.build_task(goal, exe, level, stage_call_limit), self._task_defaults)
         if type(approve) is not bool:
             raise InvalidRun("approve는 true 또는 false여야 합니다")
         system = self.build_system(system, task.exe, task.system)
@@ -206,6 +221,27 @@ class RunManager:
             return task_from_args(goal.strip(), exe, level, defaults=defaults, environ=self._environ)
         except TaskError as error:
             raise InvalidRun(str(error)) from error
+
+    def _target(self, exe, system):
+        """(exe, system) for a request: the form's exe; else the entry of the system it names; else
+        the default exe; else, when it names no system, the settings' default choice. A name with
+        no entry stays only the knowledge name, and is refused when no exe is left to run."""
+        if exe or not self.systems:
+            return exe, system
+        if system is not None and not isinstance(system, str):
+            return exe, system
+        name = (system or "").strip()
+        if name:
+            entry = system_exe(self._task_defaults, name)
+            if entry:
+                return entry, name
+            if not self.default_exe:
+                raise InvalidRun(f"설정 파일의 systems에 없는 시스템입니다: {name}")
+            return exe, system
+        if self.default_exe:
+            return exe, system
+        choice = self.default_choice
+        return system_exe(self._task_defaults, choice), choice
 
     def build_system(self, system, exe, fallback=None):
         """The form's system name, else `fallback` (the settings file's), else the exe name."""

@@ -7,7 +7,8 @@ stored in image pixels, so the viewer only draws them. Recording must never end 
 warning on the event, or an entry in `errors` printed to stderr.
 
 run.json holds numbers only about stages (`stages`, written at finish); the plan's texts and the
-stage notes are kept in events.jsonl alone.
+stage notes are kept in events.jsonl alone. Of a ready wait it holds the status, the seconds and
+whether the target process changed (`ready`, written when the wait ends), never the signal.
 
 run.json is format 2: it names the recording process (pid and its start time) and carries a
 heartbeat_at that moves with every event and, from a daemon thread, at least every
@@ -28,6 +29,7 @@ from agent.capture import add_windows, stacked
 from agent.frames import frame_origin, to_image_rect
 from agent.observe import visible_elements
 from agent.process_identity import process_started_at
+from agent.ready import READY_STATUSES
 from agent.survey import kinds
 
 RUN_FORMAT = 2
@@ -165,6 +167,10 @@ class RunRecorder:
         if kind in KEPT_EVENTS:
             self._append(event)
             return
+        if kind == "ready":
+            self._note_ready(event)
+            self._append(event)
+            return
         if kind in STEP_FILLED_EVENTS:
             filled = dict(event)
             if filled.get("step") is None:
@@ -213,6 +219,20 @@ class RunRecorder:
                 "tokens": result.tokens,
             }
         )
+
+    def _note_ready(self, event):
+        """Writes the end of a ready wait into run.json at once, so the run list sees it while the
+        run goes on: {"status", "waited_s", "switched"}, numbers and a code only. An end whose
+        status is not in READY_STATUSES, or whose time or switch is not a plain value, is kept in
+        events.jsonl alone. A later end (a restart) replaces an earlier one."""
+        status, waited_ms, switched = event.get("status"), event.get("waited_ms"), event.get("switched")
+        if event.get("phase") != "end" or status not in READY_STATUSES or not _whole(waited_ms):
+            return
+        if not isinstance(switched, bool):
+            return
+        with self._run_lock:
+            self._run["ready"] = {"status": status, "waited_s": round(waited_ms / 1000), "switched": switched}
+            self._write_run_locked()
 
     def close(self):
         """Stops the heartbeat thread without finishing the run. Safe to call more than once."""

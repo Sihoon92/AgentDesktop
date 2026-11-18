@@ -81,6 +81,8 @@ const PANEL_KEY = "agent-viewer-panels";
 const FOLDABLE = ["runs", "chat", "details", "settings"];
 const PANEL_NAMES = { runs: "실행 목록", chat: "대화", details: "스텝 정보" };
 const POLL_MS = 1000;
+const MANUAL_CHOICE = "*manual*";
+const READY_CODE = /^[a-z_]{1,40}$/;
 const LEVEL_LABELS = ["0 · 커서 안 씀", "1 · 값 입력·키", "2 · 마우스·타이핑", "3 · 전체"];
 
 const $ = (id) => document.getElementById(id);
@@ -292,6 +294,8 @@ function buildEntries(events) {
       }
       approved = null;
       entries.push(awaitingAfter);
+    } else if (event.type === "capture" && event.reason === "look") {
+      entries.push({ kind: "look", capture: event, observation: observations.get(event.observation) || lastObservation, at });
     } else if (event.type === "finish") {
       entries.push({ kind: "finish", finish: event, observation: lastObservation, at });
     }
@@ -416,10 +420,12 @@ function runSummary(run, events) {
   const steps = typeof run.steps === "number" && run.steps > 0 ? run.steps : lastModel ? lastModel.step : run.steps;
   const tokens = typeof run.tokens === "number" && run.tokens > 0 ? run.tokens : lastModel ? lastModel.tokens : run.tokens;
   const approvals = approvalCounts(events);
+  const visionReads = events.filter((event) => event.type === "vision").length;
   const parts = [
     formatDuration(run.duration_s),
     typeof steps === "number" ? `스텝 ${steps}` : null,
     typeof tokens === "number" ? `토큰 ${tokens.toLocaleString("en-US")}` : null,
+    visionReads ? `비전 ${visionReads}회` : null,
     approvals ? `승인 ${approvals.approved} · 거부 ${approvals.rejected}${approvals.unanswered ? ` · 답 없음 ${approvals.unanswered}` : ""}` : null,
     run.started_by ? `시작 ${STARTED_BY_LABELS[run.started_by] || run.started_by}` : null,
     run.exe_name || null,
@@ -892,7 +898,39 @@ function select(index) {
   render();
 }
 
+/* "대상 앱 준비 중 · N초" while the harness waits for the target's ready signal (a ready start
+   event with no end yet in a live run), counted from the run's start because events carry no
+   time; the run starts the wait before its first model call. A wait that ended without the
+   signal shows its status as READY_<STATUS>. Text goes in through textContent only. */
+function renderReadyBanner() {
+  const banner = $("ready-banner");
+  const text = readyBannerText();
+  banner.textContent = text || "";
+  banner.hidden = !text;
+}
+
+function readyBannerText() {
+  if (state.runKind !== "run" || !state.runId) return null;
+  const readies = (state.events || []).filter((event) => event.type === "ready");
+  if (readies.length === 0) return null;
+  const last = readies[readies.length - 1];
+  if (last.phase === "end") {
+    if (last.status === "ready" || typeof last.status !== "string" || !READY_CODE.test(last.status)) return null;
+    return `대상 앱 준비 실패 · READY_${last.status.toUpperCase()}`;
+  }
+  if (last.phase !== "start" || !isLive()) return null;
+  return `대상 앱 준비 중 · ${readySeconds()}초`;
+}
+
+function readySeconds() {
+  const started = Date.parse((state.run && state.run.started_at) || "");
+  if (!Number.isNaN(started)) return Math.max(0, Math.floor((Date.now() - started) / 1000));
+  if (!state.readySeen || state.readySeen.runId !== state.runId) state.readySeen = { runId: state.runId, at: Date.now() };
+  return Math.floor((Date.now() - state.readySeen.at) / 1000);
+}
+
 function render() {
+  renderReadyBanner();
   renderRunSummary();
   renderTimeline();
   renderToggles();
@@ -910,11 +948,12 @@ function timelineLabel(entry) {
   if (entry.kind === "finish") return STATUS_LABELS[entry.finish.status] || entry.finish.status;
   if (entry.kind === "wait") return waitLabel(entry.observation.wait);
   if (entry.kind === "legacy") return entry.step.tool;
+  if (entry.kind === "look") return "look";
   return "관찰";
 }
 
 const WAIT_LABEL_CHARS = 18;
-const SOURCE_LABELS = { observe: "observe 관찰", action: "동작 뒤 화면", launch: "실행 직후", wait_for_text: "wait_for_text 대기", question: "질문 직전 화면" };
+const SOURCE_LABELS = { observe: "observe 관찰", action: "동작 뒤 화면", launch: "실행 직후", wait_for_text: "wait_for_text 대기", question: "질문 직전 화면", ready: "준비된 창" };
 
 function waitLabel(wait) {
   if (!wait) return "대기";
@@ -943,6 +982,7 @@ function renderTimeline() {
       el("span", { className: "num", text: index + 1 }),
       el("span", { className: `dot ${entry.kind}${bad}${unconfirmed ? " unconfirmed" : ""}`, attrs: { "aria-hidden": "true" } }),
       el("span", { text: timelineLabel(entry) }),
+      visionBadge(entry),
       unconfirmed ? el("span", { className: "visually-hidden", text: " 확인 못 함" }) : null,
     ]);
     if (unconfirmed) button.title = "확인 못 함: 글은 그대로이고 누른 곳 주변 그림만 바뀜";
@@ -1004,6 +1044,7 @@ function renderDetails() {
   else if (entry.kind === "finish") info.replaceChildren(...finishDetails(entry.finish));
   else if (entry.kind === "wait") info.replaceChildren(...waitDetails(entry.observation));
   else if (entry.kind === "legacy") info.replaceChildren(...legacyDetails(entry.step));
+  else if (entry.kind === "look") info.replaceChildren(...lookDetails(entry));
   else info.replaceChildren(...observationDetails(entry.observation));
   renderObservationText(entry.kind === "legacy" ? legacyObservation(entry.step) : shownObservation(entry));
 }
@@ -1018,7 +1059,11 @@ function actionDetails(entry) {
   const args = { ...(action.arguments || {}) };
   delete args.intent;
   const nodes = [
-    el("div", { className: "step-head" }, [el("h2", { text: `#${state.index + 1} ${action.tool}` }), el("span", { className: "kind", text: "동작" })]),
+    el("div", { className: "step-head" }, [
+      el("h2", { text: `#${state.index + 1} ${action.tool}` }),
+      el("span", { className: "kind", text: "동작" }),
+      visionBadge(entry),
+    ]),
     action.intent ? el("p", { className: "intent", text: action.intent }) : null,
     factList([
       ["모델 스텝", action.step],
@@ -1063,10 +1108,57 @@ async function captureUrl(runId, captureId) {
   return state.blobs.get(key);
 }
 
+/* The vision reads of a step: an action owns the read of the capture taken after it (a mismatch
+   or an unconfirmed result), and a look step the read of its own capture. */
 function visionEventsFor(entry) {
-  const capture = entry && entry.kind === "action" && entry.action.result ? entry.action.result.capture : null;
+  if (!entry) return [];
+  let capture = null;
+  if (entry.kind === "action") capture = entry.action.result ? entry.action.result.capture : null;
+  else if (entry.kind === "look") capture = entry.capture.id;
   if (typeof capture !== "string" || !CAPTURE_ID.test(capture)) return [];
   return state.events.filter((event) => event.type === "vision" && event.capture === capture);
+}
+
+/* A look the text model called. With a vision model the step shows its question and answer; in a
+   one-model run it only says a capture was taken, which the model saw itself. */
+function lookDetails(entry) {
+  const capture = entry.capture;
+  return [
+    el("div", { className: "step-head" }, [
+      el("h2", { text: `#${state.index + 1} look` }),
+      el("span", { className: "kind", text: "캡처 보기" }),
+      visionBadge(entry),
+    ]),
+    factList([
+      ["모델 스텝", capture.step],
+      ["캡처", capture.id],
+      ["표시 번호", capture.mark === null || capture.mark === undefined ? "창 전체" : `[${capture.mark}] 주변`],
+    ]),
+    ...visionSection(entry),
+  ];
+}
+
+/* Which askers used the vision model at this step: "look 질문", "동작 뒤 불일치", ... */
+function visionAskers(entry) {
+  return [...new Set(visionEventsFor(entry).map((event) => VISION_ASKERS[event.asked_by] || "비전"))];
+}
+
+/* A small "비전" tag on a step where the vision model read a capture, so a person sees at a glance
+   where the run leaned on the weaker model. Its title names who asked. */
+function visionBadge(entry) {
+  const askers = visionAskers(entry);
+  if (askers.length === 0) return null;
+  return el("span", { className: "vision-badge", text: "비전", attrs: { title: `비전 모델 사용: ${askers.join(", ")}` } });
+}
+
+/* The next step after the current one where the vision model was used, wrapping to the start; -1 when none. */
+function nextVisionStep() {
+  const count = state.entries.length;
+  for (let offset = 1; offset <= count; offset += 1) {
+    const index = (state.index + offset) % count;
+    if (visionEventsFor(state.entries[index]).length > 0) return index;
+  }
+  return -1;
 }
 
 function visionSection(entry) {
@@ -1545,8 +1637,8 @@ function renderStartForm() {
   form.hidden = !status || !status.can_start;
   if (form.hidden) return;
   $("exe").placeholder = status.default_exe || "실행 파일의 절대 경로";
-  $("exe").required = !status.default_exe;
   $("system").placeholder = status.default_system ? `비우면 ${status.default_system} (설정 파일)` : "비우면 실행 파일 이름";
+  renderSystemChoice(status);
   $("stage-call-limit").placeholder = Number.isInteger(status.default_stage_call_limit) ? `비우면 ${status.default_stage_call_limit}` : "비우면 기본값";
   renderSettingsSummary();
   const busy = Boolean(status.active);
@@ -1555,11 +1647,45 @@ function renderStartForm() {
   else if ($("start-status").dataset.kind !== "error") $("start-status").textContent = "";
 }
 
+/* The settings file's systems as a list in front of the exe box. The server sends names only,
+   never their exe paths. Picking a name hides the exe and system boxes and the start request
+   sends just that name; "직접 입력" brings the boxes back as they were. The options are built
+   again only when the names change, so a poll keeps what the person picked. */
+function renderSystemChoice(status) {
+  const names = Array.isArray(status.systems) ? status.systems.filter((name) => typeof name === "string") : [];
+  const select = $("system-choice");
+  const key = JSON.stringify(names);
+  if (state.systemNames !== key) {
+    state.systemNames = key;
+    select.replaceChildren(
+      ...names.map((name) => el("option", { text: name, attrs: { value: name } })),
+      el("option", { text: "직접 입력", attrs: { value: MANUAL_CHOICE } }),
+    );
+    select.value = names.includes(status.default_choice) ? status.default_choice : names[0] || MANUAL_CHOICE;
+  }
+  $("system-choice-field").hidden = names.length === 0;
+  applySystemChoice();
+}
+
+function chosenSystem() {
+  if ($("system-choice-field").hidden) return null;
+  const value = $("system-choice").value;
+  return value && value !== MANUAL_CHOICE ? value : null;
+}
+
+function applySystemChoice() {
+  const chosen = chosenSystem();
+  $("exe-field").hidden = Boolean(chosen);
+  $("system-field").hidden = Boolean(chosen);
+  $("exe").required = !chosen && !(state.status && state.status.default_exe);
+}
+
 function renderSettingsSummary() {
+  const chosen = chosenSystem();
   const exe = $("exe").value.trim() || (state.status && state.status.default_exe) || "";
-  const system = $("system").value.trim();
+  const system = chosen ? null : $("system").value.trim();
   const parts = [
-    exe ? exe.split(/[\\/]/).pop() : "실행 파일을 정하세요",
+    chosen ? `시스템 ${chosen}` : exe ? exe.split(/[\\/]/).pop() : "실행 파일을 정하세요",
     system ? `시스템 ${system}` : null,
     `권한 ${$("level").value}`,
     stageLimitSummary(),
@@ -1587,6 +1713,10 @@ function stageLimitSummary() {
 function watchSettings() {
   for (const id of ["exe", "system", "stage-call-limit"]) $(id).addEventListener("input", renderSettingsSummary);
   for (const id of ["level", "approve"]) $(id).addEventListener("change", renderSettingsSummary);
+  $("system-choice").addEventListener("change", () => {
+    applySystemChoice();
+    renderSettingsSummary();
+  });
 }
 
 function setStartMessage(text, kind) {
@@ -1603,7 +1733,8 @@ async function submitRun(event) {
     $("goal").focus();
     return;
   }
-  const exe = $("exe").value.trim();
+  const chosen = chosenSystem();
+  const exe = chosen ? "" : $("exe").value.trim();
   if ($("exe").required && !exe) {
     setCollapsed("settings", false);
     setStartMessage("실행 파일의 절대 경로를 입력해 주세요.", "error");
@@ -1612,7 +1743,7 @@ async function submitRun(event) {
   }
   const payload = { goal, level: Number($("level").value), approve: $("approve").checked };
   if (exe) payload.exe = exe;
-  const system = $("system").value.trim();
+  const system = chosen || $("system").value.trim();
   if (system) payload.system = system;
   const stageLimit = stageLimitValue();
   if (stageLimit !== undefined) payload.stage_call_limit = stageLimit;
@@ -1711,6 +1842,10 @@ function onKey(event) {
   else if (event.key === "b" || event.key === "B") setView(state.view === "before" ? "after" : "before");
   else if (event.key === "a" || event.key === "A") setBoxes(state.boxes === "all" ? "target" : "all");
   else if (event.key === "t" || event.key === "T") toggleTexts();
+  else if (event.key === "v" || event.key === "V") {
+    const next = nextVisionStep();
+    if (next >= 0) select(next);
+  }
   else return;
   event.preventDefault();
 }
@@ -1851,6 +1986,7 @@ function start() {
   loadStatus();
   loadRuns();
   setInterval(pollLive, POLL_MS);
+  setInterval(renderReadyBanner, POLL_MS);
 }
 
 start();

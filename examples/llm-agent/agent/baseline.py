@@ -8,9 +8,16 @@ TARGET_LABEL_KEYS = ("role", "name", "name_contains", "description_contains")
 
 
 def run_baseline(toolbox, task, timeout_s=30):
-    launched = toolbox.call("launch_target", {})
-    if not launched.get("ok"):
-        return RunResult("stopped", 1, f"Launch failed: {launched}")
+    """With a ready signal the harness's ready wait launches the target instead of launch_target,
+    and a wait that fails stops with its reason."""
+    if task.ready_text:
+        launched = toolbox.launch_ready()
+        if not launched.get("ok"):
+            return RunResult("stopped", 1, launched["message"])
+    else:
+        launched = toolbox.call("launch_target", {})
+        if not launched.get("ok"):
+            return RunResult("stopped", 1, f"Launch failed: {launched}")
     element = _wait_for_element(toolbox, task, timeout_s)
     if element is None:
         return RunResult("stopped", 2, f"Element never appeared: {task.baseline_target}")

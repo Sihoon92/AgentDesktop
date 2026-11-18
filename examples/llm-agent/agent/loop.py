@@ -99,6 +99,10 @@ NEEDS_PLAN = (
     "launch_target, reading tools and ask work without a plan."
 )
 STEP_LIMIT = "Step limit reached"
+READY_BRIEFING = (
+    "The harness has already launched the target app and waited until its first screen was ready. "
+    "Do not call launch_target; start from the target's windows:"
+)
 
 
 @dataclass(frozen=True)
@@ -183,14 +187,11 @@ class _Run:
         self._vision_tokens = 0
 
     def run(self):
-        briefing = self._toolbox.briefing()
-        goal = f"{self._task.goal}\n\n{briefing}" if briefing else self._task.goal
-        image_mode = "off" if self._split else self._task.image_mode
-        self._transcript = Transcript({"role": "user", "content": goal}, image_mode)
-        try:
-            result = self._turns()
-        except AgentStopped as stop:
-            result = self._result("stopped", str(stop))
+        ready = self._toolbox.launch_ready() if self._task.ready_text else None
+        if ready is not None and not ready.get("ok"):
+            result = self._result("stopped", ready["message"])
+        else:
+            result = self._start(ready)
         if result.status == "stopped":
             event = self._plan.stop()
             if event is not None:
@@ -200,6 +201,20 @@ class _Run:
         if self._split:
             stats.update(vision_calls=self._vision_calls, vision_tokens=self._vision_tokens)
         return replace(result, stats=stats)
+
+    def _start(self, ready):
+        """Builds the first message (the goal, the briefing and, after a ready wait, where the app
+        stands) and runs the turns."""
+        briefing = self._toolbox.briefing()
+        goal = f"{self._task.goal}\n\n{briefing}" if briefing else self._task.goal
+        if ready is not None:
+            goal = f"{goal}\n\n{READY_BRIEFING}\n{json.dumps(ready['windows'], ensure_ascii=False)}"
+        image_mode = "off" if self._split else self._task.image_mode
+        self._transcript = Transcript({"role": "user", "content": goal}, image_mode)
+        try:
+            return self._turns()
+        except AgentStopped as stop:
+            return self._result("stopped", str(stop))
 
     def _turns(self):
         while True:
