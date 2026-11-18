@@ -221,15 +221,18 @@ class Vision:
 
 def auto_question(reason, expect, element):
     """The harness's question for a capture taken after an action: what was expected, on
-    which target, and a request for the on-screen state rather than mark numbers."""
+    which target, and a request for the on-screen state rather than mark numbers. It asks for a
+    description only; whether the action worked is the text model's judgement, not the vision
+    model's, because the vision model reasons less well."""
     target = _target_phrase(element)
     expectation = f'the expected result "{expect}"' if expect else "no particular expected result"
     why = REASON_PHRASES.get(reason, f'the check ended as "{reason}"' if reason else "the result is unknown")
     return (
         f"An action was just performed on {target} with {expectation}, and {why}; "
         f"looking at this image, describe the current on-screen state of {target} "
-        f"(for example checked or not, selected or not, its value, open or closed) "
-        f"and whether it matches the expectation, answering with the state rather than mark numbers."
+        f"(for example checked or not, selected or not, its value, open or closed). "
+        f"Describe only what the image shows and do not judge whether the action worked; "
+        f"answer with the state rather than mark numbers."
     )
 
 

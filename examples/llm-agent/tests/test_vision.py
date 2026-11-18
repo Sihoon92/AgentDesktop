@@ -251,6 +251,12 @@ def test_auto_question_asks_for_state_not_numbers():
     assert question.isascii()
 
 
+def test_auto_question_leaves_the_judgement_to_the_text_model():
+    question = auto_question("mismatch", "value_changed", {"role": "checkbox", "name": "x"})
+    assert "do not judge" in question
+    assert "whether it matches" not in question
+
+
 def test_instructions_ask_for_marks_before_pixels():
     for word in ("marks", "points", "unsure", "answer", "JSON"):
         assert word in VISION_INSTRUCTIONS

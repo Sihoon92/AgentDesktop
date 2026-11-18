@@ -76,9 +76,13 @@ Rules:
 VISION_PROMPT = """\
 
 Pictures in this run:
+- Read the tree first: observe again, use find_cells and the [n] marks. Call look only for what
+  they cannot show, and never ask about something the observation already shows.
 - You cannot see pictures. Ask the vision model through look's question, one thing at a time, and
   read the answer in the result's vision. After a mismatched or unconfirmed action the result's
-  vision already holds its answer about the target; there is no attached capture.
+  vision already holds its description of the target; there is no attached capture.
+- The vision model only describes the picture. Compare its answer with what you expected and
+  decide yourself whether the action worked and what to do next.
 - When vision.marks names a mark, use click_part on it. When only vision.points gives pixels, use
   click_point with that capture and those pixels.
 - When vision.unsure is true or vision.error is set, ask look again or ask the user. Confirm with

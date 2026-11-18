@@ -98,6 +98,13 @@ def test_vision_prompt_is_english_and_names_no_app():
     assert VISION_PROMPT.isascii()
 
 
+def test_vision_prompt_puts_the_tree_first_and_keeps_the_judgement():
+    assert "Read the tree first" in VISION_PROMPT
+    assert "find_cells" in VISION_PROMPT
+    assert "decide yourself" in VISION_PROMPT
+    assert VISION_PROMPT.index("Read the tree first") < VISION_PROMPT.index("Ask the vision model")
+
+
 def test_vision_tokens_count_toward_the_budget(tmp_path):
     vision = FakeVision(FakeAnswer(tokens=900))
     turns = [launch(), observe(), look(), GIVE_UP]
