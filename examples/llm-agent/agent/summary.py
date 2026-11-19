@@ -25,6 +25,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from agent.profile import READ_MODES
 from agent.ready import READY_STATUSES
 
 HEADER = "요약 (화면 내용 없음)"
@@ -36,6 +37,8 @@ MODIFIED = "+수정"
 UNCONFIRMED = "확인 못 함"
 UNCONFIRMED_VERDICT = "unconfirmed"
 SEPARATOR = " · "
+READY_COUNTS = ("polls", "reads", "failed_reads", "timeouts", "max_read_ms")
+"""The same keys as agent.recorder.READY_COUNTS, in the order the ready line says them."""
 CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,47}")
 VERSION = re.compile(r"[0-9a-f]{4,40}(\+수정)?")
 WORKFLOW_ID = re.compile(r"w-[0-9][0-9-]{0,31}")
@@ -302,13 +305,27 @@ def _knowledge(events):
 
 def _ready(ready):
     """`ready · 12초 · 대상 바뀜` from run.json's `ready`, or None when the run had no ready wait
-    or its status is not one of READY_STATUSES. The signal itself is never in run.json."""
+    or its status is not one of READY_STATUSES. The signal itself is never in run.json. When the
+    ready holds the read mode and every count of READY_COUNTS in shape, the line also says how the
+    wait read: `ready · 95초 · snapshot · 확인 12바퀴 · 읽기 31회(실패 4, 시간 초과 0, 최대 7.9초) · 대상 바뀜`."""
     if not isinstance(ready, dict) or ready.get("status") not in READY_STATUSES:
         return None
     seconds = _count(ready.get("waited_s"))
     switched = ready.get("switched")
     moved = "대상 바뀜" if switched is True else "대상 그대로" if switched is False else f"대상 {UNKNOWN}"
-    return SEPARATOR.join([ready["status"], f"{UNKNOWN if seconds is None else seconds}초", moved])
+    parts = [ready["status"], f"{UNKNOWN if seconds is None else seconds}초"]
+    counts = [_count(ready.get(key)) for key in READY_COUNTS]
+    if ready.get("read") in READ_MODES and all(count is not None for count in counts):
+        polls, reads, failed, timeouts, longest = counts
+        parts += [ready["read"], f"확인 {polls}바퀴",
+                  f"읽기 {reads}회(실패 {failed}, 시간 초과 {timeouts}, 최대 {_tenths(longest)}초)"]
+    return SEPARATOR.join([*parts, moved])
+
+
+def _tenths(ms):
+    """Milliseconds as seconds with one decimal, half up: 7950 → 8.0."""
+    tenths = (ms + 50) // 100
+    return f"{tenths // 10}.{tenths % 10}"
 
 
 def _workflow(events):

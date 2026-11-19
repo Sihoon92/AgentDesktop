@@ -23,7 +23,9 @@ powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1
 | 옵션 | 뜻 |
 | --- | --- |
 | `--profile mes-like\|easy\|hard` | 영역별 노출 방식 묶음. 기본 `mes-like` |
-| `--expose <영역>=<방식>[,...]` | 프로파일 위에 영역별로 덮어씀. 영역은 `menu`, `filters`, `grid`, `icon`, `radial`, `arrow`, 방식은 `ref`, `text`, `bare`, `pixel`. `icon`은 `text`를 받지 않음. `arrow`는 `ref`, `bare`, `pixel`만 받고, `bare`는 `arrow`만 받음 |
+| `--expose <영역>=<방식>[,...]` | 프로파일 위에 영역별로 덮어씀. 영역은 `menu`, `filters`, `grid`, `icon`, `radial`, `arrow`, 방식은 `ref`, `text`, `bare`, `idonly`, `pixel`. `icon`은 `text`를 받지 않음. `arrow`는 `ref`, `bare`, `pixel`만 받음. `bare`는 `menu`와 `arrow`만, `idonly`는 `menu`만 받음 |
+| `--menu-container-id on\|off` | 메뉴 항목을 담은 영역(메뉴 줄, 메뉴 목록, 아래 `other`의 띠)에 `AutomationId`를 둠. 기본 `on`. `off`면 그 영역에 ID가 없음. 아래 "메뉴의 ID" |
+| `--menu-dup-id none\|same\|other` | 첫째 메뉴 항목과 같은 `AutomationId`를 쓰는 요소를 하나 더 둠. 기본 `none`. `same`은 메뉴 줄의 둘째 항목, `other`는 메뉴 줄 아래 띠의 요소 하나. 아래 "메뉴의 ID" |
 | `--delay-ms <N>` | 조회 대기 시간을 N밀리초로 고정. 없으면 조회마다 1000~4000 |
 | `--seed <N>` | 대기 시간 순서의 시드. 기본 `20261112`. 같은 시드면 같은 순서 |
 | `--combo-open arrow\|anywhere` | 필터 칸이 목록을 여는 방식. 기본 `arrow`(칸 오른쪽 끝의 화살표 버튼으로만 열림, 아래 "선택 칸 여는 방식"). `anywhere`는 칸 어디를 눌러도 열리는 옛 동작으로, 비교할 때만 씀 |
@@ -33,7 +35,7 @@ powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1
 | `--single-instance` | `--launcher`와 함께. 같은 exe의 메인 화면이 이미 떠 있으면 실행기가 팝업도 새 창도 없이 끝남 |
 | `--menu-delay-ms <N>` | 메인 화면이 뜬 뒤 N밀리초 지나서 메뉴를 채움. 그동안 메뉴 줄은 비어 있음 |
 | `--export-headless <화면> <필터 JSON> <출력 .xlsx>` | 창 없이 그 화면의 조회 결과를 저장하고 끝남 |
-| `--parse-only` | 테스트용. 옵션을 해석한 결과를 JSON 한 줄로 출력하고 끝남. `--launcher`면 메인 화면을 띄울 인자(`main_command_line`)도 나옴 |
+| `--parse-only` | 테스트용. 옵션을 해석한 결과를 JSON 한 줄로 출력하고 끝남(`menu_container_id`, `menu_dup_id` 포함). `--launcher`면 메인 화면을 띄울 인자(`main_command_line`)도 나옴 |
 
 종료 코드는 `0` 성공, `1` 파일을 쓰지 못함, `2` 옵션이나 필터가 틀림입니다. 틀린 이유는 표준 오류에 나옵니다.
 
@@ -67,7 +69,8 @@ Set-Content build\VirtualMes.args '--splash-ms 2000 --launcher --single-instance
 | --- | --- |
 | `ref` | 이름, ref, `AutomationId`가 있는 `button`, `checkbox`, `cell`. 조작 대상이 아닌 글자는 `statictext` |
 | `text` | 이름과 위치가 있는 `statictext`. ref 없음. 체크박스의 체크 표시와 상태는 나오지 않음 |
-| `bare` | 이름 없는 `button`. ref와 숫자 `AutomationId`가 있음. `arrow` 영역만 받음 |
+| `bare` | 이름 없는 `button`. ref와 숫자 `AutomationId`가 있음. `menu`와 `arrow` 영역만 받음 |
+| `idonly` | 이름 없는 `image`. 숫자 `AutomationId`만 있고 누르는 패턴(Invoke)이 없어 ref도 없음. 실제 클릭(좌표)에는 다른 방식과 똑같이 반응함. `menu` 영역만 받음 |
 | `pixel` | 이름 없는 `group` 하나. 안의 글자는 나오지 않음 |
 
 | 프로파일 | menu | filters | grid | icon | radial | arrow |
@@ -79,6 +82,29 @@ Set-Content build\VirtualMes.args '--splash-ms 2000 --launcher --single-instance
 `mes-like`의 `arrow`가 `bare`인 것은 가정입니다. 실제 MES에서 화살표가 어떻게 보이는지 확인되면 맞춥니다.
 
 `grid`에는 표, 화면 이름 탭, 데이터 패널의 화면 이름, 상태 줄, 불량 상세 팝업의 표가 들어갑니다. "조회(F5)" 버튼, 날짜 입력 칸, "저장 | 열기 | 취소" 버튼, 로딩 팝업의 안내 글, 알림 창, 저장 대화상자는 표준 컨트롤이라 어느 프로파일에서도 보입니다.
+
+### 메뉴의 ID
+
+회사 GSCM처럼 글자가 그림으로 그려지고 ID만 있는 메뉴를 흉내 냅니다. `menu=bare`는 이름 없는 버튼(ref 있음), `menu=idonly`는 이름도 ref도 없는 그림입니다. `idonly`의 `image`를 고른 이유: CLI는 역할이 `INTERACTIVE_ROLES`(`crates/core/src/tree/roles.rs`)에 있거나 주된 동작을 알리는 요소에만 ref를 주는데, `image`는 그 목록에 없는 읽기 전용 역할이고 이 요소는 어떤 패턴도 알리지 않습니다. 회사 GSCM의 메뉴도 Inspect에서 `IsInvokePatternAvailable`이 거짓입니다.
+
+`bare`와 `idonly`의 메뉴 항목 `AutomationId`는 자리로 정해지는 고정된 숫자입니다. 화면이 달라도, 앱을 다시 켜도 같은 항목은 같은 숫자입니다(`MenuIds.cs`). `ref`의 ID는 지금처럼 `menu-<자리>`, `screen-<화면 id>`입니다.
+
+| 메뉴 줄 | 기준정보 | 생산운영 | 품질관리 | 설비관리 | 자재관리 |
+| --- | --- | --- | --- | --- | --- |
+| `AutomationId` | 8001 | 8002 | 8003 | 8004 | 8005 |
+
+| 메뉴 목록(생산운영) | 전공정 생산현황 | 후공정 생산현황 | 공정별 불량현황 | 권취 Roller 점검일시 | 설비 가동현황 | 공정별 생산집계 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `AutomationId` | 8101 | 8102 | 8103 | 8104 | 8105 | 8106 |
+
+메뉴 목록 창의 제목 줄(분류 이름)은 `bare`와 `idonly`에서 트리에 나오지 않습니다.
+
+메뉴 항목을 담은 영역(`group`)에도 고정된 `AutomationId`가 있습니다: 메뉴 줄 `8000`, 메뉴 목록 `8100`, `--menu-dup-id other`의 띠 `8200`. `menu`가 `ref`, `text`, `bare`, `idonly`일 때 붙고(`pixel`이면 영역 자체가 이름 없는 `group` 하나뿐입니다), `--menu-container-id off`면 셋 다 없습니다. 기본 프로파일에서 바뀌는 것은 이 영역 ID뿐입니다. 그때 메뉴 항목에는 ID나 이름이 있는 조상이 창 말고 없습니다.
+
+`--menu-dup-id`는 ID가 겹치는 경우를 만듭니다.
+
+- `same`: 메뉴 줄의 둘째 항목(생산운영)이 첫째(기준정보)와 같은 `AutomationId`를 씁니다(`bare`와 `idonly`에서는 둘 다 `8001`, `ref`에서는 `menu-0`). 같은 영역 안에서 역할과 ID가 같은 두 요소이므로 담긴 영역으로도 갈리지 않습니다. 누르면 지금처럼 생산운영이 열립니다.
+- `other`: 메뉴 줄 아래에 띠를 하나 더 두고, 그 안에 첫째 메뉴 항목과 모양, 역할, `AutomationId`가 같은 요소를 하나 둡니다. 담긴 영역이 메뉴 줄(`8000`)과 띠(`8200`)로 다르므로 담긴 영역으로 갈립니다. 누르면 기준정보의 목록이 열립니다. 띠 때문에 화면 본문이 띠 높이만큼 내려갑니다.
 
 ### 선택 칸 여는 방식
 

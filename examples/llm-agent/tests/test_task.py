@@ -261,3 +261,13 @@ def test_bad_ready_values_in_a_task_file_are_refused(tmp_path, line):
     with pytest.raises(TaskError):
         load_task(write(tmp_path, VALID + line + "\n"))
 
+
+
+def test_profile_ready_fields_default_and_are_not_task_file_keys(tmp_path):
+    task = load_task(write(tmp_path, VALID + "ready:\n  - {name: 생산운영}\nready_read: find\n"))
+
+    assert (task.ready, task.ready_read) == ((), "snapshot")
+    assert "ready" not in OPTIONAL_KEYS and "ready_read" not in OPTIONAL_KEYS
+    assert "ready" not in DEFAULT_KEYS and "ready_read" not in DEFAULT_KEYS
+    assert (task_from_args("열어", r"C:\a\b.exe").ready, task_from_args("열어", r"C:\a\b.exe").ready_read) == \
+        ((), "snapshot")

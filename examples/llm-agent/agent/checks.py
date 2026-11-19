@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent.images import IMAGE_MODES
+from agent.ready import recommended_read
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -42,12 +43,23 @@ POINT_X = re.compile(r'"x"\s*:\s*(-?\d+(?:\.\d+)?)')
 POINT_Y = re.compile(r'"y"\s*:\s*(-?\d+(?:\.\d+)?)')
 
 
+STABLE_IDS_HINT = "등록 화면에서 'ID는 다시 켜도 같음'을 켜도 됩니다"
+ROUND_LINES_MAX = 20
+ROUND_LINES_KEPT = 10
+"""More rounds than ROUND_LINES_MAX print the first and the last ROUND_LINES_KEPT and one line
+for the rest."""
+
+
 @dataclass(frozen=True)
 class Result:
+    """One check. `notes` are lines printed under its own line (the ready rounds, the system
+    profile), with counts and codes only like every other line."""
+
     name: str
     status: str
     detail: str = ""
     code: str = ""
+    notes: tuple = ()
 
 
 def passed(name, detail=""):
@@ -216,6 +228,7 @@ def observation_detail(kinds, complete, elapsed, shot):
         f"이름 없는 ref {kinds.get('unnamed_ref', 0)}(id 있음 {kinds.get('unnamed_ref_with_id', 0)})",
         f"글자 {kinds.get('text', 0)}",
         f"빈 영역(그림 후보) {kinds.get('blank', 0)}",
+        f"ID만 있는 요소 {kinds.get('id_only', 0)}",
         f"노드 {kinds.get('nodes', 0)}",
         f"깊이 {kinds.get('depth', 0)}",
         "잘림 없음" if complete else "잘림 있음",
@@ -233,6 +246,76 @@ def systems_detail(settings):
     """How many systems the settings name and whether a ready signal is set, never which."""
     count = len(settings.get("systems") or {})
     return f"시스템 {count}개 · 준비 신호 {'있음' if settings.get('ready_text') else '없음'}"
+
+
+def profile_detail(profile):
+    """`시스템 프로파일: 준비 신호 2 · 등록 이름 14 · ID 고정 예 · 읽는 방식 snapshot` from a loaded
+    profile, or `시스템 프로파일: 없음` when the system has no profile file. Counts and the mode
+    only: no signal, name, id or role."""
+    if profile is None:
+        return "시스템 프로파일: 없음"
+    return (f"시스템 프로파일: 준비 신호 {len(profile.ready)} · 등록 이름 {len(profile.elements)} · "
+            f"ID 고정 {'예' if profile.stable_ids else '아니오'} · 읽는 방식 {profile.ready_read}")
+
+
+def shortcut_detail(shortcut, code=None):
+    """`바로가기: 대상 exe · 인자 2 · 시작 위치 있음` for a shortcut that can be launched, or
+    `바로가기: 실패(SHORTCUT_NOT_EXE)` with the code it failed with. A count and a yes or no only:
+    never the target, an argument or the folder."""
+    if code is not None:
+        return f"바로가기: 실패({code})"
+    folder = "있음" if shortcut.working_dir else "없음"
+    return f"바로가기: 대상 exe · 인자 {len(shortcut.arguments)} · 시작 위치 {folder}"
+
+
+def round_line(info):
+    """One round of a ready wait (agent.ready's on_round) as `1바퀴: 창 목록 120ms · 후보 2 · 창1 신호1
+    찾음 310ms · …`. Windows and signals are their places in the round. A find that timed out is
+    `시간 초과`, any other failed read `실패 <코드>`; a snapshot read names no signal."""
+    parts = [f"{info.get('round')}바퀴: 창 목록 {info.get('list_ms')}ms", f"후보 {info.get('candidates')}"]
+    for read in info.get("reads") or []:
+        where = f"창{read.get('window')}"
+        if read.get("signal") is not None:
+            where += f" 신호{read['signal']}"
+        code = read.get("code")
+        if code is None:
+            outcome = "찾음" if read.get("found") else "없음"
+        elif read.get("signal") is not None and code == "TIMEOUT":
+            outcome = "시간 초과"
+        else:
+            outcome = f"실패 {code}"
+        parts.append(f"{where} {outcome} {read.get('ms')}ms")
+    return " · ".join(parts)
+
+
+def round_lines(infos):
+    """Every round's line, or the first and last ROUND_LINES_KEPT with `… N바퀴 생략` between them
+    when there are more than ROUND_LINES_MAX."""
+    lines = [round_line(info) for info in infos]
+    if len(lines) <= ROUND_LINES_MAX:
+        return lines
+    left_out = len(lines) - 2 * ROUND_LINES_KEPT
+    return lines[:ROUND_LINES_KEPT] + [f"… {left_out}바퀴 생략"] + lines[-ROUND_LINES_KEPT:]
+
+
+def read_ways_line(measured):
+    """`읽는 방식: snapshot 4.2초 · find 0.3초 · 권장 find` from agent.ready.measure. A way whose read
+    failed says `실패`, one that missed a signal `신호 1/2`, timed-out finds `시간 초과 N`; the
+    recommendation is agent.ready.recommended_read's, else `없음`."""
+    parts = []
+    for name in ("snapshot", "find"):
+        side = measured.get(name) or {}
+        text = f"{name} {side.get('ms', 0) / 1000:.1f}초"
+        found = side.get("found") or []
+        if not side.get("ok"):
+            text += " 실패"
+        elif not all(found):
+            text += f" 신호 {sum(1 for hit in found if hit)}/{len(found)}"
+        if side.get("timeouts"):
+            text += f" 시간 초과 {side['timeouts']}"
+        parts.append(text)
+    parts.append(f"권장 {recommended_read(measured) or '없음'}")
+    return "읽는 방식: " + " · ".join(parts)
 
 
 def whole_seconds(milliseconds):

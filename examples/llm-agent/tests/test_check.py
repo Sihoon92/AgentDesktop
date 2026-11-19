@@ -22,6 +22,7 @@ from fake_cli import FakeCli, scene_window  # noqa: E402
 import check  # noqa: E402
 import run  # noqa: E402
 from agent import checks, ready, settings as settings_module  # noqa: E402
+from agent.profile import Profile, save_profile  # noqa: E402
 from agent.survey import id_keys, kinds  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -237,13 +238,29 @@ def env(tmp_path, monkeypatch, digit_images):
     return Env(tmp_path, monkeypatch)
 
 
+def is_item(line):
+    """An item line is indented two spaces; the lines under an item (rounds, the profile) four."""
+    return line.startswith("  ") and not line.startswith("    ")
+
+
+def sub_lines(out, name):
+    """The four-space lines printed under the item `name`, stripped."""
+    found, inside = [], False
+    for line in out.splitlines():
+        if is_item(line):
+            inside = line.strip().split(":")[0] == name
+        elif inside and line.startswith("    "):
+            found.append(line.strip())
+    return found
+
+
 def lines_of(out):
-    return {line.strip().split(":")[0]: line.strip() for line in out.splitlines() if line.startswith("  ")}
+    return {line.strip().split(":")[0]: line.strip() for line in out.splitlines() if is_item(line)}
 
 
 def test_all_seven_checks_print_one_line_each_and_pass(env, capsys):
     code, out = env.run(capsys, "--exe", str(env.exe))
-    item_lines = [line.strip() for line in out.splitlines() if line.startswith("  ")]
+    item_lines = [line.strip() for line in out.splitlines() if is_item(line)]
     assert [line.split(":")[0] for line in item_lines] == NAMES
     assert code == 0, out
     assert all("실패" not in line for line in item_lines), out
@@ -666,7 +683,7 @@ def test_split_mode_skips_the_text_image_check(env, capsys):
 def test_vision_call_reads_the_digits(env, capsys):
     split(env)
     code, out = env.run(capsys, "--skip", "app")
-    item_lines = [line.strip() for line in out.splitlines() if line.startswith("  ")]
+    item_lines = [line.strip() for line in out.splitlines() if is_item(line)]
     assert [line.split(":")[0] for line in item_lines] == SPLIT_NAMES
     assert lines_of(out)["비전 호출"].startswith("비전 호출: 통과 (기본 주소 · 비전 모델: env · ")
     first = vision_requests(env)[0]
@@ -737,7 +754,7 @@ def test_vision_points_wrong_fails(env, capsys, answer, code):
 
 def test_one_model_mode_has_no_vision_items(env, capsys):
     _, out = env.run(capsys, "--exe", str(env.exe))
-    item_lines = [line.strip() for line in out.splitlines() if line.startswith("  ")]
+    item_lines = [line.strip() for line in out.splitlines() if is_item(line)]
     assert [line.split(":")[0] for line in item_lines] == NAMES
     assert vision_requests(env) == []
 
@@ -745,7 +762,7 @@ def test_one_model_mode_has_no_vision_items(env, capsys):
 def test_split_mode_lists_nine_items_in_order(env, capsys):
     split(env)
     code, out = env.run(capsys, "--exe", str(env.exe))
-    item_lines = [line.strip() for line in out.splitlines() if line.startswith("  ")]
+    item_lines = [line.strip() for line in out.splitlines() if is_item(line)]
     assert [line.split(":")[0] for line in item_lines] == SPLIT_NAMES
     assert code == 0, out
 
@@ -863,15 +880,23 @@ class ReadyCli(CheckCli):
     """CheckCli whose windows appear only after launch: `before` is listed until then, and each
     list-windows after it takes the next entry of `timeline` (the last one repeats)."""
 
-    def __init__(self, timeline, before=()):
+    def __init__(self, timeline, before=(), clock=None, costs=None):
         super().__init__()
         self.scene["trees"] = {"w-splash": splash_tree(), "w-main": signalled_tree(), "w-1": signalled_tree()}
         self.timeline = timeline
         self.before = list(before)
         self.launched = False
         self.reads = 0
+        self.clock = clock
+        self.costs = costs or {}
+        self.find_blind = set()
+        self.find_timeouts = set()
 
     def _respond(self, words):
+        if self.clock is not None:
+            self.clock.now += self.costs.get(words[0], 0)
+        if words[0] == "find":
+            return self._find(words)
         if words[0] == "launch":
             self.launched = True
             envelope = super()._respond(words)
@@ -891,6 +916,35 @@ class ReadyCli(CheckCli):
             self.scene["windows"] = json.loads(json.dumps(rows)) or self.scene["windows"]
         return {"version": "2.6", "ok": True, "command": "list-windows", "data": json.loads(json.dumps(rows))}
 
+    def _find(self, words):
+        """find --window-id W (--name N --exact | --native-id I) [--role R] --first: the first node
+        below the window root that fits, as data.match, or null. A window in find_timeouts answers
+        TIMEOUT; a name or id in find_blind is never found."""
+        window = words[words.index("--window-id") + 1]
+        if window in self.find_timeouts:
+            return {"version": "2.6", "ok": False, "command": "find", "error": {"code": "TIMEOUT", "message": "t"}}
+
+        def value(flag):
+            return words[words.index(flag) + 1] if flag in words else None
+
+        name, native, role = value("--name"), value("--native-id"), value("--role")
+        tree = self.scene["trees"].get(window, self.scene["tree"])
+        match = None
+        stack = [(child, [index]) for index, child in reversed(list(enumerate(tree.get("children") or [])))]
+        while stack and match is None:
+            node, path = stack.pop()
+            fits = (role is None or node.get("role") == role) and (
+                (name is not None and (node.get("name") or "").strip().lower() == name.strip().lower()
+                 and name not in self.find_blind)
+                or (native is not None and (node.get("native_id") or {}).get("value") == native
+                    and native not in self.find_blind))
+            if fits:
+                match = {"ref_id": node.get("ref_id"), "role": node.get("role"), "name": node.get("name"),
+                         "path": path}
+            stack.extend((child, path + [index])
+                         for index, child in reversed(list(enumerate(node.get("children") or []))))
+        return {"version": "2.6", "ok": True, "command": "find", "data": {"match": match}}
+
 
 class StepClock:
     """Time moves only when the check sleeps, so the waited seconds are exact."""
@@ -905,8 +959,10 @@ class StepClock:
         self.now += seconds
 
 
-def run_ready(env, capsys, *argv, timeline=None, before=(), clock=None):
-    env.cli = ReadyCli(timeline if timeline is not None else [[SPLASH], [MAIN_ELSEWHERE]], before)
+def run_ready(env, capsys, *argv, timeline=None, before=(), clock=None, costs=None, prepare=None):
+    env.cli = ReadyCli(timeline if timeline is not None else [[SPLASH], [MAIN_ELSEWHERE]], before, clock, costs)
+    if prepare is not None:
+        prepare(env.cli)
     deps = env.deps()
     if clock is not None:
         deps.clock, deps.sleep = clock.clock, clock.sleep
@@ -988,7 +1044,7 @@ def test_ready_check_reports_seconds_and_switch(env, capsys):
     timeline = [[SPLASH]] * 12 + [[SPLASH, MAIN_ELSEWHERE]]
     code, out = run_ready(env, capsys, timeline=timeline, clock=StepClock())
     rows = lines_of(out)
-    assert rows["준비 신호"] == "준비 신호: 통과 (찾음 · 12초 · 대상 바뀜)"
+    assert rows["준비 신호"] == "준비 신호: 통과 (찾음 · 4초 · 대상 바뀜)"
     assert rows["앱 관찰"].startswith("앱 관찰: 통과")
     assert code == 0, out
     snapshots = [words for words in env.cli.commands() if words[0] == "snapshot"]
@@ -1000,13 +1056,13 @@ def test_ready_check_in_the_same_process_says_the_target_stayed(env, capsys):
     systems_settings(env)
     main = scene_window("w-1", f"{MARK} 메인", box(0, 0, 816, 608))
     _, out = run_ready(env, capsys, timeline=[[SPLASH], [main]], clock=StepClock())
-    assert lines_of(out)["준비 신호"] == "준비 신호: 통과 (찾음 · 1초 · 대상 그대로)"
+    assert lines_of(out)["준비 신호"] == "준비 신호: 통과 (찾음 · 0초 · 대상 그대로)"
 
 
 def test_ready_line_comes_before_the_app_line(env, capsys):
     systems_settings(env)
     _, out = run_ready(env, capsys)
-    names = [line.strip().split(":")[0] for line in out.splitlines() if line.startswith("  ")]
+    names = [line.strip().split(":")[0] for line in out.splitlines() if is_item(line)]
     assert names == ["바이너리", "설정", "LLM 호출", "LLM 도구 호출", "LLM 그림 입력", "준비 신호", "앱 관찰", "id 유지"]
 
 
@@ -1082,3 +1138,311 @@ def test_ids_of_a_chosen_system_are_kept_under_its_name(env, capsys):
     systems_settings(env, ready=False)
     env.run(capsys, "--skip", "llm", "--system", f"{MARK}2")
     assert (env.check_dir / f"{MARK}2.json").exists()
+
+
+ID_SIGNAL = {"id": f"{MARK}-56", "role": "button"}
+ALIASES = [{"id": f"{MARK}-{n}", "role": f"{MARK}역할", "name": f"{MARK} 등록 {n}"} for n in (60, 61, 62)]
+
+
+def write_profile(env, ready=({"name": SIGNAL}, ID_SIGNAL), elements=tuple(ALIASES), stable_ids=True,
+                  ready_read="find", system=f"{MARK}1"):
+    root = env.tmp / "profiles"
+    save_profile(root, Profile(system=system, ready=tuple(ready), elements=tuple(elements), stable_ids=stable_ids,
+                               ready_read=ready_read))
+    return root
+
+
+def with_id_signal(cli):
+    """The main window also shows the id signal, a nameless button with only an AutomationId."""
+    cli.scene["trees"]["w-main"]["children"].append(
+        {"role": "button", "bounds": box(60, 240), "native_id": {"kind": "automation_id", "value": ID_SIGNAL["id"]}})
+
+
+def test_settings_line_counts_the_profile_and_shows_none_of_it(env, capsys):
+    systems_settings(env, ready=False)
+    root = write_profile(env)
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app", "--profile-dir", str(root))
+    assert lines_of(out)["설정"].startswith("설정: 통과 (")
+    assert sub_lines(out, "설정") == ["시스템 프로파일: 준비 신호 2 · 등록 이름 3 · ID 고정 예 · 읽는 방식 find"]
+    assert MARK not in out and str(env.tmp) not in out
+    write_profile(env, ready=(), elements=(), stable_ids=False, ready_read="snapshot")
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app", "--profile-dir", str(root))
+    assert sub_lines(out, "설정") == ["시스템 프로파일: 준비 신호 0 · 등록 이름 0 · ID 고정 아니오 · 읽는 방식 snapshot"]
+    _, out = env.run(capsys, "--skip", "llm", "--skip", "app", "--profile-dir", str(env.tmp / "none"))
+    assert sub_lines(out, "설정") == ["시스템 프로파일: 없음"]
+
+
+def test_a_broken_profile_fails_the_settings_check_with_the_place_only(env, capsys):
+    systems_settings(env)
+    root = env.tmp / "profiles"
+    root.mkdir()
+    (root / f"{MARK}1.yaml").write_text(
+        f"format: 1\nsystem: {MARK}1\nelements:\n  - {{id: '{MARK}-1', role: button, name: '{MARK} 이름'}}\n"
+        f"  - {{id: '{MARK}-2', role: button, name: '{MARK} 둘', colour: '{MARK}'}}\n", encoding="utf-8")
+    code, out = env.run(capsys, "--skip", "llm", "--profile-dir", str(root))
+    rows = lines_of(out)
+    assert code == 1
+    assert rows["설정"] == "설정: 실패(PROFILE_INVALID) (elements 2번째 항목: 모르는 키)"
+    for name in ("준비 신호", "앱 관찰", "id 유지"):
+        assert rows[name] == f"{name}: 건너뜀 (시스템 프로파일 실패)"
+    assert "launch" not in env.cli.command_names()
+    assert MARK not in out and str(env.tmp) not in out
+
+
+def test_the_ready_check_uses_the_profile_signals_and_read_mode(env, capsys):
+    systems_settings(env)
+    root = write_profile(env, ready=(ID_SIGNAL,))
+    code, out = run_ready(env, capsys, "--profile-dir", str(root), clock=StepClock(), prepare=with_id_signal)
+    assert lines_of(out)["준비 신호"].startswith("준비 신호: 통과 (찾음 ·"), out
+    finds = [words for words in env.cli.commands() if words[0] == "find"]
+    assert finds and all("--native-id" in words and "--name" not in words for words in finds)
+    assert [words[words.index("--window-id") + 1] for words in finds][:2] == ["w-splash", "w-main"]
+    assert code == 0, out
+    assert MARK not in out
+
+
+def test_each_round_is_one_line_of_numbers(env, capsys):
+    systems_settings(env)
+    timeline = [[SPLASH], [SPLASH], [SPLASH, MAIN_ELSEWHERE]]
+    costs = {"list-windows": 0.12, "snapshot": 0.31}
+    _, out = run_ready(env, capsys, timeline=timeline, clock=StepClock(), costs=costs)
+    assert sub_lines(out, "준비 신호")[:3] == [
+        "1바퀴: 창 목록 120ms · 후보 1 · 창1 없음 310ms",
+        "2바퀴: 창 목록 120ms · 후보 1 · 창1 없음 310ms",
+        "3바퀴: 창 목록 120ms · 후보 2 · 창1 없음 310ms · 창2 찾음 310ms"]
+
+    systems_settings(env, ready=False)
+    root = write_profile(env)
+
+    def prepare(cli):
+        with_id_signal(cli)
+        cli.find_timeouts.add("w-splash")
+
+    costs = {"list-windows": 0.12, "snapshot": 0.31, "find": 0.05}
+    _, out = run_ready(env, capsys, "--profile-dir", str(root), timeline=[[SPLASH], [SPLASH, MAIN_ELSEWHERE]],
+                       clock=StepClock(), costs=costs, prepare=prepare)
+    assert sub_lines(out, "준비 신호")[:2] == [
+        "1바퀴: 창 목록 120ms · 후보 1 · 창1 신호1 시간 초과 50ms",
+        "2바퀴: 창 목록 120ms · 후보 2 · 창1 신호1 시간 초과 50ms · 창2 신호1 찾음 50ms · 창2 신호2 찾음 50ms"
+        " · 창2 찾음 310ms"]
+    assert MARK not in out
+    failing = {"round": 4, "list_ms": 7, "candidates": 1,
+               "reads": [{"window": 1, "signal": None, "found": False, "ms": 8000, "code": "TIMEOUT"},
+                         {"window": 1, "signal": 2, "found": False, "ms": 30, "code": "STALE_REF"}]}
+    assert checks.round_line(failing) == "4바퀴: 창 목록 7ms · 후보 1 · 창1 실패 TIMEOUT 8000ms · 창1 신호2 실패 STALE_REF 30ms"
+
+
+def test_many_rounds_keep_the_first_and_last_ten(env, capsys):
+    systems_settings(env)
+    _, out = run_ready(env, capsys, timeline=[[SPLASH]] * 24 + [[SPLASH, MAIN_ELSEWHERE]], clock=StepClock())
+    rows = sub_lines(out, "준비 신호")
+    rounds = rows[:-1]
+    assert len(rounds) == 21
+    assert [row.split(":")[0] for row in rounds[:10]] == [f"{n}바퀴" for n in range(1, 11)]
+    assert rounds[10] == "… 5바퀴 생략"
+    assert [row.split(":")[0] for row in rounds[11:]] == [f"{n}바퀴" for n in range(16, 26)]
+    assert rows[-1].startswith("읽는 방식: ")
+
+
+def test_both_ways_are_timed_after_ready_and_the_faster_is_recommended(env, capsys):
+    systems_settings(env, ready=False)
+    root = write_profile(env, ready_read="snapshot")
+    costs = {"snapshot": 4.2, "find": 0.15}
+    _, out = run_ready(env, capsys, "--profile-dir", str(root), timeline=[[MAIN_ELSEWHERE]], clock=StepClock(),
+                       costs=costs, prepare=with_id_signal)
+    rows = sub_lines(out, "준비 신호")
+    assert rows[-1] == "읽는 방식: snapshot 4.2초 · find 0.3초 · 권장 find"
+    assert [words[0] for words in env.cli.commands()][-6:].count("find") == 2
+
+
+def test_no_recommendation_when_a_way_misses_a_signal(env, capsys):
+    systems_settings(env, ready=False)
+    root = write_profile(env, ready_read="snapshot")
+
+    def blind(cli):
+        with_id_signal(cli)
+        cli.find_blind.add(SIGNAL)
+
+    costs = {"snapshot": 4.2, "find": 0.15}
+    _, out = run_ready(env, capsys, "--profile-dir", str(root), timeline=[[MAIN_ELSEWHERE]], clock=StepClock(),
+                       costs=costs, prepare=blind)
+    assert sub_lines(out, "준비 신호")[-1] == "읽는 방식: snapshot 4.2초 · find 0.3초 신호 1/2 · 권장 없음"
+    assert checks.read_ways_line({"snapshot": {"ms": 900, "ok": False, "found": [False]},
+                                  "find": {"ms": 100, "ok": True, "timeouts": 1, "found": [False]}}) == (
+        "읽는 방식: snapshot 0.9초 실패 · find 0.1초 신호 0/1 시간 초과 1 · 권장 없음")
+
+
+def test_same_ids_after_a_restart_add_the_stable_ids_hint(env, capsys):
+    env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    first = id_keys(marked_tree())
+    restart(env, instance="windows-proc-v1:again")
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert lines_of(out)["id 유지"] == (
+        f"id 유지: 통과 (같은 id {len(first)}/{len(first)} · 새 id 0 · {checks.STABLE_IDS_HINT})")
+    assert checks.STABLE_IDS_HINT == "등록 화면에서 'ID는 다시 켜도 같음'을 켜도 됩니다"
+    restart(env, instance="windows-proc-v1:third")
+    env.cli.scene["tree"] = marked_tree(extra_id="new-id")
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert checks.STABLE_IDS_HINT not in out
+
+
+def test_check_output_holds_no_signal_text_alias_or_id(env, capsys):
+    systems_settings(env, ready=False)
+    root = write_profile(env)
+    costs = {"list-windows": 0.1, "snapshot": 0.3, "find": 0.05}
+    code, out = run_ready(env, capsys, "--profile-dir", str(root), clock=StepClock(), costs=costs,
+                          prepare=with_id_signal)
+    assert code == 0, out
+    assert sub_lines(out, "설정") and sub_lines(out, "준비 신호")
+    for secret in (MARK, "MARKER", SIGNAL, ID_SIGNAL["id"], *(entry["name"] for entry in ALIASES),
+                   ALIASES[0]["role"], str(env.tmp)):
+        assert secret not in out
+
+
+def test_the_app_line_counts_id_only_nodes(env, capsys):
+    tree = marked_tree()
+    tree["children"].append({"role": "image", "bounds": box(10, 300),
+                             "native_id": {"kind": "automation_id", "value": f"{MARK}-9"}})
+    env.cli.scene["tree"] = tree
+    _, out = env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+    assert "ID만 있는 요소 1" in lines_of(out)["앱 관찰"]
+    assert MARK not in out
+
+
+# A target given as a shortcut
+
+from dataclasses import replace as replaced  # noqa: E402
+
+from agent.shortcut import CODES as SHORTCUT_CODES  # noqa: E402
+from agent.shortcut import Shortcut, ShortcutError  # noqa: E402
+
+
+def shortcut_env(env, found):
+    """A .lnk next to the target and a reader that gives `found` (or raises it) for it."""
+    link = env.tmp / f"{MARK} 바로가기.lnk"
+    link.write_bytes(b"")
+    asked = []
+
+    def read(path):
+        asked.append(path)
+        if isinstance(found, BaseException):
+            raise found
+        return found
+
+    return link, read, asked
+
+
+def secret_shortcut(env, arguments=(f"-site={MARK}", f"{MARK} 둘", "k=v"), working_dir=None):
+    folder = working_dir if working_dir is not None else str(env.tmp / f"{MARK}작업")
+    return Shortcut(target=str(env.exe), arguments=tuple(arguments), working_dir=folder)
+
+
+def run_shortcut(env, capsys, read, *argv):
+    code = check.main(["--skip", "llm", *argv], replaced(env.deps(), read_shortcut=read))
+    out = capsys.readouterr()
+    return code, out.out + out.err
+
+
+def test_a_shortcut_target_is_noted_under_settings_and_launched_with_what_it_names(env, capsys):
+    found = secret_shortcut(env)
+    link, read, asked = shortcut_env(env, found)
+
+    code, out = run_shortcut(env, capsys, read, "--exe", str(link))
+
+    assert code == 0, out
+    assert sub_lines(out, "설정")[-1] == "바로가기: 대상 exe · 인자 3 · 시작 위치 있음"
+    assert lines_of(out)["앱 관찰"].startswith("앱 관찰: 통과")
+    launch = env.cli.commands()[env.cli.command_names().index("launch")]
+    assert launch == ["launch", str(env.exe), f"--arg=-site={MARK}", f"--arg={MARK} 둘", "--arg=k=v",
+                      "--cwd", found.working_dir]
+    assert asked and set(asked) == {str(link)}
+    assert MARK not in out and str(env.tmp) not in out and "k=v" not in out
+
+
+def test_the_shortcut_line_counts_no_arguments_and_says_when_there_is_no_working_folder(env, capsys):
+    link, read, _ = shortcut_env(env, secret_shortcut(env, arguments=(), working_dir=""))
+
+    _, out = run_shortcut(env, capsys, read, "--exe", str(link))
+
+    assert sub_lines(out, "설정")[-1] == "바로가기: 대상 exe · 인자 0 · 시작 위치 없음"
+    assert ["launch", str(env.exe)] in env.cli.commands()
+
+
+@pytest.mark.parametrize("code", SHORTCUT_CODES)
+def test_a_shortcut_that_cannot_be_launched_fails_the_app_with_its_code_and_launches_nothing(env, capsys, code):
+    link, read, _ = shortcut_env(env, ShortcutError(code))
+
+    status, out = run_shortcut(env, capsys, read, "--exe", str(link))
+
+    assert status == 1
+    assert sub_lines(out, "설정")[-1] == f"바로가기: 실패({code})"
+    assert lines_of(out)["앱 관찰"] == f"앱 관찰: 실패({code})"
+    assert lines_of(out)["id 유지"] == "id 유지: 건너뜀 (관찰 없음)"
+    assert "launch" not in env.cli.command_names()
+    assert MARK not in out
+
+
+def test_a_reader_that_raises_is_an_unreadable_shortcut(env, capsys):
+    link, read, _ = shortcut_env(env, RuntimeError(f"{MARK} C:\\secret"))
+
+    _, out = run_shortcut(env, capsys, read, "--exe", str(link))
+
+    assert sub_lines(out, "설정")[-1] == "바로가기: 실패(SHORTCUT_UNREADABLE)"
+    assert lines_of(out)["앱 관찰"] == "앱 관찰: 실패(SHORTCUT_UNREADABLE)"
+    assert MARK not in out
+
+
+def test_the_shortcut_line_is_noted_even_when_the_app_check_is_skipped(env, capsys):
+    link, read, _ = shortcut_env(env, secret_shortcut(env))
+
+    _, out = run_shortcut(env, capsys, read, "--exe", str(link), "--skip", "app")
+
+    assert sub_lines(out, "설정") == ["시스템 프로파일: 없음", "바로가기: 대상 exe · 인자 3 · 시작 위치 있음"]
+    assert "launch" not in env.cli.command_names()
+
+
+def test_an_exe_target_has_no_shortcut_line_and_reads_no_shortcut(env, capsys):
+    _, read, asked = shortcut_env(env, secret_shortcut(env))
+
+    _, out = run_shortcut(env, capsys, read, "--exe", str(env.exe))
+
+    assert not any(line.startswith("바로가기") for line in sub_lines(out, "설정"))
+    assert asked == []
+
+
+def test_a_shortcut_system_from_the_settings_is_read_by_its_lnk_path(env, capsys):
+    link, read, asked = shortcut_env(env, secret_shortcut(env))
+    env.settings(f"systems:\n  {MARK}1: {link}\n")
+
+    _, out = run_shortcut(env, capsys, read)
+
+    assert set(asked) == {str(link)}
+    assert sub_lines(out, "설정")[-1] == "바로가기: 대상 exe · 인자 3 · 시작 위치 있음"
+    assert MARK not in out
+
+
+def test_a_shortcut_with_a_ready_signal_is_waited_for_after_launching_what_it_names(env, capsys):
+    found = secret_shortcut(env)
+    link, read, _ = shortcut_env(env, found)
+    env.settings(f"exe: {link}\nready_text: {SIGNAL}\n")
+    env.cli = ReadyCli([[SPLASH], [MAIN_ELSEWHERE]], (), None, None)
+
+    _, out = run_shortcut(env, capsys, read)
+
+    assert lines_of(out)["준비 신호"].startswith("준비 신호: 통과"), out
+    launches = [words for words in env.cli.commands() if words[0] == "launch"]
+    assert launches[0] == ["launch", str(env.exe), f"--arg=-site={MARK}", f"--arg={MARK} 둘", "--arg=k=v",
+                           "--cwd", found.working_dir]
+    assert MARK not in out
+
+
+def test_a_shortcut_with_a_ready_signal_that_cannot_be_read_is_not_waited_for(env, capsys):
+    link, read, _ = shortcut_env(env, ShortcutError("SHORTCUT_NOT_EXE"))
+    env.settings(f"exe: {link}\nready_text: {SIGNAL}\n")
+    env.cli = ReadyCli([[SPLASH], [MAIN_ELSEWHERE]], (), None, None)
+
+    _, out = run_shortcut(env, capsys, read)
+
+    assert lines_of(out)["준비 신호"] == "준비 신호: 건너뜀 (띄우지 않음)"
+    assert lines_of(out)["앱 관찰"] == "앱 관찰: 실패(SHORTCUT_NOT_EXE)"
+    assert "launch" not in env.cli.command_names()

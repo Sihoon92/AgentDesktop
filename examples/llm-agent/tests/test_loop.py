@@ -704,3 +704,19 @@ def test_a_claimed_finish_logs_the_finish_note_by_the_harness(tmp_path):
 
     assert result.status == "claimed"
     assert finish_notes(log) == [{"type": "finish_note", "by": "harness", "saved_path": r"C:\out\a.xlsx"}]
+
+
+def test_the_system_prompt_explains_id_and_alias():
+    """id= is the app's value that tells unnamed elements apart; alias= is a name an administrator
+    gave a picture-only element, read as its name but checked with look or ask when the screen
+    disagrees; an element without a ref is pressed with click_part. No example value is given."""
+    import re
+
+    bullets = SYSTEM_PROMPT.replace("\n  ", " ").splitlines()
+    [about_id] = [line for line in bullets if 'id="' in line and 'alias="' not in line]
+    [about_alias] = [line for line in bullets if 'alias="' in line]
+
+    assert "name" in about_id and "app" in about_id
+    for word in ("name", "look", "ask", "click_part", "ref"):
+        assert word in about_alias, word
+    assert re.search(r'(id|alias)="[^".…]', SYSTEM_PROMPT) is None, "the prompt quotes no example value"

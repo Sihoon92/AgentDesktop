@@ -381,7 +381,7 @@ def test_every_locator_is_checked_against_its_own_observation(run_dir):
 
 
 def test_a_locator_that_finds_more_than_its_target_is_refused(run_dir, monkeypatch):
-    monkeypatch.setattr(author, "describe", lambda scoped, mark, avoid=(): {"role": "button"})
+    monkeypatch.setattr(author, "describe", lambda scoped, mark, avoid=(), use_ids=False: {"role": "button"})
     with pytest.raises(AuthorError) as caught:
         built(run_dir)
     assert caught.value.code == "LOCATOR_NOT_UNIQUE"
@@ -636,3 +636,178 @@ def test_after_run_judges_a_run_that_is_still_running_by_its_result(run_dir, tmp
     assert logged[0]["created"] is True and updated.tokens == 12
     outcome, _ = make_workflow(DraftModel(list_draft()), run_dir, store, lambda _e: None)
     assert outcome["code"] == "RUN_NOT_SUCCESSFUL"
+
+
+BODY = {"role": "pane", "id": "body"}
+
+
+def native_of(element):
+    return (element.get("native_id") or {}).get("value")
+
+
+def give_ids(run_dir):
+    """Rewrites the list run as an observation with native ids records it (plan K3): every element
+    but the windows gets an id (its name, or its mark when it has none), and the main window's
+    elements sit in one pane that only an id names."""
+    def change(events):
+        for event in events:
+            if event.get("type") != "observation":
+                continue
+            for item in event.get("elements") or []:
+                if item.get("role") == "window":
+                    continue
+                item["native_id"] = {"kind": "automation_id", "value": f"id-{item.get('name') or item['mark']}"}
+                if item.get("scope") is None:
+                    item["in"] = BODY
+
+    rewrite(run_dir, change)
+    return run_dir
+
+
+def target_element(run_dir, action_number):
+    record = read_record(run_dir)
+    action = record.actions[action_number - 1]
+    elements = record.observations[action["before"]]["elements"]
+    return next(e for e in elements if e.get("ref") and e["ref"] == action["arguments"].get("ref"))
+
+
+def test_stable_ids_writes_the_id_into_the_target(run_dir):
+    give_ids(run_dir)
+    shop_arrow = target_element(run_dir, 7)
+
+    workflow = build(read_record(run_dir), list_draft(), use_ids=True)
+
+    assert step(workflow, 1)["target"] == {"scope": "main", "role": "button", "name": "전공정 생산현황",
+                                           "id": "id-전공정 생산현황", "in": BODY}
+    assert step(workflow, 2)["target"] == {"scope": "main", "role": "button", "id": native_of(shop_arrow),
+                                           "in": BODY}
+    assert step(workflow, 4)["target"] == {"scope": {"opened_by": 2}, "role": "statictext", "name": "Select",
+                                           "id": "id-Select"}
+    check_workflow({**workflow, "id": "w-20261119-001", "status": "unverified", "passes": 0, "failures": 0,
+                    "verified_with_other_values": False})
+
+
+def test_every_id_locator_is_checked_against_its_own_observation(run_dir):
+    give_ids(run_dir)
+    record = read_record(run_dir)
+    workflow = build(record, list_draft(), use_ids=True)
+    kept = [s for s in workflow["steps"] if s["do"] == "act" and "role" in s["target"]]
+
+    assert any("id" in s["target"] for s in kept)
+    assert len(kept) == 7
+    for built_step, number in zip(kept, (2, 7, 11, 12, 13, 14, 15)):
+        action = record.actions[number - 1]
+        elements = record.observations[action["before"]]["elements"]
+        arguments = action["arguments"]
+        target = next(e for e in elements if (e.get("mark") == arguments["mark"] if "mark" in arguments
+                                              else e.get("ref") == arguments.get("ref")))
+        locator = {key: value for key, value in built_step["target"].items() if key != "scope"}
+        assert find(in_scope(elements, target.get("scope")), locator) == [target], built_step["n"]
+
+
+def test_a_target_named_by_a_parameter_gets_no_id(run_dir):
+    give_ids(run_dir)
+    proposal = list_draft()
+    proposal["params"].append({"name": "period", "kind": "text"})
+    proposal["steps"][1:1] = [act(5, "기간 목록이 열림"), act(6, "기간을 고름", "period")]
+
+    workflow = build(read_record(run_dir), proposal, use_ids=True)
+
+    assert step(workflow, 3)["target"] == {"scope": {"opened_by": 2}, "role": "statictext", "name": "$period"}
+
+
+def test_select_only_items_are_found_by_name_and_all_may_carry_an_id(run_dir):
+    give_ids(run_dir)
+
+    select = step(build(read_record(run_dir), list_draft(), use_ids=True), 3)
+
+    assert select == {"n": 3, "goal": "Shop이 고른 값만 선택됨", "do": "select_only", "scope": {"opened_by": 2},
+                      "all": {"role": "statictext", "name": "All", "id": "id-All"}, "item_role": "statictext",
+                      "items": "$shop"}
+
+
+def test_without_stable_ids_the_workflow_is_what_it_was(run_dir, tmp_path):
+    plain = build(read_record(run_dir), list_draft())
+    give_ids(run_dir)
+
+    assert build(read_record(run_dir), list_draft()) == plain
+    assert build(read_record(run_dir), list_draft(), use_ids=False) == plain
+
+
+def test_stable_ids_on_a_record_without_ids_is_what_it_was(run_dir):
+    """A record from before native ids were kept gives the same workflow, not an error."""
+    assert build(read_record(run_dir), list_draft(), use_ids=True) == build(read_record(run_dir), list_draft())
+
+
+def picture_menu_run(tmp_path):
+    """A toolbar of two menu items drawn as pictures (no name, no ref, no text nearby, an id each),
+    pressed with click_part by their marks."""
+    toolbar = {"role": "toolbar", "id": "12"}
+    main = [
+        element(1, "toolbar", None, rect=box(0, 0, 400, 40), native_id={"kind": "automation_id", "value": "12"}),
+        element(2, "image", None, rect=box(10, 5, 30, 30), native_id={"kind": "automation_id", "value": "56"},
+                **{"in": toolbar}),
+        element(3, "image", None, rect=box(50, 5, 30, 30), native_id={"kind": "automation_id", "value": "60"},
+                **{"in": toolbar}),
+        element(4, "button", "확인", ref="@h:e4", rect=box(300, 300)),
+    ]
+    for item in main:
+        item["kind"] = "id" if item.get("native_id") and not item.get("ref") else item["kind"]
+    pressed = {"step": 1, "tool": "click_part", "intent": "i", "arguments": {"mark": 3, "part": "center",
+                                                                            "action": "click"},
+               "target": {"mark": 3, "role": "image"}, "before": 1,
+               "result": {"ok": True, "effects": effects(added=2), "expect": "content_changed", "expected_met": True}}
+    return hand_run(tmp_path, [pressed], {1: (main, "w-1", "observe"), 2: (main, "w-1", "action")})
+
+
+def test_picture_only_menu_items_make_a_workflow_only_with_stable_ids(tmp_path):
+    record = read_record(picture_menu_run(tmp_path))
+    proposal = {"params": [], "steps": [act(1, "실행 계획 화면이 열림")]}
+
+    workflow = build(record, proposal, use_ids=True)
+
+    assert step(workflow, 1)["target"] == {"scope": "main", "role": "image", "id": "60",
+                                           "in": {"role": "toolbar", "id": "12"}}
+    assert step(workflow, 1)["args"] == {"part": "center", "action": "click"}
+    with pytest.raises(AuthorError) as caught:
+        build(record, proposal)
+    assert caught.value.code == "LOCATOR_NOT_UNIQUE"
+
+
+def test_an_area_whose_name_changed_during_the_run_is_not_written(tmp_path):
+    """The pane holding the target is named by a count that changed after the press, so it is a
+    value, not a label: the target keeps its id but not that area."""
+    def screen(count):
+        area = {"role": "pane", "name": count}
+        return [
+            element(1, "pane", count, rect=box(0, 0, 400, 100)),
+            element(2, "image", None, rect=box(10, 5, 30, 30), native_id={"kind": "automation_id", "value": "56"},
+                    **{"in": area}),
+            element(3, "button", "확인", ref="@h:e3", rect=box(300, 300)),
+            element(4, "button", "닫기", ref="@h:e4", rect=box(360, 300)),
+        ]
+
+    pressed = {"step": 1, "tool": "click_part", "intent": "i",
+               "arguments": {"mark": 2, "part": "center", "action": "click"}, "target": {"mark": 2, "role": "image"},
+               "before": 1, "result": {"ok": True, "effects": effects(added=1), "expect": "content_changed",
+                                       "expected_met": True}}
+    run = hand_run(tmp_path, [pressed], {1: (screen("3건"), "w-1", "observe"), 2: (screen("5건"), "w-1", "action")})
+
+    workflow = build(read_record(run), {"params": [], "steps": [act(1, "목록이 열림")]}, use_ids=True)
+
+    assert step(workflow, 1)["target"] == {"scope": "main", "role": "image", "id": "56"}
+
+
+def test_make_workflow_and_after_run_pass_use_ids_on(run_dir, tmp_path):
+    give_ids(run_dir)
+    store = WorkflowStore(tmp_path / "wf", LIST_SYSTEM)
+
+    outcome, _ = make_workflow(DraftModel(list_draft()), run_dir, store, lambda _e: None, use_ids=True)
+    after_run(DraftModel(list_draft()), RunResult("confirmed", 5, "r"), run_dir, store, lambda _e: None,
+              use_ids=True)
+    after_run(DraftModel(list_draft()), RunResult("confirmed", 5, "r"), run_dir, store, lambda _e: None)
+
+    first, second, third = store.entries()
+    assert outcome["created"] is True and first["id"] == outcome["id"]
+    assert "id" in step(first, 1)["target"] and "id" in step(second, 1)["target"]
+    assert "id" not in step(third, 1)["target"]

@@ -31,7 +31,7 @@ namespace VirtualMesApp
         private readonly Action<string> onClosed;
         private bool closed;
 
-        private PopupHost(Form anchor, UiRegion region, Exposure exposure, Action<string> onClosed)
+        private PopupHost(Form anchor, UiRegion region, Exposure exposure, Action<string> onClosed, string areaId)
         {
             this.anchor = anchor;
             this.onClosed = onClosed;
@@ -42,20 +42,22 @@ namespace VirtualMesApp
             this.BackColor = Ui.Line;
             this.Padding = new Padding(1);
             this.surface = new Surface(region, exposure);
+            this.surface.AreaId = areaId;
             this.surface.Dock = DockStyle.Fill;
             this.Controls.Add(this.surface);
         }
 
         /// <summary>
         /// Opens a popup at a screen position. Any popup already open closes
-        /// first, as if the user had clicked outside it.
+        /// first, as if the user had clicked outside it. A non-null areaId is the
+        /// AutomationId its surface shows (see Surface.AreaId).
         /// </summary>
         internal static PopupHost Show(
             Form owner, Rectangle screenBounds, UiRegion region, Exposure exposure, string title,
-            Action<string> onClosed)
+            Action<string> onClosed, string areaId = null)
         {
             CloseAll(ReasonOutsideClick);
-            PopupHost popup = new PopupHost(owner, region, exposure, onClosed);
+            PopupHost popup = new PopupHost(owner, region, exposure, onClosed, areaId);
             popup.Text = title;
             popup.Bounds = screenBounds;
             if (!filterInstalled)

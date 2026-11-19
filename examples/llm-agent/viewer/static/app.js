@@ -2015,14 +2015,24 @@ function fillLevels() {
   select.value = "3";
 }
 
+/* The rows of a box's tooltip: kind, role, name, description, ref, and for an element with a
+   native id its id and the name an administrator registered for it (alias). A record from before
+   those keys simply has no such rows. Every value is shown as text. */
+function tooltipRows(item) {
+  const kind = item.kind === "question" ? "질문 표시"
+    : item.kind === "id" ? "ID만 있음 (ref·이름 없음)"
+      : elementKind(item) === "text" ? "텍스트 (ref 없음)" : "컨트롤";
+  const native = item.native_id && typeof item.native_id === "object" ? item.native_id.value : null;
+  const rows = [["종류", kind], ["역할", item.role], ["이름", item.name], ["설명", item.description], ["ref", item.ref],
+    ["ID", native], ["등록 이름", item.alias]];
+  return rows.filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([term, value]) => [term, String(value)]);
+}
+
 function showTooltip(item, event) {
   const tooltip = $("tooltip");
   const dl = el("dl");
-  const kind = item.kind === "question" ? "질문 표시" : elementKind(item) === "text" ? "텍스트 (ref 없음)" : "컨트롤";
-  for (const [term, value] of [["종류", kind], ["역할", item.role], ["이름", item.name], ["설명", item.description], ["ref", item.ref]]) {
-    if (!value) continue;
-    dl.append(el("dt", { text: term }), el("dd", { text: value }));
-  }
+  for (const [term, value] of tooltipRows(item)) dl.append(el("dt", { text: term }), el("dd", { text: value }));
   tooltip.replaceChildren(dl);
   tooltip.hidden = false;
   moveTooltip(event);
@@ -2214,7 +2224,7 @@ function start() {
   }
   watchViewerControls();
   initKnowledge();
-  loadStatus().then(initWorkflows);
+  loadStatus().then(initWorkflows).then(initProfiles);
   loadRuns();
   state.timers.live = setInterval(pollLive, POLL_MS);
   state.timers.ready = setInterval(renderReadyBanner, POLL_MS);

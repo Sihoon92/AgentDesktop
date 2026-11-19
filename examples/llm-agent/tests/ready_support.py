@@ -1,9 +1,17 @@
 """A fake desktop whose windows come and go on a fake clock, for the ready wait.
 
-TimelineDesktop answers `launch`, `list-windows` and `snapshot --window-id` from a list of
-FakeWindow, each present from `appear` until `gone` and showing the tree whose start time
-was reached last. A window with `appear` of 0 or later belongs to the launch: it is not there
-until `launch` has run. `sleep` moves the clock forward, so a test never really sleeps.
+TimelineDesktop answers `launch`, `list-windows`, `snapshot --window-id` and `find --window-id`
+from a list of FakeWindow, each present from `appear` until `gone` and showing the tree whose
+start time was reached last. A window with `appear` of 0 or later belongs to the launch: it is
+not there until `launch` has run. `sleep` moves the clock forward, so a test never really sleeps.
+
+`find` answers in the CLI's shape (crates/core/src/commands/find_live.rs `single_match_response`,
+crates/core/src/locator/live_locator/locator_match_data.rs and select.rs `match_data`):
+`data.match` is null or {"ref_id", "role", "name" (left out when empty), "value", "states",
+"interactive", "path"} with "bounds" when there is no ref. The match carries no native id, and
+`path` holds the labels of the ancestors from the window root, so the root itself has an empty
+path. Like the CLI, `--exact` ignores case and folds inner runs of spaces, `--native-id` is
+compared letter for letter, and the root window is searched too.
 """
 
 import math
@@ -21,13 +29,19 @@ class FakeClock:
 
     def sleep(self, seconds):
         self.sleeps.append(seconds)
-        self.now += seconds
+        self.advance(seconds)
+
+    def advance(self, seconds):
+        """Moves the clock, rounded to a nanosecond so ten sleeps of 0.3 s end at 3.0 s."""
+        self.now = round(self.now + seconds, 9)
 
 
-def node(name=None, role="text", children=()):
-    found = {"role": role, "children": list(children)}
+def node(name=None, role="text", children=(), native=None, **extra):
+    found = {"role": role, "children": list(children), **extra}
     if name is not None:
         found["name"] = name
+    if native is not None:
+        found["native_id"] = {"kind": "automation_id", "value": native}
     return found
 
 
@@ -71,12 +85,17 @@ class FakeWindow:
 
 class TimelineDesktop:
     """`launch_pid` and `launch_instance` are what launch returns; `launch_error` makes it fail.
-    `snapshot_s` is how long one snapshot takes on the fake clock. `failing` names windows whose
-    snapshot fails. `on_launch(desktop, now)`, when given, runs at each launch before it answers,
-    so a test can open the windows of a second launch."""
+    `snapshot_s`, `find_s` and `list_s` are how long one snapshot, find or window list takes on the
+    fake clock.
+    `failing` names windows whose snapshot and find fail; `snapshot_failing(desktop, window_id)`,
+    when given, fails a snapshot it returns true for. `find_timeouts` names windows whose find
+    answers TIMEOUT, as the CLI does when its traversal cannot finish. `on_launch(desktop, now)`,
+    when given, runs at each launch before it answers, so a test can open the windows of a
+    second launch."""
 
     def __init__(self, clock, windows, launch_pid=100, launch_instance=None, launch_error=None,
-                 snapshot_s=0.0, failing=(), on_launch=None):
+                 snapshot_s=0.0, failing=(), on_launch=None, find_s=0.0, find_timeouts=(),
+                 snapshot_failing=None, list_s=0.0):
         self.clock = clock
         self.windows = list(windows)
         self.launch_pid = launch_pid
@@ -85,6 +104,10 @@ class TimelineDesktop:
         self.snapshot_s = snapshot_s
         self.failing = set(failing)
         self.on_launch = on_launch
+        self.find_s = find_s
+        self.find_timeouts = set(find_timeouts)
+        self.snapshot_failing = snapshot_failing
+        self.list_s = list_s
         self.calls = []
         self.closed = []
         self.launched = False
@@ -101,10 +124,14 @@ class TimelineDesktop:
         if args[0] == "launch":
             return self._launch(now)
         if args[0] == "list-windows":
+            self.clock.advance(self.list_s)
+            now = self.clock()
             return {"ok": True, "command": "list-windows",
                     "data": [window.row() for window in self.windows if window.present(now, self.launched)]}
         if args[0] == "snapshot":
             return self._snapshot(args)
+        if args[0] == "find":
+            return self._find(args)
         return {"ok": False, "command": args[0], "error": {"code": "INVALID_ARGS", "message": "not faked"}}
 
     def close_process(self, pid):
@@ -130,11 +157,78 @@ class TimelineDesktop:
 
     def _snapshot(self, args):
         window_id = args[args.index("--window-id") + 1]
-        self.clock.now += self.snapshot_s
+        self.clock.advance(self.snapshot_s)
         now = self.clock()
         window = next((window for window in self.windows if window.id == window_id), None)
-        if window is None or not window.present(now, self.launched) or window_id in self.failing:
+        failing = self.snapshot_failing is not None and self.snapshot_failing(self, window_id)
+        if window is None or not window.present(now, self.launched) or window_id in self.failing or failing:
             return {"ok": False, "command": "snapshot",
                     "error": {"code": "WINDOW_NOT_FOUND", "message": "gone"}}
         return {"ok": True, "command": "snapshot",
                 "data": {"complete": True, "ref_count": 0, "tree": window.tree(now)}}
+
+    def _find(self, args):
+        window_id = args[args.index("--window-id") + 1]
+        self.clock.advance(self.find_s)
+        now = self.clock()
+        window = next((window for window in self.windows if window.id == window_id), None)
+        if window is None or not window.present(now, self.launched) or window_id in self.failing:
+            return {"ok": False, "command": "find", "error": {"code": "WINDOW_NOT_FOUND", "message": "gone"}}
+        if window_id in self.find_timeouts:
+            return {"ok": False, "command": "find",
+                    "error": {"code": "TIMEOUT", "message": "Locator traversal did not produce an authoritative result"}}
+        wanted = {flag: args[args.index(flag) + 1] for flag in ("--name", "--native-id", "--role") if flag in args}
+        found = _first_match(window.tree(now), wanted, "--exact" in args)
+        data = {"match": found}
+        if found is None and "--role" in wanted:
+            data["roles_present"] = []
+        return {"ok": True, "command": "find", "data": data}
+
+
+def _folded(text):
+    return " ".join(str(text).split()).casefold()
+
+
+def _native(found):
+    native = found.get("native_id")
+    return native.get("value") if isinstance(native, dict) else native
+
+
+def _fits(found, wanted, exact):
+    if "--role" in wanted and found.get("role") != wanted["--role"]:
+        return False
+    if "--native-id" in wanted and _native(found) != wanted["--native-id"]:
+        return False
+    if "--name" in wanted:
+        name = found.get("name")
+        if not isinstance(name, str):
+            return False
+        if exact and _folded(name) != _folded(wanted["--name"]):
+            return False
+        if not exact and _folded(wanted["--name"]) not in _folded(name):
+            return False
+    return True
+
+
+def _label(found):
+    label = found.get("name") or found.get("value")
+    return f"{found.get('role')}:{label}" if label else str(found.get("role"))
+
+
+def _first_match(tree, wanted, exact):
+    """The first node in depth-first order, the root included, as the CLI's `--first` match."""
+    pending = [(tree, [])] if isinstance(tree, dict) else []
+    while pending:
+        found, ancestors = pending.pop(0)
+        if _fits(found, wanted, exact):
+            match = {"ref_id": found.get("ref_id"), "role": found.get("role"), "value": found.get("value"),
+                     "states": list(found.get("states") or []), "interactive": found.get("ref_id") is not None,
+                     "path": [_label(ancestor) for ancestor in ancestors]}
+            if found.get("name"):
+                match["name"] = found["name"]
+            if found.get("ref_id") is None and found.get("bounds"):
+                match["bounds"] = found["bounds"]
+            return match
+        pending[0:0] = [(child, ancestors + [found]) for child in found.get("children") or [] if isinstance(child, dict)]
+    return None
+

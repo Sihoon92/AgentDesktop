@@ -22,6 +22,7 @@ from agent.completion import check_file
 from agent.effects import diff, met, state
 from agent.guard import AgentStopped
 from agent.loop import RunResult
+from agent.ready import signals
 from agent.tools import REF_ACTIONS
 from agent.workflow_format import VALUE_TOOLS, other_values, param_name
 
@@ -100,7 +101,7 @@ class _Replay:
         return self._stop is not None and self._stop.is_set()
 
     def _start(self):
-        if self._task.ready_text:
+        if signals(self._task):
             started = self._toolbox.launch_ready(cancelled=self._stopped)
         else:
             started = self._toolbox.call("launch_target", {})

@@ -159,3 +159,28 @@ def test_marks_of_the_same_window_or_of_an_unnamed_one_are_compared():
 
     assert "observed_window" not in same and same["changed"][0]["after"] == "금일"
     assert "observed_window" not in unnamed and unnamed["changed"][0]["after"] == "금일"
+
+
+def _unnamed(mark, native, states=()):
+    return {"kind": "id", "ref": None, "role": "image", "name": None, "description": None,
+            "states": list(states), "value": None, "bounds": None, "mark": mark,
+            "native_id": {"kind": "automation_id", "value": native}}
+
+
+def test_unnamed_elements_told_apart_only_by_id_are_compared_by_id():
+    before = {1: _unnamed(1, "8001"), 2: _unnamed(2, "8002", ["selected"]), 3: _unnamed(3, "8003")}
+    after = {1: _unnamed(1, "8001"), 2: _unnamed(2, "8003")}
+
+    effects = diff(state([W1], before), state([W1], after))
+
+    assert effects["removed"]["count"] == 1 and effects["added"]["count"] == 0
+    assert effects["changed"] == []
+
+
+def test_the_same_id_with_another_name_is_still_two_elements():
+    before = {1: dict(_unnamed(1, "8001"), name="가", kind="text")}
+    after = {1: dict(_unnamed(1, "8001"), name="나", kind="text")}
+
+    effects = diff(state([W1], before), state([W1], after))
+
+    assert effects["added"]["count"] == 1 and effects["removed"]["count"] == 1

@@ -13,7 +13,7 @@ from agent.asking import AskingTools
 from agent.effects import EXPECTATIONS
 from agent.guard import ActionGuard, signature
 from agent.observe import render_marked
-from agent.ready import ready_message, wait_until_ready
+from agent.ready import ready_message, signals, wait_until_ready
 from agent.results import refused as _refused
 from agent.screen_tools import UNCONFIRMED, ScreenTools
 from agent.tool_schemas import READ_ONLY_TOOLS, SCHEMAS, definitions_for
@@ -88,7 +88,8 @@ def _summary(envelope):
 
 class Toolbox(AskingTools, ScreenTools):
     def __init__(self, desktop, task, confirm, sleep=time.sleep, clock=time.monotonic, observer=None,
-                 asker=None, knowledge=None, captures_dir=None, wall=time.time, vision=None, gated=True):
+                 asker=None, knowledge=None, captures_dir=None, wall=time.time, vision=None, gated=True,
+                 profile=None):
         """observer gets on_observation(window, envelope, text, source=..., wait=...) for each tree
         the agent reads, and on_action(tool, arguments, target, result) for each other tool call,
         before the re-read is reported. source names what made the observation ("observe", "action",
@@ -105,10 +106,17 @@ class Toolbox(AskingTools, ScreenTools):
         gated=False is for a run that follows a fixed list of steps no one answers (a workflow
         replay): no call is refused for a question, the policy hears no outcome, and the repeat
         guard is off, since pressing the same element again is part of such a list. The
-        permission level, the target process and the before/after judgement stay as they are."""
+        permission level, the target process and the before/after judgement stay as they are.
+
+        profile, when given, is the system's agent.profile.Profile. Every read of the tree is
+        numbered with it (agent.observe.render_marked), so an element registered there gets its
+        mark and alias in the observation, after an action, in wait_for_text, in the ready window
+        and on the question screen alike, and a RunRecorder given the same profile records the
+        same marks."""
         self._desktop = desktop
         self._observer = observer or _NoObserver()
         self._task = task
+        self._profile = profile
         self._confirm = confirm
         self.sleep = sleep
         self.clock = clock
@@ -196,13 +204,18 @@ class Toolbox(AskingTools, ScreenTools):
         observation; a point tool gives the window and the screen points; a window tool gives the
         window with no points; click_part gives the mark's element and its point; click_point the
         capture's window and the screen point. Anything else, or an unknown ref, mark or capture,
-        gives None.
+        gives None. A ref or mark whose element has a registered name also gives it as "alias",
+        for the person who approves; the native id and the area stay with the harness.
         """
         if name in REF_ACTIONS:
             element = self._refs.get(arguments.get("ref"))
             if element is None:
                 return None
             shown = {key: value for key, value in element.items() if key != "native_id"}
+            alias = next((marked["alias"] for marked in self._marks.values()
+                          if marked.get("ref") == arguments["ref"] and marked.get("alias")), None)
+            if alias is not None:
+                shown["alias"] = alias
             return {"ref": arguments["ref"], **shown}
         if name in POINT_TOOLS:
             points = [[arguments[x], arguments[y]] for x, y in POINT_TOOLS[name]]
@@ -253,7 +266,7 @@ class Toolbox(AskingTools, ScreenTools):
             envelope = self._snapshot(window["id"])
             if envelope.get("ok"):
                 self._current_window = window["id"]
-                text, self._refs, self._marks = render_marked(envelope["data"]["tree"])
+                text, self._refs, self._marks = render_marked(envelope["data"]["tree"], profile=self._profile)
                 self._marks_view = (window["id"], True)
                 self._view_origin = _origin(window)
                 self._last_read = (window, envelope, text)
@@ -272,25 +285,30 @@ class Toolbox(AskingTools, ScreenTools):
             self._observer.on_observation(*self._last_read, source="wait_for_text", wait=wait)
 
     def launch_ready(self, cancelled=None):
-        """Launches the target and waits until a window shows the task's ready signal (agent/ready.py),
-        then makes that window's process the target and that window the current one. Sends a ready
-        start and end event, and records the ready window as one observation with source "ready",
-        from the very read that found the signal. Returns {"ok": True, "pid", "windows", "ready":
-        {"waited_ms", "switched"}}, or {"ok": False, "code": "READY_<STATUS>", "message"} with the
+        """Launches the target and waits until a window shows every ready signal of the task
+        (agent.ready.signals, read the way its ready_read names), then makes that window's process
+        the target and that window the current one. Sends a ready start and end event, the end
+        carrying the counts of the wait and never a signal, and records the ready window as one
+        observation with source "ready", from the very read that found the signals. Returns {"ok":
+        True, "pid", "windows", "ready": {"waited_ms", "switched"}}, or {"ok": False, "code":
+        "READY_<STATUS>", "message"} with the
         reason in the words of READY_MESSAGES. No approval is asked: starting the run asked for it.
         `cancelled()` true ends the wait as READY_CANCELLED; a restart_target waits with the same one."""
         if cancelled is not None:
             self._ready_cancelled = cancelled
         self._emit({"type": "ready", "phase": "start"})
-        outcome = wait_until_ready(self._desktop, self._task.exe, self._task.ready_text, self._task.ready_timeout_s,
-                                   self.clock, self.sleep, cancelled=self._ready_cancelled)
+        outcome = wait_until_ready(self._desktop, self._task.exe, signals(self._task), self._task.ready_timeout_s,
+                                   self.clock, self.sleep, cancelled=self._ready_cancelled,
+                                   read=self._task.ready_read)
         if outcome.status == "ready":
             self._pid = outcome.pid
             self._instance = outcome.instance
             self._ready = True
             self._record_read(outcome.window, outcome.tree_envelope, source="ready")
         self._emit({"type": "ready", "phase": "end", "status": outcome.status, "waited_ms": outcome.waited_ms,
-                    "polls": outcome.polls, "switched": outcome.switched, "running_hint": outcome.running_hint})
+                    "polls": outcome.polls, "switched": outcome.switched, "running_hint": outcome.running_hint,
+                    "reads": outcome.reads, "failed_reads": outcome.failed_reads, "timeouts": outcome.timeouts,
+                    "max_read_ms": outcome.max_read_ms, "candidates": outcome.candidates, "read": outcome.read})
         if outcome.status != "ready":
             return {"ok": False, "code": f"READY_{outcome.status.upper()}", "message": ready_message(outcome)}
         return {"ok": True, "pid": self._pid, "windows": self._window_summaries(),
@@ -347,7 +365,7 @@ class Toolbox(AskingTools, ScreenTools):
         window) and reports it to the observer under `source`, unless `source` is None."""
         window_id = window["id"]
         data = envelope["data"]
-        text, refs, self._marks = render_marked(data["tree"], include_bounds)
+        text, refs, self._marks = render_marked(data["tree"], include_bounds, profile=self._profile)
         self._refs = {**self._refs, **refs} if root_ref else refs
         self._marks_view = (window_id, not root_ref and surface in FULL_SURFACES)
         self._view_origin = _origin(window)
@@ -499,7 +517,7 @@ class Toolbox(AskingTools, ScreenTools):
             if self.clock() >= deadline:
                 return {"ok": False, "code": "RESTART_TIMEOUT", "message": "The app is still open; it may be prompting"}
             self.sleep(POLL_S)
-        if self._task.ready_text:
+        if signals(self._task):
             return self.launch_ready()
         return self._launch()
 

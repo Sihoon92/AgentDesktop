@@ -27,6 +27,13 @@ namespace VirtualMesApp
 
         internal Action<Point> BackgroundRightClick;
 
+        /// <summary>
+        /// The AutomationId this surface itself shows, as the area holding its items. Null
+        /// leaves it to the window's default provider, as for every surface outside the menu;
+        /// empty shows none. Set it before the surface is shown.
+        /// </summary>
+        internal string AreaId;
+
         internal Surface(UiRegion region, Exposure exposure)
         {
             this.region = region;

@@ -18,7 +18,12 @@ namespace VirtualMesApp
         private const string ProductionCategory = "생산운영";
 
         private readonly Session session;
+        private readonly Options options;
         private readonly Surface menuBar;
+
+        /// <summary>The strip under the menu bar that holds the duplicate of the first menu item
+        /// (--menu-dup-id other), or null.</summary>
+        private readonly Surface otherStrip;
         private readonly Panel body;
         private readonly Surface status;
         private readonly QueryRunner runner;
@@ -31,6 +36,7 @@ namespace VirtualMesApp
         {
             this.session = session;
             Options options = session.Options;
+            this.options = options;
             this.runner = new QueryRunner(options);
             this.Text = WindowTitle;
             this.AutoScaleMode = AutoScaleMode.None;
@@ -53,9 +59,19 @@ namespace VirtualMesApp
             this.menuBar.Dock = DockStyle.Top;
             this.menuBar.Height = Ui.Px(30);
             this.menuBar.BackColor = Ui.Accent;
+            this.menuBar.AreaId = MenuIds.Area(MenuIds.BarArea, options);
 
             this.Controls.Add(this.body);
             this.Controls.Add(this.status);
+            if (options.MenuDupId == Options.MenuDupOther)
+            {
+                this.otherStrip = new Surface(UiRegion.Menu, options.Expose[UiRegion.Menu]);
+                this.otherStrip.Dock = DockStyle.Top;
+                this.otherStrip.Height = Ui.Px(30);
+                this.otherStrip.BackColor = Ui.PanelBack;
+                this.otherStrip.AreaId = MenuIds.Area(MenuIds.OtherArea, options);
+                this.Controls.Add(this.otherStrip);
+            }
             this.Controls.Add(this.menuBar);
 
             this.SetStatus("준비");
@@ -126,41 +142,62 @@ namespace VirtualMesApp
 
         private void BuildMenuBar()
         {
+            Exposure exposure = this.options.Expose[UiRegion.Menu];
             List<SurfaceItem> items = new List<SurfaceItem>();
             int left = Ui.Px(6);
             for (int index = 0; index < Categories.Length; index++)
             {
                 int width = TextRenderer.MeasureText(Categories[index], Ui.Font).Width + Ui.Px(24);
-                SurfaceItem item = new SurfaceItem();
+                Rectangle bounds = new Rectangle(left, 0, width, this.menuBar.Height);
+                SurfaceItem item = this.CategoryButton(this.menuBar, index, bounds);
                 item.Id = "menu-" + index;
-                item.Kind = ItemKind.Button;
-                item.Text = Categories[index];
-                item.Fore = Color.White;
-                item.Align = ContentAlignment.MiddleCenter;
-                item.Bounds = new Rectangle(left, 0, width, this.menuBar.Height);
-                int category = index;
-                item.Click = delegate { this.OpenCategory(category, item.Bounds); };
+                item.AutomationId = MenuIds.BarItem(index, exposure, this.options.MenuDupId);
                 items.Add(item);
                 left += width + Ui.Px(2);
             }
             this.menuBar.SetItems(items);
+            if (this.otherStrip != null)
+            {
+                SurfaceItem twin = this.CategoryButton(this.otherStrip, 0, items[0].Bounds);
+                twin.Id = "menu-other-0";
+                twin.AutomationId = items[0].AutomationId;
+                twin.Back = Ui.Accent;
+                this.otherStrip.SetItems(new[] { twin });
+            }
+        }
+
+        /// <summary>
+        /// A menu button for one category, drawn on the given surface; clicking it opens that
+        /// category's list under the button.
+        /// </summary>
+        private SurfaceItem CategoryButton(Surface owner, int category, Rectangle bounds)
+        {
+            SurfaceItem item = new SurfaceItem();
+            item.Kind = ItemKind.Button;
+            item.Text = Categories[category];
+            item.Fore = Color.White;
+            item.Align = ContentAlignment.MiddleCenter;
+            item.Bounds = bounds;
+            item.Click = delegate { this.OpenCategory(category, owner, item.Bounds); };
+            return item;
         }
 
         /// <summary>Shows the list window under the clicked category. Only 생산운영 has screens.</summary>
-        private void OpenCategory(int index, Rectangle anchor)
+        private void OpenCategory(int index, Surface from, Rectangle anchor)
         {
             string category = Categories[index];
             ScreenSpec[] screens = category == ProductionCategory ? ScreenSpecs.All : new ScreenSpec[0];
+            Exposure exposure = this.session.ExposureOf(UiRegion.Menu);
             this.session.OpenMenu(category);
 
             int headerHeight = Ui.Px(26);
             int rowHeight = Ui.Px(30);
             int width = Ui.Px(260);
             int height = headerHeight + Math.Max(1, screens.Length) * rowHeight + 2;
-            Point origin = this.menuBar.PointToScreen(new Point(anchor.Left, anchor.Bottom));
+            Point origin = from.PointToScreen(new Point(anchor.Left, anchor.Bottom));
             PopupHost popup = PopupHost.Show(
                 this, new Rectangle(origin, new Size(width + 2, height)), UiRegion.Menu,
-                this.session.ExposureOf(UiRegion.Menu), "메뉴 목록", null);
+                exposure, "메뉴 목록", null, MenuIds.Area(MenuIds.ListArea, this.options));
 
             List<SurfaceItem> items = new List<SurfaceItem>();
             SurfaceItem header = new SurfaceItem();
@@ -176,6 +213,7 @@ namespace VirtualMesApp
                 ScreenSpec spec = screens[row];
                 SurfaceItem entry = new SurfaceItem();
                 entry.Id = "screen-" + spec.Id;
+                entry.AutomationId = MenuIds.ListItem(row, spec.Id, exposure);
                 entry.Kind = ItemKind.Button;
                 entry.Text = spec.Title;
                 entry.Bounds = new Rectangle(0, headerHeight + row * rowHeight, width, rowHeight);

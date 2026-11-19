@@ -311,7 +311,7 @@ class AskingTools:
             return
         envelope = self._snapshot(row["id"])
         if envelope.get("ok"):
-            text = render_marked(envelope["data"]["tree"])[0]
+            text = render_marked(envelope["data"]["tree"], profile=self._profile)[0]
             self._observer.on_observation(row, envelope, text, source="question")
 
     def _pinned_element(self, pin):

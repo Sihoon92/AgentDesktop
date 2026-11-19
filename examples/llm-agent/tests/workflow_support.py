@@ -405,3 +405,112 @@ def _turns(app, saved):
         _turn("finish", {"success": True, "evidence": "조회 결과를 저장함", "saved_path": saved,
                          "completion_id": None}),
     ]
+
+
+# A run on menus drawn as pictures (system profile, plan task 6): menu_run and MenuApp.
+
+MENU_SYSTEM = "orders"
+MENU_EXE = r"C:\apps\Orders.exe"
+MENU_GOAL = "실행 계획 화면을 열어줘"
+MENU_RUN_ID = "20261119-111500"
+MENU_ID = "w-orders"
+MENU_BOUNDS = {"x": 100, "y": 100, "width": 900, "height": 600}
+MENU_AREA = {"role": "toolbar", "id": "12"}
+MENU_ITEMS = {"56": ("출하 계획 화면", 110), "60": ("실행 계획 화면", 160)}
+"""Each menu item's id: the screen it opens and its left edge. Neither has a name, a ref or text nearby."""
+
+
+class MenuApp:
+    """A main window with a toolbar (named only by its id) of two menu items that are pictures:
+    image nodes with a native id and nothing else, the way an app may draw its menu. Pressing one
+    (a real click inside its box) opens its screen, shown as a text. Every pressed id is kept in
+    `pressed`."""
+
+    def __init__(self):
+        self.screen = None
+        self.pressed = []
+        self.cli = FakeCli(scene={"windows": [scene_window(MENU_ID, "Orders", MENU_BOUNDS)], "tree": self._tree()})
+        self.cli.on_click = self._on_click
+
+    def run(self, argv, **kwargs):
+        name = strip_globals(argv)[0] if argv and argv[0] != "taskkill" else None
+        completed = self.cli(argv, **kwargs)
+        if name in UNVERIFIED_COMMANDS and completed.returncode == 0:
+            envelope = {"version": "2.6", "ok": True, "command": name,
+                        "data": {"action": name, "disposition": {"delivery": "delivered_unverified", "retry": "unsafe"}}}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(envelope), "")
+        return completed
+
+    def _on_click(self, x, y):
+        for native, (screen, left) in MENU_ITEMS.items():
+            if _inside(self._item_box(left), x, y):
+                self.pressed.append(native)
+                self.screen = screen
+                self.cli.scene["tree"] = self._tree()
+                return
+
+    @staticmethod
+    def _item_box(left):
+        return {"x": left, "y": 145, "width": 40, "height": 30}
+
+    def _tree(self):
+        items = [{"role": "image", "native_id": {"kind": "automation_id", "value": native},
+                  "bounds": self._item_box(left)} for native, (_screen, left) in MENU_ITEMS.items()]
+        children = [
+            _node("statictext", "주문 관리", 110, 105, 200, 30),
+            {"role": "toolbar", "native_id": {"kind": "automation_id", "value": MENU_AREA["id"]},
+             "bounds": {"x": 100, "y": 140, "width": 400, "height": 40}, "children": items},
+        ]
+        if self.screen is not None:
+            children.append(_node("statictext", self.screen, 110, 300, 300, 30))
+        return {"role": "window", "name": "Orders", "bounds": dict(MENU_BOUNDS), "children": children}
+
+
+MENU_STAGES = [{"goal": "실행 계획 화면이 열려 있다", "done_when": "실행 계획 화면 글이 보인다"}]
+
+
+def _id_mark(items, role, native):
+    found = re.search(rf'\[(\d+)\] {role} id="{re.escape(native)}"', _latest_observation(items))
+    if found is None:
+        raise AssertionError(f"{role} id {native} is not in the latest observation")
+    return int(found.group(1))
+
+
+def _menu_turns():
+    return [
+        _turn("launch_target", {"intent": "앱을 연다"}),
+        _turn("observe", OBSERVE_MAIN),
+        _turn("plan", {"stages": MENU_STAGES, "params": []}),
+        lambda items: _act("click_part", "실행 계획 메뉴를 누른다", mark=_id_mark(items, "image", "60"),
+                           part="center", action="click"),
+        _done("statictext", "실행 계획 화면", "실행 계획 화면 글이 보인다"),
+        _turn("finish", {"success": True, "evidence": "실행 계획 화면이 열림", "saved_path": None,
+                         "completion_id": None}),
+    ]
+
+
+def menu_run(tmp_path, profile, before_finish=None, later_turns=()):
+    """Records the menu flow with the real loop, toolbox and recorder, both given `profile`, and
+    returns the run folder: launch, observe, plan, click_part on the menu item with id 60, stage
+    done, finish. before_finish and later_turns are as list_run's. The run ends confirmed."""
+    app = MenuApp()
+    desktop = DesktopClient("ad.exe", "run1", runner=app.run)
+    meta = {"goal": MENU_GOAL, "exe": MENU_EXE, "model": "gpt-test", "permission_level": 2,
+            "started_by": "run.py", "system": MENU_SYSTEM, "max_steps": 20}
+    now = datetime(2026, 11, 19, 11, 15, 0, tzinfo=timezone.utc)
+    recorder = RunRecorder(Path(tmp_path) / "runs", desktop, meta, run_id=MENU_RUN_ID, now=lambda: now,
+                           profile=profile)
+    task = Task(MENU_GOAL, MENU_EXE, 2, [], max_steps=20, system=MENU_SYSTEM)
+    toolbox = Toolbox(desktop, task, confirm=lambda _p: False, sleep=lambda _s: None, observer=recorder,
+                      asker=_Accepting(), captures_dir=recorder.path / "captures", wall=lambda: 0.0, profile=profile)
+    try:
+        model = ScriptedModel(_menu_turns() + list(later_turns))
+        result = run_agent(model, toolbox, task, recorder.on_event)
+        if before_finish is not None:
+            result = before_finish(model, result, recorder.path, recorder.on_event)
+        recorder.finish(result)
+    finally:
+        recorder.close()
+    if recorder.errors or result.status != "confirmed" or app.pressed != ["60"]:
+        raise AssertionError(f"menu_run did not record cleanly: {result.status} {recorder.errors} {app.pressed}")
+    return recorder.path

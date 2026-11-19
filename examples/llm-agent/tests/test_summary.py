@@ -547,6 +547,49 @@ def test_summary_never_shows_the_ready_text():
     assert "  준비: ready · 1초 · 대상 그대로" in summary_text
 
 
+NEW_READY = {"status": "ready", "waited_s": 95, "switched": True, "read": "snapshot", "polls": 12, "reads": 31,
+             "failed_reads": 4, "timeouts": 0, "max_read_ms": 7900}
+
+
+def test_ready_line_with_the_new_counts():
+    """The run.json shape of plan K7: how the ready wait read the screen, in numbers and a mode name."""
+    assert ready_line(summarize({"status": "verified", "ready": NEW_READY}, [])) == [
+        "  준비: ready · 95초 · snapshot · 확인 12바퀴 · 읽기 31회(실패 4, 시간 초과 0, 최대 7.9초) · 대상 바뀜"]
+    found = {**NEW_READY, "status": "timeout", "switched": False, "read": "find", "timeouts": 6, "max_read_ms": 3020}
+    assert ready_line(summarize({"status": "stopped", "ready": found}, [])) == [
+        "  준비: timeout · 95초 · find · 확인 12바퀴 · 읽기 31회(실패 4, 시간 초과 6, 최대 3.0초) · 대상 그대로"]
+
+
+@pytest.mark.parametrize("ms, shown", [(0, "0.0"), (49, "0.0"), (50, "0.1"), (950, "1.0"), (7949, "7.9"),
+                                       (7950, "8.0"), (12345, "12.3")])
+def test_the_longest_read_is_shown_in_tenths_of_a_second(ms, shown):
+    lines = ready_line(summarize({"status": "verified", "ready": {**NEW_READY, "max_read_ms": ms}}, []))
+
+    assert f"최대 {shown}초)" in lines[0]
+
+
+def test_ready_line_of_an_older_run_is_unchanged():
+    old = {"status": "ready", "waited_s": 12, "switched": True}
+
+    assert ready_line(summarize({"status": "verified", "ready": old}, [])) == ["  준비: ready · 12초 · 대상 바뀜"]
+
+
+@pytest.mark.parametrize("change", [
+    {"read": "fast"}, {"read": None}, {"polls": -1}, {"reads": "31"}, {"failed_reads": True}, {"timeouts": 1.5},
+    {"max_read_ms": None},
+])
+def test_ready_values_out_of_shape_fall_back_to_the_older_line(change):
+    ready = {**NEW_READY, **change}
+
+    assert ready_line(summarize({"status": "verified", "ready": ready}, [])) == ["  준비: ready · 95초 · 대상 바뀜"]
+
+
+def test_a_missing_new_count_falls_back_to_the_older_line():
+    ready = {key: value for key, value in NEW_READY.items() if key != "timeouts"}
+
+    assert ready_line(summarize({"status": "verified", "ready": ready}, [])) == ["  준비: ready · 95초 · 대상 바뀜"]
+
+
 WORKFLOW_MADE = {"type": "workflow", "created": True, "id": "w-20261119-001", "code": None, "steps": 12, "params": 2}
 WORKFLOW_RUN = {"id": "w-20261119-001", "steps": 12, "steps_done": 5, "code": "EXPECT_UNMET"}
 TEXT_MARK = "ZQX-워크플로글-4417"

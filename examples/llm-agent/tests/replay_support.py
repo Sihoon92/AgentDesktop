@@ -87,6 +87,8 @@ class AppOptions:
     quit_on_period_button: bool = False
     move: tuple = (0, 0)
     scale: float = 1.0
+    ids: dict = field(default_factory=dict)
+    id_area: str | None = None
 
 
 class FakeApp(FakeCli):
@@ -324,7 +326,7 @@ class FakeApp(FakeCli):
     def _render(self):
         if not hasattr(self, "scene"):
             return
-        children = [strip(element) for element in self._main_elements()]
+        children = self._main_children()
         rows = []
         for popup in self.open_popups:
             window_id, title, bounds, items = self._popup(popup)
@@ -345,6 +347,23 @@ class FakeApp(FakeCli):
         self.scene["tree"] = {"role": "window", "name": "메인", "bounds": main_bounds, "children": children}
         self.scene["trees"] = trees
         self._paint_rows()
+
+    def _main_children(self):
+        """The main window's children as the tree shows them. A label in options.ids carries that
+        native id; with options.id_area those elements sit in a toolbar whose only mark is that id."""
+        children, area = [], []
+        for element in self._main_elements():
+            shown = strip(element)
+            native = self.options.ids.get(element["label"])
+            if native is None:
+                children.append(shown)
+                continue
+            shown["native_id"] = {"kind": "automation_id", "value": native}
+            (area if self.options.id_area is not None else children).append(shown)
+        if area:
+            children.insert(0, {"role": "toolbar", "bounds": self._screen(0, 30, 260, 80), "children": area,
+                                "native_id": {"kind": "automation_id", "value": self.options.id_area}})
+        return children
 
     def _paint_rows(self):
         self.screenshot_patches = {}

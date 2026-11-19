@@ -1,6 +1,7 @@
 """Runs the task with fixed steps and no model, as a reference for the agent run."""
 
 from agent.loop import RunResult
+from agent.ready import signals
 from agent.verify import find_element
 
 POLL_S = 0.5
@@ -8,9 +9,9 @@ TARGET_LABEL_KEYS = ("role", "name", "name_contains", "description_contains")
 
 
 def run_baseline(toolbox, task, timeout_s=30):
-    """With a ready signal the harness's ready wait launches the target instead of launch_target,
+    """With ready signals the harness's ready wait launches the target instead of launch_target,
     and a wait that fails stops with its reason."""
-    if task.ready_text:
+    if signals(task):
         launched = toolbox.launch_ready()
         if not launched.get("ok"):
             return RunResult("stopped", 1, launched["message"])

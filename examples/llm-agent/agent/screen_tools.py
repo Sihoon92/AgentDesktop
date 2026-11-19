@@ -2,7 +2,7 @@
 find_cells, and the before/after comparison every app-changing call reports.
 
 ScreenTools is a mixin of Toolbox and uses its window and observation helpers
-(_rows, _owned_window, _snapshot, _physical, _marks, _observer).
+(_rows, _owned_window, _snapshot, _physical, _marks, _observer, _profile).
 """
 
 import tempfile
@@ -85,6 +85,8 @@ class ScreenTools:
         if element is None:
             return None
         target = {key: element.get(key) for key in ("mark", "ref", "role", "name", "description", "bounds")}
+        if element.get("alias"):
+            target["alias"] = element["alias"]
         target["window_id"] = self._marks_window()
         point = self._part_point(element, arguments.get("part"))
         target["points"] = [list(point)] if point else []
@@ -250,7 +252,7 @@ class ScreenTools:
             before = state(rows, self._marks, window_id)
         else:
             envelope = self._snapshot(window_id) if window_id else {}
-            marks = render_marked(envelope["data"]["tree"])[2] if envelope.get("ok") else {}
+            marks = render_marked(envelope["data"]["tree"], profile=self._profile)[2] if envelope.get("ok") else {}
             before = state(rows, marks, window_id)
         expect = arguments.get("expect")
         picturing = expect is not None and expect not in WINDOW_EXPECTATIONS

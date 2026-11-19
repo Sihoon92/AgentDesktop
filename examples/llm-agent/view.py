@@ -58,17 +58,20 @@ def openai_model(task, settings=None):
         raise RunStartFailed(str(error)) from error
 
 
-def build_run_manager(runs_dir, default_exe, knowledge_dir=None, task_defaults=None, workflow_dir=None):
+def build_run_manager(runs_dir, default_exe, knowledge_dir=None, task_defaults=None, workflow_dir=None,
+                      profile_dir=None):
     """Returns a RunManager, or None with the reason when this viewer can only replay.
     task_defaults (the settings file) give new runs their model and the other task keys,
     with OPENAI_MODEL below them. The workflow folder is workflow_dir, else the settings'
-    workflow_dir, else AGENT_WORKFLOW_DIR, else the default."""
+    workflow_dir, else AGENT_WORKFLOW_DIR, else the default; the profile folder is profile_dir,
+    else the settings' profile_dir, else AGENT_PROFILE_DIR, else the default."""
     binary = find_binary()
     if not binary.exists():
         return None, f"agent-desktop 바이너리가 없어 기록 보기만 합니다: {binary}"
     model_factory = functools.partial(openai_model, settings=task_defaults)
     return RunManager(runs_dir, binary, default_exe, model_factory, knowledge_dir=knowledge_dir,
-                      task_defaults=task_defaults, environ=os.environ, workflow_dir=workflow_dir), None
+                      task_defaults=task_defaults, environ=os.environ, workflow_dir=workflow_dir,
+                      profile_dir=profile_dir), None
 
 
 def open_fragment(runs_dir, value):
@@ -263,6 +266,9 @@ def main(argv=None):
     parser.add_argument("--workflow-dir", type=Path,
                         help="Workflow folder to list and replay from (default: the settings file's workflow_dir, "
                              "$AGENT_WORKFLOW_DIR or workflows/)")
+    parser.add_argument("--profile-dir", type=Path,
+                        help="Folder of the per-system profiles to register and to give viewer-started runs "
+                             "(default: the settings file's profile_dir, $AGENT_PROFILE_DIR or profiles/)")
     parser.add_argument("--no-browser", action="store_true", help="Print the address without opening a browser")
     parser.add_argument("--open", metavar="RUN_ID", help="Open this run (or 'latest') instead of the list")
     parser.add_argument("--prune", action="store_true", help="List runs to delete; nothing is deleted without --yes")
@@ -301,6 +307,8 @@ def main(argv=None):
         return 2
     knowledge_dir = knowledge_root(args.knowledge_dir, settings.get("knowledge_dir"))
     workflow_option = {"workflow_dir": args.workflow_dir} if args.workflow_dir else {}
+    if args.profile_dir:
+        workflow_option["profile_dir"] = args.profile_dir
     run_manager, notice = build_run_manager(runs_dir, args.exe or settings.get("exe"), knowledge_dir=knowledge_dir,
                                             task_defaults=settings, **workflow_option)
     token = secrets.token_urlsafe(32)
@@ -330,6 +338,8 @@ def main(argv=None):
     print(f"지식 폴더: {knowledge_dir}")
     if getattr(run_manager, "workflow_root", None) is not None:
         print(f"workflow 폴더: {run_manager.workflow_root}")
+    if getattr(run_manager, "profile_root", None) is not None:
+        print(f"프로파일 폴더: {run_manager.profile_root}")
     if settings:
         print(f"설정 파일: {settings_path()} ({', '.join(settings)})")
     if notice:
@@ -349,7 +359,15 @@ def main(argv=None):
         server.server_close()
         clear_instance(runs_dir, token)
         restore_break()
+        close_registration(run_manager)
     return 0
+
+
+def close_registration(run_manager):
+    """Removes the pictures the registration screen read; they never outlive the viewer."""
+    editor = getattr(run_manager, "profile_editor", None)
+    if editor is not None:
+        editor.close()
 
 
 if __name__ == "__main__":

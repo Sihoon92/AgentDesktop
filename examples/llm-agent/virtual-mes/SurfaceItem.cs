@@ -19,6 +19,10 @@ namespace VirtualMesApp
     internal sealed class SurfaceItem
     {
         internal string Id;
+
+        /// <summary>The AutomationId the item shows when it differs from Id, such as a fixed
+        /// number or an id two items share. Id stays unique, so reads find the right item.</summary>
+        internal string AutomationId;
         internal Rectangle Bounds;
         internal string Text = string.Empty;
 

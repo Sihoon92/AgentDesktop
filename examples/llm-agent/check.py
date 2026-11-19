@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,12 +25,16 @@ from agent.capture import Capture
 from agent.checks import failed, passed, skipped
 from agent.desktop import DesktopClient, start_session
 from agent.envfiles import ProfileError, load_env
+from agent.handles import process_window_handles
 from agent.images import image_items
 from agent.knowledge import KnowledgeError, system_name
 from agent.llm import (TEXT_URL_ENV, VISION_KEY_ENV, VISION_MODEL_ENV, VISION_URL_ENV, ModelSetupError,
                        text_responder, vision_setup)
-from agent.ready import ready_message, wait_until_ready
+from agent.profile import ProfileError as SystemProfileError
+from agent.profile import load_profile, profile_root
+from agent.ready import measure, ready_message, signals, wait_until_ready
 from agent.settings import VISION_POINT_MODES, SettingsError, load_settings, settings_path
+from agent.shortcut import guarded, is_shortcut, resolve_shortcut
 from agent.survey import id_keys, kinds
 from agent.systems import apply_ready, default_choice, system_exe
 from agent.task import Task, model_choice
@@ -63,6 +67,7 @@ POINT_QUESTION = ('Where is the red circle? It has no numbered box. Put its cent
 READY = "준비 신호"
 APP = "앱 관찰"
 IDS = "id 유지"
+PROFILE_FAILED = "시스템 프로파일 실패"
 
 CHECK_INSTRUCTIONS = "This is a connectivity check of the API. Do exactly what the user asks, nothing more."
 REPORT_TOOL = "report_digits"
@@ -102,19 +107,32 @@ def _openai_client(api_key, base_url):
 
 @dataclass(frozen=True)
 class Target:
-    """The app the check reads: its exe, the system it was picked as, and the ready signal
-    agent.systems.apply_ready gives it. `unknown` is a --system name the settings do not have."""
+    """The app the check reads: its exe, the system it was picked as, its system profile and the
+    ready signals agent.systems.apply_ready gives it. `unknown` is a --system name the settings
+    do not have. `profile` is None when the system has no profile file (or no name), and
+    `profile_error` the reason when its file cannot be used. When `exe` is a shortcut, `shortcut`
+    is what it names (agent.shortcut.Shortcut) or `shortcut_error` the code it cannot be launched
+    with; both stay None for an exe."""
 
     exe: str | None
     system: str | None = None
     ready_text: str | None = None
     ready_timeout_s: int = next(item.default for item in fields(Task) if item.name == "ready_timeout_s")
     unknown: bool = False
+    ready: tuple = ()
+    ready_read: str = "snapshot"
+    profile: object = None
+    profile_error: str | None = None
+    shortcut: object = None
+    shortcut_error: str | None = None
 
 
-def pick_target(exe, system, settings):
+def pick_target(exe, system, settings, profile_dir=None, environ=None):
     """The exe in the same order as a run: --exe, then the --system entry, then the default
-    choice's entry, then the settings exe. Only one system is ever picked."""
+    choice's entry, then the settings exe. Only one system is ever picked. Its profile is read
+    from profile_root(--profile-dir, the settings' profile_dir, AGENT_PROFILE_DIR) under the
+    system's knowledge name and given to apply_ready; a profile that cannot be used is kept
+    out and its reason noted."""
     if exe:
         target = Target(exe)
     elif system is not None:
@@ -127,7 +145,20 @@ def pick_target(exe, system, settings):
         target = Target(system_exe(settings, chosen), system=chosen)
     else:
         target = Target(settings.get("exe"))
-    return apply_ready(target, settings) if target.exe else target
+    if not target.exe:
+        return target
+    root = profile_root(profile_dir, settings.get("profile_dir"), environ)
+    try:
+        name = system_name(target.system or settings.get("system"), target.exe)
+    except KnowledgeError:
+        return apply_ready(target, settings)
+    try:
+        profile = load_profile(root, name)
+    except SystemProfileError as error:
+        return replace(apply_ready(target, settings), profile_error=error.reason)
+    if not (Path(root) / f"{name}.yaml").is_file():
+        profile = None
+    return replace(apply_ready(target, settings, profile), profile=profile)
 
 
 @dataclass
@@ -143,6 +174,7 @@ class Deps:
     check_dir: Path = CHECK_DIR
     binaries: tuple = tuple(BINARIES)
     env_files: tuple = tuple(ENV_FILES)
+    read_shortcut: object = resolve_shortcut
 
 
 def main(argv=None, deps=None):
@@ -152,6 +184,8 @@ def main(argv=None, deps=None):
     parser.add_argument("--skip", action="append", choices=SKIPPABLE, default=[], help="Skip the llm or app checks")
     parser.add_argument("--settings", help="Settings file; defaults to AGENT_SETTINGS, then settings.local.yaml")
     parser.add_argument("--profile", help="Load .env.<profile> before .env (default: AGENT_PROFILE)")
+    parser.add_argument("--profile-dir", help="System profile folder; defaults to the settings' profile_dir, "
+                                              "then AGENT_PROFILE_DIR, then profiles/")
     args = parser.parse_args(argv)
     deps = deps or Deps()
     try:
@@ -165,6 +199,8 @@ def main(argv=None, deps=None):
         print(f"  프로필: {profile}")
     for result in results:
         print(f"  {checks.line(result)}")
+        for note in result.notes:
+            print(f"    {note}")
     print(checks.footer(results))
     return checks.exit_code(results)
 
@@ -173,7 +209,9 @@ def run_checks(args, deps):
     binary, kind = checks.binary_location(deps.environ, deps.binaries)
     results = [_guarded([BINARY], lambda: [check_binary(binary, kind, deps.runner)])[0]]
     settings_result, settings = check_settings(args.settings, deps.environ)
-    results.append(settings_result)
+    target = _with_shortcut(pick_target(args.exe, args.system, settings, args.profile_dir, deps.environ),
+                            deps.read_shortcut)
+    results.append(_shortcut_noted(_with_profile(settings_result, target), target))
     split = _vision_named(settings, deps.environ)
     vision_items = split or _vision_connection_without_model(deps.environ)
     if "llm" in args.skip:
@@ -183,13 +221,41 @@ def run_checks(args, deps):
         results += _guarded(LLM_NAMES, lambda: check_llm(deps, settings, split))
         if vision_items:
             results += _guarded(VISION_NAMES, lambda: check_vision(deps, settings, split))
-    target = pick_target(args.exe, args.system, settings)
-    names = ([READY] if target.ready_text is not None else []) + [APP, IDS]
+    names = ([READY] if signals(target) else []) + [APP, IDS]
     if "app" in args.skip:
         results += [skipped(name) for name in names]
+    elif target.profile_error is not None:
+        results += [skipped(name, PROFILE_FAILED) for name in names]
     else:
         results += _guarded(names, lambda: check_app(deps, binary, target, settings))
     return results
+
+
+def _with_profile(result, target):
+    """The settings result with the system profile: a line of counts under it, or PROFILE_INVALID
+    with the profile's reason (which names a place, never a value) when its file cannot be used."""
+    if target.profile_error is not None:
+        if result.status == checks.FAILED:
+            return result
+        return failed(SETTINGS, "PROFILE_INVALID", target.profile_error)
+    return replace(result, notes=(checks.profile_detail(target.profile),))
+
+
+def _with_shortcut(target, read):
+    """`target` with what its shortcut names, or the code it cannot be launched with; as it was
+    when its exe is not a shortcut. `read` is resolve_shortcut or a stand-in for it, and it is the
+    one the check's client launches with (agent.shortcut.guarded)."""
+    if not target.exe or not is_shortcut(target.exe):
+        return target
+    found, code = guarded(target.exe, read)
+    return replace(target, shortcut=found, shortcut_error=code)
+
+
+def _shortcut_noted(result, target):
+    """The settings result with the `바로가기:` line under it when the target is a shortcut."""
+    if target.shortcut is None and target.shortcut_error is None:
+        return result
+    return replace(result, notes=result.notes + (checks.shortcut_detail(target.shortcut, target.shortcut_error),))
 
 
 def _guarded(names, run):
@@ -430,13 +496,16 @@ def check_app(deps, binary, target, settings):
     (agent.ready.wait_until_ready), and the ready window is the one read; a system that is
     already running fails the wait instead of being read."""
     no_ids = skipped(IDS, "관찰 없음")
-    signal = target.ready_text is not None
+    wanted = signals(target)
+    signal = bool(wanted)
     not_waited = [skipped(READY, "띄우지 않음")] if signal else []
     if target.unknown:
         return [failed(APP, "SYSTEM_UNKNOWN"), no_ids]
     exe = target.exe
     if not exe:
         return [failed(APP, "NO_EXE"), no_ids]
+    if target.shortcut_error is not None:
+        return not_waited + [failed(APP, target.shortcut_error), no_ids]
     if not Path(exe).exists():
         return not_waited + [failed(APP, "EXE_MISSING"), no_ids]
     if not binary.exists():
@@ -444,13 +513,19 @@ def check_app(deps, binary, target, settings):
     session = start_session(str(binary), f"check {datetime.now():%Y%m%d-%H%M%S}", deps.runner)
     if session is None:
         return not_waited + [failed(APP, "SESSION_FAILED"), no_ids]
-    desktop = DesktopClient(str(binary), session, deps.runner)
+    desktop = DesktopClient(str(binary), session, deps.runner,
+                            window_handles=process_window_handles if deps.runner is subprocess.run else None,
+                            read_shortcut=deps.read_shortcut)
     if signal:
-        outcome = wait_until_ready(desktop, str(exe), target.ready_text, target.ready_timeout_s, deps.clock,
-                                   deps.sleep)
+        rounds = []
+        outcome = wait_until_ready(desktop, str(exe), wanted, target.ready_timeout_s, deps.clock, deps.sleep,
+                                   read=target.ready_read, on_round=rounds.append)
+        notes = tuple(checks.round_lines(rounds))
         if outcome.status != "ready":
-            return [_ready_failure(outcome), skipped(APP, "준비 신호 실패"), no_ids]
-        waited = [passed(READY, checks.ready_detail(outcome.waited_ms, outcome.switched))]
+            return [replace(_ready_failure(outcome), notes=notes), skipped(APP, "준비 신호 실패"), no_ids]
+        ways = checks.read_ways_line(measure(desktop, outcome.window, wanted, deps.clock))
+        waited = [replace(passed(READY, checks.ready_detail(outcome.waited_ms, outcome.switched)),
+                          notes=notes + (ways,))]
         window = (outcome.window or {}).get("id")
         process = checks.process_mark(outcome.pid, outcome.instance)
     else:
@@ -540,7 +615,10 @@ def _check_ids(deps, exe, system, keys, process):
         return failed(IDS, "SAVE_FAILED")
     if previous is None:
         return skipped(IDS, f"지난 점검 없음 · 이번 id {len(keys)} 저장")
-    return passed(IDS, checks.ids_detail(previous.keys, keys))
+    detail = checks.ids_detail(previous.keys, keys)
+    if keys and previous.keys == keys:
+        detail += f" · {checks.STABLE_IDS_HINT}"
+    return passed(IDS, detail)
 
 
 if __name__ == "__main__":

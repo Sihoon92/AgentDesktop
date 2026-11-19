@@ -14,7 +14,7 @@ import hashlib
 
 from agent.geometry import has_area
 
-KIND_KEYS = ("named_ref", "unnamed_ref", "unnamed_ref_with_id", "text", "blank")
+KIND_KEYS = ("named_ref", "unnamed_ref", "unnamed_ref_with_id", "text", "blank", "id_only")
 ID_KEY_LENGTH = 16
 
 
@@ -24,7 +24,9 @@ def kinds(tree):
     named_ref: ref and name. unnamed_ref: ref without a name. unnamed_ref_with_id: the
     unnamed refs that carry a native id. text: a name and a position but no ref. blank: a
     position and nothing else, no name, ref or children; a candidate drawn-only area.
-    nodes: every node. depth: levels from the root, which is level 1.
+    id_only: no ref and no name, but a native id and a position, with or without children; the
+    nodes a system profile can name. It is counted besides the others, so an id-only leaf is
+    also blank. nodes: every node. depth: levels from the root, which is level 1.
     """
     found: dict[str, int] = {key: 0 for key in (*KIND_KEYS, "nodes", "depth")}
     stack = [(tree, 1, True)]
@@ -38,6 +40,8 @@ def kinds(tree):
                 found[kind] += 1
             if kind == "unnamed_ref" and _native_id(node):
                 found["unnamed_ref_with_id"] += 1
+            if _id_only(node):
+                found["id_only"] += 1
         stack.extend((child, level + 1, False) for child in node.get("children") or [])
     return found
 
@@ -58,6 +62,11 @@ def id_keys(tree):
             keys.add(hashlib.sha256(text.encode("utf-8")).hexdigest()[:ID_KEY_LENGTH])
         stack.extend(node.get("children") or [])
     return keys
+
+
+def _id_only(node):
+    named = bool(str(node.get("name") or "").strip())
+    return not node.get("ref_id") and not named and bool(_native_id(node)) and has_area(node.get("bounds"))
 
 
 def _kind(node):

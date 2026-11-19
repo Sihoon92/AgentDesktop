@@ -1,4 +1,5 @@
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 from agent.systems import apply_ready, default_choice, system_exe, system_names
 from agent.task import Task
@@ -67,3 +68,67 @@ def test_apply_ready_returns_a_new_task_and_keeps_everything_else():
 
     assert applied == replace(original, ready_text="생산운영", ready_timeout_s=90)
     assert original.ready_text is None
+
+
+# --- system profile (plan task 2, K5) ---
+
+PROFILE_READY = ({"name": "주문 관리"}, {"id": "56", "role": "image", "in": {"role": "toolbar", "id": "12"}})
+
+
+def profile(ready=PROFILE_READY, ready_read="find"):
+    """What apply_ready reads of agent.profile.Profile."""
+    return SimpleNamespace(ready=tuple(ready), ready_read=ready_read)
+
+
+def test_a_profile_ready_beats_the_settings_ready_text():
+    applied = apply_ready(task(ULSAN), SETTINGS, profile())
+
+    assert (applied.ready, applied.ready_read, applied.ready_text, applied.ready_timeout_s) == \
+        (PROFILE_READY, "find", None, 90)
+
+
+def test_a_profile_ready_needs_no_settings_ready_text():
+    no_text = {key: value for key, value in SETTINGS.items() if key != "ready_text"}
+
+    applied = apply_ready(task(CHEONAN), no_text, profile(ready_read="snapshot"))
+
+    assert (applied.ready, applied.ready_read, applied.ready_text, applied.ready_timeout_s) == \
+        (PROFILE_READY, "snapshot", None, 90)
+
+
+def test_a_task_file_ready_text_beats_the_profile():
+    own = task(ULSAN, ready_text="메뉴", ready_timeout_s=30)
+
+    assert apply_ready(own, SETTINGS, profile()) is own
+
+
+def test_a_profile_reaches_only_an_exe_the_settings_name():
+    other = task("C:\\Tools\\Other.exe")
+
+    assert apply_ready(other, SETTINGS, profile()) is other
+
+
+def test_an_empty_profile_leaves_the_settings_ready_text():
+    applied = apply_ready(task(ULSAN), SETTINGS, profile(ready=()))
+
+    assert (applied.ready, applied.ready_read, applied.ready_text) == ((), "snapshot", "생산운영")
+    assert apply_ready(task(ULSAN), SETTINGS, None) == apply_ready(task(ULSAN), SETTINGS)
+
+
+@dataclass(frozen=True)
+class OtherTarget:
+    """Any dataclass with the five fields, like check.py's Target."""
+    exe: str
+    name: str = "x"
+    ready_text: str | None = None
+    ready_timeout_s: int = 180
+    ready: tuple = ()
+    ready_read: str = "snapshot"
+
+
+def test_apply_ready_takes_any_dataclass_with_the_ready_fields():
+    target = OtherTarget(ULSAN)
+
+    assert apply_ready(target, SETTINGS, profile()) == replace(target, ready=PROFILE_READY, ready_read="find",
+                                                               ready_timeout_s=90)
+    assert apply_ready(target, SETTINGS) == replace(target, ready_text="생산운영", ready_timeout_s=90)

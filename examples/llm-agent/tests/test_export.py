@@ -246,7 +246,7 @@ def test_export_inlines_every_viewer_script_in_page_order_after_the_record(tmp_p
     html = build_export(copy_questions(tmp_path), REAL_STATIC, NOW)
 
     code = [text for attrs, text in parsed(html).scripts if not attrs]
-    names = ["chat.js", "knowledge.js", "workflows.js", "stages.js", "app.js"]
+    names = ["chat.js", "knowledge.js", "workflows.js", "profiles.js", "stages.js", "app.js"]
     assert [text.strip() for text in code] == [(REAL_STATIC / name).read_text(encoding="utf-8").strip() for name in names]
     record = html.index('<script id="run-export" type="application/json">')
     assert record < html.index("function renderChat") < html.index("function start()")
@@ -568,3 +568,53 @@ def test_a_replay_that_stopped_before_any_step_says_its_code(tmp_path):
                           ["workflowSummaryPart(state.run, state.events)"])
 
     assert summary == "workflow 멈춤 · READY_ALREADY_RUNNING"
+
+
+# --- system profile: no registration view in an export, id and alias in the box tooltip --------
+
+def test_the_exported_html_has_no_register_view(tmp_path):
+    html = build_export(replay_run(tmp_path), REAL_STATIC, NOW)
+    elements = {attrs.get("id"): attrs for _, attrs, _ in page_elements(page_skeleton(html)) if attrs.get("id")}
+    app = exported_script(html, "function start()")
+    profiles = exported_script(html, "function initProfiles")
+
+    assert "hidden" in elements["show-profiles"] and "hidden" in elements["profile-view"]
+    start = app[app.index("function start()"):]
+    assert start.index("startExport(exported);\n    return;") < start.index("initProfiles")
+    init = profiles[profiles.index("function initProfiles()"):profiles.index("\n}\n", profiles.index("function initProfiles()"))]
+    assert init.index("state.exportMode") < init.index("button.hidden = false") < init.index("addEventListener")
+    assert "innerHTML" not in profiles and "insertAdjacentHTML" not in profiles
+
+
+def tooltip_rows(html, items):
+    """Runs the exported app.js's tooltipRows in node for each item."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    app = exported_script(html, "function start()")
+    begin = app.index("function elementKind(")
+    kind = app[begin:app.index("\n}\n", begin) + 3]
+    rows = app[app.index("function tooltipRows("):app.index("\nfunction showTooltip(")]
+    calls = json.dumps(items, ensure_ascii=False)
+    program = f"{kind}\n{rows}\nprocess.stdout.write(JSON.stringify({calls}.map(tooltipRows)));\n"
+    out = subprocess.run([node, "-e", program], capture_output=True, timeout=30)
+    assert out.returncode == 0, out.stderr.decode("utf-8", "replace")
+    return json.loads(out.stdout.decode("utf-8"))
+
+
+def test_the_box_tooltip_shows_id_and_alias_and_an_older_record_is_unchanged(tmp_path):
+    html = build_export(replay_run(tmp_path), REAL_STATIC, NOW)
+    registered = {"kind": "id", "role": "image", "name": None, "native_id": {"kind": "automation_id", "value": "60"},
+                  "in": {"role": "toolbar", "id": "12"}, "alias": "Execution Plan", "ref": None}
+    named = {"kind": "control", "role": "button", "name": "조회", "ref": "@s1:e1",
+             "native_id": {"kind": "automation_id", "value": "7001"}}
+    older = {"kind": "control", "role": "button", "name": "조회", "description": "", "ref": "@s1:e1"}
+    text = {"kind": "text", "role": "statictext", "name": "라인"}
+
+    rows = tooltip_rows(html, [registered, named, older, text])
+
+    assert rows[0] == [["종류", "ID만 있음 (ref·이름 없음)"], ["역할", "image"], ["ID", "60"],
+                       ["등록 이름", "Execution Plan"]]
+    assert rows[1][-1] == ["ID", "7001"]
+    assert rows[2] == [["종류", "컨트롤"], ["역할", "button"], ["이름", "조회"], ["ref", "@s1:e1"]]
+    assert rows[3] == [["종류", "텍스트 (ref 없음)"], ["역할", "statictext"], ["이름", "라인"]]

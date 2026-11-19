@@ -21,13 +21,17 @@ namespace VirtualMesApp
     /// How a region appears in the accessibility tree. Ref: operable named
     /// elements. Text: named text with bounds and nothing operable. Bare:
     /// operable buttons with no name, told apart only by a numeric
-    /// AutomationId and their place. Pixel: one nameless image.
+    /// AutomationId and their place. IdOnly: images with no name and no
+    /// pattern, so nothing gives them a ref; only a numeric AutomationId and
+    /// their place tell them apart, and only a real click reaches them.
+    /// Pixel: one nameless image.
     /// </summary>
     internal enum Exposure
     {
         Ref,
         Text,
         Bare,
+        IdOnly,
         Pixel
     }
 
@@ -66,7 +70,8 @@ namespace VirtualMesApp
 
         internal static bool TryParseExposure(string text, out Exposure exposure)
         {
-            foreach (Exposure candidate in new[] { Exposure.Ref, Exposure.Text, Exposure.Bare, Exposure.Pixel })
+            Exposure[] all = { Exposure.Ref, Exposure.Text, Exposure.Bare, Exposure.IdOnly, Exposure.Pixel };
+            foreach (Exposure candidate in all)
             {
                 if (Name(candidate) == text)
                 {
@@ -80,17 +85,21 @@ namespace VirtualMesApp
 
         /// <summary>
         /// The icon and the arrows carry no text, so neither can be exposed as text. Only the
-        /// arrows can be bare.
+        /// menu and the arrows can be bare, and only the menu can be idonly.
         /// </summary>
         internal static bool IsAllowed(UiRegion region, Exposure exposure)
         {
+            if (exposure == Exposure.IdOnly)
+            {
+                return region == UiRegion.Menu;
+            }
             if (region == UiRegion.Arrow)
             {
                 return exposure != Exposure.Text;
             }
             if (exposure == Exposure.Bare)
             {
-                return false;
+                return region == UiRegion.Menu;
             }
             return !(region == UiRegion.Icon && exposure == Exposure.Text);
         }

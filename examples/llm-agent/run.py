@@ -3,6 +3,12 @@
 A successful model run is followed by making a workflow from its record. --workflow replays a
 saved workflow with --param values and no model; --workflows lists a system's workflows;
 --make-workflow makes one again from a past run and leaves that run's record as it was.
+
+Every run reads its system's profile once (agent.profile, folder from --profile-dir, the settings'
+profile_dir, AGENT_PROFILE_DIR, else profiles/) by the knowledge folder's system name, and hands
+that one profile to the ready signals, the recorder and the toolbox; a workflow is made with ids
+only when it says the system's ids stay the same. A profile that fails its check stops the run
+before anything starts, with the reason and none of the file's values.
 """
 
 import argparse
@@ -23,12 +29,16 @@ from agent.ask import NoAsker, TerminalAsker
 from agent.baseline import run_baseline
 from agent.desktop import DesktopClient, start_session
 from agent.envfiles import ProfileError, load_env
+from agent.handles import process_window_handles
 from agent.llm import ModelSetupError, build_models, make_client, start_line, text_responder
 from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, system_name
 from agent.loop import RunResult, run_agent
+from agent.profile import ProfileError as SystemProfileError
+from agent.profile import load_profile, profile_root
 from agent.recorder import RunRecorder
 from agent.registration import register_after_run
 from agent.settings import SettingsError, load_settings, settings_path
+from agent.shortcut import resolve_shortcut
 from agent.summary import current_code, read_records, write_summary
 from agent.systems import apply_ready, system_exe, system_names
 from agent.task import TaskError, load_task, task_from_args
@@ -122,6 +132,7 @@ def main(argv=None):
     parser.add_argument("--workflows", action="store_true", help="List the system's saved workflows")
     parser.add_argument("--make-workflow", metavar="RUN", help="Make a workflow from a past run: its id or latest")
     parser.add_argument("--workflow-dir", help="Folder that holds the per-system workflows")
+    parser.add_argument("--profile-dir", help="Folder that holds the per-system profiles (ready signals, id names)")
     args = parser.parse_args(argv)
     conflict = _conflict(args)
     if conflict:
@@ -143,22 +154,27 @@ def main(argv=None):
     if settings:
         print(f"설정 파일: {settings_path()} ({', '.join(settings)})")
     workflows_root = workflow_root(args.workflow_dir, settings.get("workflow_dir"), os.environ)
+    profiles_root = profile_root(args.profile_dir, settings.get("profile_dir"), os.environ)
     if args.workflows:
         return _list_workflows(args, settings, workflows_root)
     if args.make_workflow:
-        return _make_from_past(args, settings, workflows_root)
+        return _make_from_past(args, settings, workflows_root, profiles_root)
     if args.workflow:
-        return _replay(args, settings, workflows_root)
+        return _replay(args, settings, workflows_root, profiles_root)
     try:
-        task = _resolve_task(args, settings)
+        chosen = _chosen_task(args, settings)
     except (TaskError, OSError) as error:
         return _fail(str(error))
-    if not Path(task.exe).exists():
-        return _fail(f"실행 파일이 없습니다: {task.exe}")
+    if not Path(chosen.exe).exists():
+        return _fail(f"실행 파일이 없습니다: {chosen.exe}")
     try:
-        system = system_name(args.system or task.system, task.exe)
+        system = system_name(args.system or chosen.system, chosen.exe)
     except KnowledgeError as error:
         return _fail(f"시스템 이름을 쓸 수 없습니다: {error}")
+    profile = _system_profile(profiles_root, system)
+    if isinstance(profile, str):
+        return _fail(profile)
+    task = apply_ready(chosen, settings, profile)
     binary = find_binary()
     if not binary.exists():
         return _fail(f"agent-desktop 바이너리가 없습니다: {binary}")
@@ -179,10 +195,19 @@ def main(argv=None):
         return _fail("agent-desktop 세션을 시작하지 못했습니다")
     viewer = start_viewer(RUNS_DIR) if args.view else None
     try:
-        run = _ModelRun(args, task, system, models, workflows_root)
+        run = _ModelRun(args, task, system, models, workflows_root, profile)
         return _run_recorded(run, binary, session, viewer)
     finally:
         _close_viewer(viewer)
+
+
+def _system_profile(root, system):
+    """The one profile this run reads for `system`, or why it cannot be used. The reason names
+    which item and which key of the file, never a value from it."""
+    try:
+        return load_profile(root, system)
+    except SystemProfileError as error:
+        return f"시스템 프로파일을 읽지 못했습니다: {error.reason}"
 
 
 def _conflict(args):
@@ -255,17 +280,19 @@ class _ModelRun:
     """What a model or baseline run needs once its arguments are checked. `models` is None for a
     baseline run, which calls no model."""
 
-    def __init__(self, args, task, system, models, workflows_root):
+    def __init__(self, args, task, system, models, workflows_root, profile):
         self.args = args
         self.task = task
         self.system = system
         self.models = models
         self.workflows_root = workflows_root
+        self.profile = profile
 
 
 def _run_recorded(run, binary, session, viewer):
-    args, task, system, models = run.args, run.task, run.system, run.models
-    desktop = DesktopClient(str(binary), session)
+    args, task, system, models, profile = run.args, run.task, run.system, run.models, run.profile
+    desktop = DesktopClient(str(binary), session, window_handles=process_window_handles,
+                            read_shortcut=resolve_shortcut)
     meta = {
         "goal": task.goal,
         "exe": task.exe,
@@ -279,7 +306,7 @@ def _run_recorded(run, binary, session, viewer):
     if models is not None:
         meta["vision"] = models.vision is not None
     try:
-        recorder = RunRecorder(RUNS_DIR, desktop, meta)
+        recorder = RunRecorder(RUNS_DIR, desktop, meta, profile=profile)
     except OSError as error:
         return _fail(f"실행 기록 폴더를 만들지 못했습니다: {error}")
     if viewer is not None:
@@ -287,19 +314,20 @@ def _run_recorded(run, binary, session, viewer):
     captures = recorder.path / "captures"
     made = []
     if args.baseline:
-        toolbox = Toolbox(desktop, task, confirm=confirm, observer=recorder, captures_dir=captures)
+        toolbox = Toolbox(desktop, task, confirm=confirm, observer=recorder, captures_dir=captures, profile=profile)
         result = run_baseline(toolbox, task)
     else:
         store = KnowledgeStore(knowledge_root(args.knowledge_dir, task.knowledge_dir), system)
         asker = TerminalAsker() if is_interactive() else NoAsker()
         toolbox = Toolbox(desktop, task, confirm=confirm, observer=recorder, asker=asker, knowledge=store,
-                          captures_dir=captures, vision=models.vision)
+                          captures_dir=captures, vision=models.vision, profile=profile)
         gate = TerminalGate() if args.approve else None
         register = functools.partial(register_after_run, store=store, run_id=recorder.run_id)
         log = make_logger(recorder)
         result = run_agent(models.text, toolbox, task, log, gate=gate, register=register)
         workflows = WorkflowStore(run.workflows_root, system)
-        result = after_run(models.text, result, recorder.path, workflows, _keeping_workflows(log, made))
+        result = after_run(models.text, result, recorder.path, workflows, _keeping_workflows(log, made),
+                           use_ids=profile.stable_ids)
     return _finish_recorded(recorder, result, (binary, session), viewer, made)
 
 
@@ -373,21 +401,29 @@ def _chosen_system(args, settings):
     return system_name(settings.get("system"), exe or "")
 
 
-def _make_from_past(args, settings, root):
+def _make_from_past(args, settings, root, profiles_root):
     """Makes a workflow from a past run's record with the text model. The record is only read.
-    A missing OPENAI_API_KEY is refused by text_responder before any client exists."""
+    The profile is the one of the system the record names. A missing OPENAI_API_KEY is refused
+    by text_responder before any client exists."""
     run_dir = _past_run(args.make_workflow)
     if run_dir is None:
         return _fail(f"실행 기록이 없습니다: {args.make_workflow}")
     run, _ = read_records(run_dir)
     try:
         system = system_name(run.get("system"), run.get("exe") or "")
+    except KnowledgeError as error:
+        return _fail(str(error))
+    profile = _system_profile(profiles_root, system)
+    if isinstance(profile, str):
+        return _fail(profile)
+    try:
         task = task_from_args(run.get("goal") or "workflow", _absolute(run.get("exe"), run_dir),
                               run.get("permission_level") or 0, defaults=settings, environ=os.environ)
         model = text_responder(task, os.environ, make_client)
-    except (KnowledgeError, TaskError, ModelSetupError) as error:
+    except (TaskError, ModelSetupError) as error:
         return _fail(str(error))
-    outcome, tokens = make_workflow(model, run_dir, WorkflowStore(root, system), log=lambda _event: None)
+    outcome, tokens = make_workflow(model, run_dir, WorkflowStore(root, system), log=lambda _event: None,
+                                    use_ids=profile.stable_ids)
     print(workflow_line(outcome))
     print(f"토큰: {tokens}")
     return 0 if outcome.get("created") else 1
@@ -411,7 +447,7 @@ def _absolute(exe, fallback):
     return exe if isinstance(exe, str) and PureWindowsPath(exe).is_absolute() else str(fallback)
 
 
-def _replay(args, settings, root):
+def _replay(args, settings, root, profiles_root):
     """Replays a workflow: every value is checked before a record folder or a session exists."""
     given = _given_values(args.param)
     if isinstance(given, str):
@@ -424,12 +460,15 @@ def _replay(args, settings, root):
         system = system_name(args.system or settings.get("system"), exe)
     except KnowledgeError as error:
         return _fail(f"시스템 이름을 쓸 수 없습니다: {error}")
+    profile = _system_profile(profiles_root, system)
+    if isinstance(profile, str):
+        return _fail(profile)
     store = WorkflowStore(root, system)
     try:
         workflow = _stored_workflow(store, root, args.workflow)
         resolve_values(workflow, given, VALUE_CHECK_RUN_ID)
         task = apply_ready(task_from_args(workflow["goal"], exe, workflow["permission_level"],
-                                          defaults=settings, environ=os.environ), settings)
+                                          defaults=settings, environ=os.environ), settings, profile)
     except WorkflowError as error:
         return _fail(f"{error.code}: {error}")
     except TaskError as error:
@@ -444,7 +483,7 @@ def _replay(args, settings, root):
         return _fail("agent-desktop 세션을 시작하지 못했습니다")
     viewer = start_viewer(RUNS_DIR) if args.view else None
     try:
-        return _replay_recorded(_Replay(task, system, store, workflow, given), binary, session, viewer)
+        return _replay_recorded(_Replay(task, system, store, workflow, given, profile), binary, session, viewer)
     finally:
         _close_viewer(viewer)
 
@@ -479,21 +518,23 @@ def _stored_workflow(store, root, workflow_id):
 class _Replay:
     """A replay whose workflow and values passed every check before it starts."""
 
-    def __init__(self, task, system, store, workflow, given):
+    def __init__(self, task, system, store, workflow, given, profile):
         self.task = task
         self.system = system
         self.store = store
         self.workflow = workflow
         self.given = given
+        self.profile = profile
 
 
 def _replay_recorded(replay, binary, session, viewer):
     task = replay.task
-    desktop = DesktopClient(str(binary), session)
+    desktop = DesktopClient(str(binary), session, window_handles=process_window_handles,
+                            read_shortcut=resolve_shortcut)
     meta = {"goal": task.goal, "exe": task.exe, "model": WORKFLOW_RUN, "permission_level": task.permission_level,
             "max_steps": task.max_steps, "started_by": WORKFLOW_RUN, "system": replay.system, "code": current_code()}
     try:
-        recorder = RunRecorder(RUNS_DIR, desktop, meta)
+        recorder = RunRecorder(RUNS_DIR, desktop, meta, profile=replay.profile)
     except OSError as error:
         return _fail(f"실행 기록 폴더를 만들지 못했습니다: {error}")
     if viewer is not None:
@@ -504,7 +545,7 @@ def _replay_recorded(replay, binary, session, viewer):
         result = RunResult("stopped", 0, error.code)
     else:
         toolbox = Toolbox(desktop, task, confirm=confirm, observer=recorder, asker=NoAsker(),
-                          captures_dir=recorder.path / "captures", gated=False)
+                          captures_dir=recorder.path / "captures", gated=False, profile=replay.profile)
         result = run_workflow(toolbox, task, replay.workflow, values, log=make_logger(recorder))
         try:
             record_outcome(replay.store, replay.workflow, values, result)
@@ -513,14 +554,9 @@ def _replay_recorded(replay, binary, session, viewer):
     return _finish_recorded(recorder, result, (binary, session), viewer)
 
 
-def _resolve_task(args, settings):
-    """The task from the command line, the task file and the settings, in that order of weight,
-    with the settings' ready signal when its exe is one the settings name."""
-    return apply_ready(_chosen_task(args, settings), settings)
-
-
 def _chosen_task(args, settings):
-    """The exe comes from --exe, else the --system entry of `systems`, else the task file, else the
+    """The task from the command line, the task file and the settings, in that order of weight;
+    its ready signals come later, from apply_ready with the system's profile. The exe comes from --exe, else the --system entry of `systems`, else the task file, else the
     entry the settings' system names, else the settings' exe. A --system that names no entry is
     only the knowledge name."""
     named = system_exe(settings, args.system)

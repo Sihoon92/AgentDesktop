@@ -13,6 +13,8 @@ from test_tools import (
     SCENE,
     EventObserver,
     _node,
+    id_scene,
+    menu_profile,
     part_call,
     point_call,
 )
@@ -611,3 +613,24 @@ def test_a_cited_cell_the_cli_did_not_deliver_stays_ambiguous(tmp_path, store):
     assert toolbox.call("click", {"ref": "@s1:e2", "knowledge_id": entry["id"]})["ok"] is False
     del cli.action_results["click"]
     assert toolbox.call("click", {"ref": "@s1:e3"})["refused_code"] == "needs_confirmation"
+
+
+def test_the_question_screen_is_read_with_the_profile(tmp_path):
+    """The question's observation is recorded with marks counted under the profile, so its text
+    must number the registered toolbar (a node with children) and show its alias too."""
+    cli = FakeCli(scene=id_scene())
+    observer = EventObserver()
+    clock = iter(range(0, 10_000))
+    toolbox = Toolbox(DesktopClient("ad.exe", "run1", runner=cli), Task("goal", EXE, 2, []),
+                      confirm=lambda _prompt: True, sleep=lambda _s: None, clock=lambda: next(clock),
+                      observer=observer, asker=ScriptedAsker([Answer(text="계속")]),
+                      captures_dir=tmp_path / "captures", wall=lambda: time.time() - 60, profile=menu_profile())
+    toolbox.call("launch_target", {})
+    toolbox.call("observe", OBSERVE)
+
+    toolbox.call("ask", question(marks=[4]))
+
+    window, envelope, text = observer.observations[-1]
+    assert observer.sources[-1][0] == "question"
+    assert '[2] toolbar id="12" alias="Menu bar"' in text
+    assert '[4] image id="60" alias="Execution Plan"' in text

@@ -476,7 +476,8 @@ def test_status_reports_the_active_run_and_default_exe(tmp_path):
 
     assert json.loads(idle) == {"can_start": True, "active": None, "default_exe": str(exe),
                                  "can_answer": False, "default_system": None, "default_stage_call_limit": 8,
-                                 "systems": [], "default_choice": None, "can_shutdown": False, "stopping": False}
+                                 "systems": [], "default_choice": None, "can_shutdown": False, "stopping": False,
+                                 "can_register": True}
     assert json.loads(busy)["active"] == started["run_id"]
 
 
@@ -488,7 +489,8 @@ def test_status_without_a_run_manager_says_runs_cannot_start(server):
     assert status == 200
     assert json.loads(body) == {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
                                 "default_system": None, "default_stage_call_limit": None,
-                                "systems": [], "default_choice": None, "can_shutdown": False, "stopping": False}
+                                "systems": [], "default_choice": None, "can_shutdown": False, "stopping": False,
+                                "can_register": False}
 
 
 def test_favicon_request_is_answered_without_a_404(server):
@@ -2354,3 +2356,217 @@ def test_workflow_run_endpoint_needs_the_token(tmp_path):
         status, _ = post_json(instance, "/api/workflows/w-20261119-001/run", {"values": {}}, {"X-Agent-Token": None})
 
     assert status == 403 and stub.calls == []
+
+
+# --- registration screen: /api/profile (plan task 9, K11) ------------------------------------
+
+from agent import profile as profile_module  # noqa: E402
+from tests.profile_support import EXE as PROFILE_EXE  # noqa: E402
+from tests.profile_support import ORDER, OTHER_TITLE, SYSTEM, SYSTEMS, EditorDesktop, main_window, other_app_window  # noqa: E402
+from tests.ready_support import FakeClock as ReadyClock  # noqa: E402
+from viewer.run_manager import RunManager  # noqa: E402
+
+PROFILE_GETS = ["/api/profile?system=MES", "/api/profile/shots/r1.png"]
+PROFILE_POSTS = ["launch", "windows", "read", "check", "save"]
+
+
+@pytest.fixture(autouse=True)
+def pictures_under_tmp_path(tmp_path, monkeypatch):
+    """The registration screen's pictures go under tmp_path here, never into the system's temp folder."""
+    import tempfile
+
+    from viewer import profile_editor
+
+    folder = tmp_path / "shots"
+    folder.mkdir()
+    real = tempfile.mkdtemp
+    monkeypatch.setattr(profile_editor.tempfile, "mkdtemp", lambda prefix="": real(prefix=prefix, dir=folder))
+
+
+@pytest.fixture(autouse=True)
+def no_real_profile_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(profile_module, "DEFAULT_ROOT", tmp_path / "default-profiles")
+
+
+def profile_manager(tmp_path, **options):
+    """A RunManager whose registration screen reads an EditorDesktop (tests/profile_support.py)."""
+    desktop = EditorDesktop(ReadyClock(), [other_app_window(), main_window()], **options)
+    manager = RunManager(tmp_path / "runs", "ad.exe", None, lambda _task: None,
+                         desktop_factory=lambda: desktop, task_defaults={"systems": dict(SYSTEMS)},
+                         profile_dir=tmp_path / "profiles")
+    return manager, desktop
+
+
+def profile_post(instance, route, payload, headers=None):
+    return post_json(instance, f"/api/profile/{route}", payload, headers)
+
+
+def launched_and_read(instance):
+    profile_post(instance, "launch", {"system": SYSTEM})
+    return profile_post(instance, "read", {"system": SYSTEM, "window_id": "w-main"})
+
+
+def test_profile_routes_need_the_token(tmp_path):
+    manager, desktop = profile_manager(tmp_path)
+    with serving(tmp_path / "served", manager) as instance:
+        refused = [request(instance, path, {"X-Agent-Token": None})[0] for path in PROFILE_GETS]
+        refused += [profile_post(instance, route, {"system": SYSTEM}, {"X-Agent-Token": None})[0]
+                    for route in PROFILE_POSTS]
+
+    assert refused == [403] * (len(PROFILE_GETS) + len(PROFILE_POSTS))
+    assert desktop.calls == []
+
+
+def test_profile_routes_answer_503_without_a_run_manager(tmp_path):
+    with serving(tmp_path) as instance:
+        statuses = [request(instance, path)[0] for path in PROFILE_GETS[:1]]
+        statuses += [profile_post(instance, route, {"system": SYSTEM})[0] for route in PROFILE_POSTS]
+        status_body = json.loads(request(instance, "/api/status")[2])
+
+    assert statuses == [503] * (1 + len(PROFILE_POSTS))
+    assert status_body["can_register"] is False
+
+
+def test_the_status_says_a_managed_viewer_can_register(tmp_path):
+    manager, _ = profile_manager(tmp_path)
+    with serving(tmp_path / "served", manager) as instance:
+        body = json.loads(request(instance, "/api/status")[2])
+
+    assert body["can_register"] is True and body["active"] is None
+
+
+def test_a_whole_registration_through_the_routes(tmp_path):
+    manager, _ = profile_manager(tmp_path)
+    with serving(tmp_path / "served", manager) as instance:
+        empty = json.loads(request(instance, "/api/profile?system=MES")[2])
+        launched = profile_post(instance, "launch", {"system": SYSTEM})
+        listed = profile_post(instance, "windows", {"system": SYSTEM})
+        read = profile_post(instance, "read", {"system": SYSTEM, "window_id": "w-main", "delay_s": 0})
+        shot_status, shot_type, shot = request(instance, f"/api/profile/shots/{read[1]['image']}")
+        checked = profile_post(instance, "check", {"system": SYSTEM, "window_id": "w-main",
+                                                   "ready": [{"name": ORDER}]})
+        saved = profile_post(instance, "save", {"system": SYSTEM, "read_id": read[1]["read_id"], "profile": {
+            "stable_ids": True, "ready_read": "snapshot", "ready": [{"name": ORDER}],
+            "elements": [{"id": "60", "role": "image", "in": {"role": "toolbar", "id": "12"}, "name": "Plan"}]}})
+        again = json.loads(request(instance, "/api/profile?system=MES")[2])
+
+    assert empty["exists"] is False
+    assert launched == (200, {"windows": [{"id": "w-main", "title": "MES Main"}]}) == listed
+    assert read[0] == 200 and read[1]["items"]
+    assert shot_status == 200 and shot_type == "image/png" and shot.startswith(b"\x89PNG")
+    assert checked[0] == 200 and checked[1]["snapshot"]["found"] == [True]
+    assert saved == (200, {"saved": True})
+    assert again["exists"] is True and again["profile"]["elements"][0]["name"] == "Plan"
+
+
+def test_the_editors_refusals_keep_their_status_and_body(tmp_path):
+    manager, _ = profile_manager(tmp_path)
+    with serving(tmp_path / "served", manager) as instance:
+        before_launch = profile_post(instance, "windows", {"system": SYSTEM})
+        unknown = profile_post(instance, "launch", {"system": "Nowhere"})
+        _, first = launched_and_read(instance)
+        profile_post(instance, "read", {"system": SYSTEM, "window_id": "w-main"})
+        stale = profile_post(instance, "save", {"system": SYSTEM, "read_id": first["read_id"], "profile": {}})
+        _, latest = profile_post(instance, "read", {"system": SYSTEM, "window_id": "w-main"})
+        with_problems = profile_post(instance, "save", {"system": SYSTEM, "read_id": latest["read_id"], "profile": {
+            "elements": [{"id": "56", "role": "image", "name": "Shipment"}]}})
+        missing_shot = request(instance, "/api/profile/shots/r99.png")[0]
+        odd_shot = request(instance, "/api/profile/shots/..%2Frun.json")[0]
+
+    assert before_launch[0] == 409 and "error" in before_launch[1]
+    assert unknown[0] == 400
+    assert stale[0] == 409 and "다시 읽어" in stale[1]["error"]
+    assert with_problems[0] == 400 and with_problems[1]["problems"][0]["where"] == "elements"
+    assert (missing_shot, odd_shot) == (404, 404)
+
+
+@pytest.mark.parametrize("payload", [
+    {"system": SYSTEM, "window_id": "w-main", "delay_s": "3"},
+    {"system": SYSTEM, "window_id": 5},
+    {"system": 3},
+])
+def test_bad_read_requests_are_400(tmp_path, payload):
+    manager, _ = profile_manager(tmp_path)
+    with serving(tmp_path / "served", manager) as instance:
+        profile_post(instance, "launch", {"system": SYSTEM})
+        status, body = profile_post(instance, "read", payload)
+
+    assert status in (400, 409) and "error" in body
+    if payload.get("delay_s") == "3":
+        assert status == 400
+
+
+def test_reading_during_a_run_is_409(tmp_path):
+    manager, desktop = profile_manager(tmp_path)
+    with serving(tmp_path / "served", manager) as instance:
+        profile_post(instance, "launch", {"system": SYSTEM})
+        reads_before = len(desktop.commands("snapshot"))
+        with manager._lock:
+            manager._active = "20261119-101500"
+        try:
+            during_run = [profile_post(instance, route, {"system": SYSTEM, "window_id": "w-main",
+                                                         "ready": [{"name": ORDER}]})[0]
+                          for route in ("launch", "windows", "read", "check")]
+        finally:
+            with manager._lock:
+                manager._active = None
+        with manager.exclusive():
+            during_reading = profile_post(instance, "read", {"system": SYSTEM, "window_id": "w-main"})[0]
+
+    assert during_run == [409] * 4 and during_reading == 409
+    assert len(desktop.commands("snapshot")) == reads_before
+
+
+def test_the_profile_answers_hold_no_exe_path(tmp_path):
+    manager, _ = profile_manager(tmp_path)
+    with serving(tmp_path / "served", manager) as instance:
+        bodies = [request(instance, "/api/profile?system=MES")[2].decode("utf-8")]
+        bodies += [json.dumps(post_json(instance, f"/api/profile/{route}", payload)[1], ensure_ascii=False)
+                   for route, payload in (
+            ("launch", {"system": SYSTEM}), ("windows", {"system": SYSTEM}),
+            ("read", {"system": SYSTEM, "window_id": "w-main"}),
+            ("check", {"system": SYSTEM, "window_id": "w-main", "ready": [{"name": ORDER}]}))]
+        bodies.append(request(instance, "/api/status")[2].decode("utf-8"))
+
+    for body in bodies:
+        assert PROFILE_EXE not in body and "Mes.exe" not in body and "Apps" not in body
+        assert OTHER_TITLE not in body
+
+
+def test_the_profile_shots_are_png_only_from_the_editor(tmp_path):
+    manager, _ = profile_manager(tmp_path)
+    (tmp_path / "served").mkdir()
+    (tmp_path / "served" / "r1.png").write_bytes(b"\x89PNG not from the editor")
+    with serving(tmp_path / "served", manager) as instance:
+        before = request(instance, "/api/profile/shots/r1.png")[0]
+        _, read = launched_and_read(instance)
+        after = request(instance, f"/api/profile/shots/{read['image']}")
+
+    assert before == 404
+    assert after[0] == 200 and b"not from the editor" not in after[2]
+
+
+def test_profiles_js_sets_text_with_textcontent_only():
+    script = (server_module.STATIC_DIR / "profiles.js").read_text(encoding="utf-8")
+
+    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
+        assert forbidden not in script, forbidden
+    assert "textContent" in script
+
+
+def test_the_page_loads_profiles_js_and_has_a_hidden_register_view():
+    html = (server_module.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    assert html.index('src="/static/workflows.js"') < html.index('src="/static/profiles.js"') < \
+        html.index('src="/static/app.js"')
+    assert 'id="show-profiles"' in html and 'id="profile-view"' in html
+    app = (server_module.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "loadStatus().then(initWorkflows).then(initProfiles);" in app, "the register button waits for the status"
+    button = html[html.index('id="show-profiles"') - 200:html.index('id="show-profiles"') + 80]
+    assert "hidden" in button.split("<button")[-1]
+
+
+def test_the_run_view_box_tooltip_shows_id_and_alias():
+    app = (server_module.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "native_id" in app and "alias" in app

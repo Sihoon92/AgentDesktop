@@ -8,7 +8,8 @@ warning on the event, or an entry in `errors` printed to stderr.
 
 run.json holds numbers only about stages (`stages`, written at finish); the plan's texts and the
 stage notes are kept in events.jsonl alone. Of a ready wait it holds the status, the seconds and
-whether the target process changed (`ready`, written when the wait ends), never the signal. Of a
+whether the target process changed (`ready`, written when the wait ends), with the read mode and
+the counts of reads when the end carries them, never the signal. Of a
 workflow it holds whether one was made, its id and its code (`workflow`, from the workflow event),
 and of a replay the workflow's id, step counts and code (`workflow_run`, from the finish stats);
 a value that is not a plain id, code or count keeps the whole entry out. Step goals, parameter
@@ -33,6 +34,7 @@ from agent.capture import add_windows, stacked
 from agent.frames import frame_origin, to_image_rect
 from agent.observe import visible_elements
 from agent.process_identity import process_started_at
+from agent.profile import READ_MODES
 from agent.ready import READY_STATUSES
 from agent.summary import CODE, WORKFLOW_ID
 from agent.survey import kinds
@@ -46,6 +48,8 @@ META_FIELDS = ("goal", "exe", "model", "permission_level", "started_by", "system
 BOOLEAN_META = ("vision",)
 """Meta fields kept only as true or false, else null: `vision` says whether a vision model read the
 pictures, never which one."""
+READY_COUNTS = ("polls", "reads", "failed_reads", "timeouts", "max_read_ms")
+"""The counts of a ready end that run.json keeps, with `read`, only when every one is a whole number."""
 WINDOW_FIELDS = ("id", "title", "bounds")
 RESULT_FIELDS = (
     "ok", "disposition", "code", "message", "refused", "post_state",
@@ -79,11 +83,13 @@ def _never_raises(method):
 
 
 class RunRecorder:
-    def __init__(self, runs_dir, desktop, meta, run_id=None, now=None, heartbeat_s=HEARTBEAT_S):
+    def __init__(self, runs_dir, desktop, meta, run_id=None, now=None, heartbeat_s=HEARTBEAT_S, profile=None):
         """Creates runs_dir/<run_id>/ and starts the heartbeat thread; finish() or close() stops it.
         A generated id is YYYYMMDD-HHMMSS in UTC, with -2, -3, ... when that second is taken; a
-        given run_id must be free."""
+        given run_id must be free. `profile` (agent.profile) is the system profile the run's
+        Toolbox was given, so the recorded elements carry the same numbers and aliases."""
         self._desktop = desktop
+        self._profile = profile
         self._now = now or (lambda: datetime.now(timezone.utc))
         started = self._now().astimezone(timezone.utc)
         self.run_id, self.path = _claim_run_dir(Path(runs_dir), run_id, started.strftime("%Y%m%d-%H%M%S"))
@@ -137,7 +143,7 @@ class RunRecorder:
         frame, window_ids = self._capture(window, event)
         self._last_frame = {"id": event["id"], "window_ids": window_ids, "geometry": frame}
         tree = envelope["data"]["tree"]
-        event["elements"], event["text_truncated"] = _elements(tree, frame)
+        event["elements"], event["text_truncated"] = _elements(tree, frame, self._profile)
         event["kinds"] = kinds(tree)
         event["complete"] = envelope["data"].get("complete")
         self._append(event)
@@ -237,16 +243,22 @@ class RunRecorder:
 
     def _note_ready(self, event):
         """Writes the end of a ready wait into run.json at once, so the run list sees it while the
-        run goes on: {"status", "waited_s", "switched"}, numbers and a code only. An end whose
-        status is not in READY_STATUSES, or whose time or switch is not a plain value, is kept in
-        events.jsonl alone. A later end (a restart) replaces an earlier one."""
+        run goes on: {"status", "waited_s", "switched"}, numbers and a code only, and also "read"
+        and READY_COUNTS when the end carries all of them in shape (a mode in READ_MODES, whole
+        numbers). An end whose status is not in READY_STATUSES, or whose time or switch is not a
+        plain value, is kept in events.jsonl alone. A later end (a restart) replaces an earlier
+        one."""
         status, waited_ms, switched = event.get("status"), event.get("waited_ms"), event.get("switched")
         if event.get("phase") != "end" or status not in READY_STATUSES or not _whole(waited_ms):
             return
         if not isinstance(switched, bool):
             return
         with self._run_lock:
-            self._run["ready"] = {"status": status, "waited_s": round(waited_ms / 1000), "switched": switched}
+            ready = {"status": status, "waited_s": round(waited_ms / 1000), "switched": switched}
+            if event.get("read") in READ_MODES and all(_whole(event.get(key)) for key in READY_COUNTS):
+                ready["read"] = event["read"]
+                ready.update({key: event[key] for key in READY_COUNTS})
+            self._run["ready"] = ready
             self._write_run_locked()
 
     def _note_workflow(self, event):
@@ -464,12 +476,13 @@ def _whole(value):
     return type(value) is int and value >= 0
 
 
-def _elements(tree, frame):
-    """Returns every control and at most MAX_TEXT_ELEMENTS text elements, and whether text was cut.
-    Each element keeps its observation mark and scope, so a cut never renumbers the rest."""
+def _elements(tree, frame, profile=None):
+    """Returns every control and id element and at most MAX_TEXT_ELEMENTS text elements, and
+    whether text was cut. Each element keeps its observation mark and scope, and its native_id,
+    in and alias when it has them, so a cut never renumbers the rest."""
     elements = []
     texts = 0
-    for element in visible_elements(tree):
+    for element in visible_elements(tree, profile):
         if element["kind"] == "text":
             texts += 1
             if texts > MAX_TEXT_ELEMENTS:

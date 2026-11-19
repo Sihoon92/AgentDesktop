@@ -152,12 +152,14 @@ def draft(model, record):
     return (proposal if isinstance(proposal, dict) else None), tokens
 
 
-def build(record, draft):
-    """The workflow without id, status and counts, or AuthorError."""
-    return _Builder(record).build(draft)
+def build(record, draft, use_ids=False):
+    """The workflow without id, status and counts, or AuthorError. With use_ids (the system's
+    profile says its ids stay the same), targets carry their native id and area on top of what
+    names them, except a target whose name is a parameter: another value must find another element."""
+    return _Builder(record, use_ids).build(draft)
 
 
-def make_workflow(model, run_dir, store, log, today=None, status=None):
+def make_workflow(model, run_dir, store, log, today=None, status=None, use_ids=False):
     """Reads the run, drafts, builds and saves. Never raises. Returns (outcome, tokens) and logs
     the outcome as a "workflow" event: {"created", "id", "code", "steps", "params"}. `status`
     is the run's own result status while it is still ending (see read_record); a past run's
@@ -171,7 +173,7 @@ def make_workflow(model, run_dir, store, log, today=None, status=None):
             raise AuthorError("MODEL_NO_DRAFT", f"the model call failed: {type(error).__name__}") from error
         if proposal is None:
             raise AuthorError("MODEL_NO_DRAFT", "the model proposed no workflow")
-        workflow = build(record, proposal)
+        workflow = build(record, proposal, use_ids=use_ids)
         if workflow.get("system") is None:
             workflow.pop("system", None)
         saved = store.add(workflow, today=today)
@@ -188,12 +190,12 @@ def make_workflow(model, run_dir, store, log, today=None, status=None):
     return outcome, tokens
 
 
-def after_run(model, result, run_dir, store, log):
+def after_run(model, result, run_dir, store, log, use_ids=False):
     """Makes a workflow after a verified or confirmed run and adds its tokens to `result`."""
     if result.status not in SUCCESS_STATUSES:
         return result
     try:
-        _outcome, tokens = make_workflow(model, run_dir, store, log, status=result.status)
+        _outcome, tokens = make_workflow(model, run_dir, store, log, status=result.status, use_ids=use_ids)
     except Exception:
         return result
     return dataclasses.replace(result, tokens=(result.tokens or 0) + tokens)
@@ -208,8 +210,9 @@ def _invalid(message) -> NoReturn:
 
 
 class _Builder:
-    def __init__(self, record):
+    def __init__(self, record, use_ids=False):
         self.record = record
+        self.use_ids = use_ids
         self.kinds = {}
         self.examples = {}
         self.kept = []
@@ -533,7 +536,7 @@ class _Builder:
         scoped = in_scope(item["observation"].get("elements") or [], scope_mark)
         avoided = avoid | self._changed_names(item["observation"], scope_mark, scoped)
         try:
-            locator = describe(scoped, element.get("mark"), avoided)
+            locator = describe(scoped, element.get("mark"), avoided, use_ids=self.use_ids and name_param is None)
         except LocatorError as error:
             raise AuthorError("LOCATOR_NOT_UNIQUE", f"step {item['n']}: its target cannot be told apart") from error
         example = None

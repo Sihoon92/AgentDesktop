@@ -29,11 +29,11 @@ SETTINGS_ENV = "AGENT_SETTINGS"
 DEFAULT_PATH = HERE / "settings.local.yaml"
 KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
         "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side", "vision_points",
-        "systems", "ready_text", "ready_timeout_s", "workflow_dir")
+        "systems", "ready_text", "ready_timeout_s", "workflow_dir", "profile_dir")
 NUMBER_KEYS = ("stage_call_limit", "vision_max_side", "ready_timeout_s")
 VISION_POINT_MODES = ("pixel", "normalized_1000")
-PATH_KEYS = ("knowledge_dir", "exe", "workflow_dir")
-FOLDER_KEYS = ("knowledge_dir", "workflow_dir")
+PATH_KEYS = ("knowledge_dir", "exe", "workflow_dir", "profile_dir")
+FOLDER_KEYS = ("knowledge_dir", "workflow_dir", "profile_dir")
 """Folders a relative value of is taken from the settings file's folder."""
 QUOTE_HINT = "경로는 따옴표 없이 적거나 작은따옴표로 감싸세요"
 QUOTED_BACKSLASH = re.compile(r'"[^"]*\\')
@@ -58,7 +58,7 @@ def settings_path(path=None, environ=None):
 
 def load_settings(path=None, environ=None):
     """The settings as a dict holding only the keys the file sets, {} without a file.
-    A relative knowledge_dir or workflow_dir is taken from the settings file's folder."""
+    A relative knowledge_dir, workflow_dir or profile_dir is taken from the settings file's folder."""
     environ = os.environ if environ is None else environ
     named = _named(path, environ)
     target = DEFAULT_PATH if named is None else named

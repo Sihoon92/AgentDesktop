@@ -40,13 +40,62 @@ def test_expose_overrides_profile():
 @pytest.mark.parametrize("args", [
     ["--expose", "icon=text"], ["--expose", "grid=shiny"], ["--expose", "nowhere=ref"],
     ["--expose", "arrow=text"], ["--expose", "arrow=shiny"], ["--expose", "filters=bare"],
-    ["--expose", "menu=bare"], ["--expose", "icon=bare"],
+    ["--expose", "icon=bare"],
     ["--profile", "medium"], ["--delay-ms", "soon"], ["--delay-ms", "-1"], ["--unknown"],
     ["--delay-ms"]])
 def test_bad_options_exit_2_with_a_reason(args):
     done = run_exe(*args, "--parse-only")
     assert done.returncode == 2
     assert done.stderr.strip()
+
+
+@pytest.mark.parametrize("mode", ["bare", "idonly"])
+def test_menu_takes_bare_and_idonly(mode):
+    out = parsed("--expose", f"menu={mode}")
+    assert out["expose"]["menu"] == mode
+    assert {key: value for key, value in out["expose"].items() if key != "menu"} == {
+        "filters": "text", "grid": "text", "icon": "pixel", "radial": "pixel", "arrow": "bare"}
+
+
+@pytest.mark.parametrize("region", ["filters", "grid", "icon", "radial", "arrow"])
+def test_idonly_is_for_the_menu_only(region):
+    done = run_exe("--expose", f"{region}=idonly", "--parse-only")
+    assert done.returncode == 2
+    assert done.stderr.strip()
+
+
+@pytest.mark.parametrize("region", ["filters", "grid", "icon", "radial"])
+def test_bare_is_still_refused_outside_menu_and_arrow(region):
+    done = run_exe("--expose", f"{region}=bare", "--parse-only")
+    assert done.returncode == 2
+    assert done.stderr.strip()
+
+
+def test_menu_container_id_and_dup_id_parse():
+    default = parsed()
+    assert (default["menu_container_id"], default["menu_dup_id"]) == ("on", "none")
+    out = parsed("--menu-container-id", "off", "--menu-dup-id", "same")
+    assert (out["menu_container_id"], out["menu_dup_id"]) == ("off", "same")
+    out = parsed("--menu-container-id", "on", "--menu-dup-id", "other")
+    assert (out["menu_container_id"], out["menu_dup_id"]) == ("on", "other")
+    assert parsed("--menu-dup-id", "none")["menu_dup_id"] == "none"
+
+
+@pytest.mark.parametrize("args", [
+    ["--menu-container-id"], ["--menu-container-id", "yes"], ["--menu-container-id", "On"],
+    ["--menu-dup-id"], ["--menu-dup-id", "twice"], ["--menu-dup-id", "Same"], ["--expose", "menu=IdOnly"]])
+def test_bad_menu_options_exit_2(args):
+    done = run_exe(*args, "--parse-only")
+    assert done.returncode == 2
+    assert done.stderr.strip()
+
+
+def test_launcher_hands_the_menu_options_to_the_main_process():
+    out = parsed("--expose", "menu=idonly", "--menu-container-id", "off", "--menu-dup-id", "other",
+                 "--splash-ms", "500", "--launcher")
+    main = run_command_line(out["main_command_line"])
+    assert main["expose"]["menu"] == "idonly"
+    assert (main["menu_container_id"], main["menu_dup_id"], main["main"]) == ("off", "other", True)
 
 
 def test_combo_open_defaults_to_arrow_and_accepts_anywhere():

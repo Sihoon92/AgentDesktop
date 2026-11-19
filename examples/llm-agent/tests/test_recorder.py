@@ -13,6 +13,7 @@ from agent import capture
 from agent.desktop import DesktopClient
 from agent.loop import RunResult, run_agent
 from agent.process_identity import process_started_at
+from agent.profile import Profile
 from agent.recorder import RunRecorder
 from agent.task import Task
 from agent.tools import Toolbox
@@ -318,7 +319,7 @@ def test_observation_carries_the_kinds_of_the_whole_tree_even_when_text_is_cut(t
     observation = events(recorder)[0]
     assert observation["text_truncated"] is True
     assert observation["kinds"] == {"named_ref": 1, "unnamed_ref": 0, "unnamed_ref_with_id": 0, "text": 405,
-                                    "blank": 0, "nodes": 407, "depth": 2}
+                                    "blank": 0, "id_only": 0, "nodes": 407, "depth": 2}
     assert observation["complete"] is False
 
 
@@ -1042,6 +1043,28 @@ def test_unknown_ready_status_is_not_written(tmp_path, fields):
     assert "ready" not in run_json(recorder)
 
 
+NEW_COUNTS = {"read": "find", "reads": 31, "failed_reads": 4, "timeouts": 0, "max_read_ms": 7900, "candidates": 2}
+
+
+def test_run_json_ready_takes_the_new_counts(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event(ready_end(**NEW_COUNTS, note=READY_MARK))
+    assert run_json(recorder)["ready"] == {
+        "status": "ready", "waited_s": 12, "switched": True, "read": "find", "polls": 9, "reads": 31,
+        "failed_reads": 4, "timeouts": 0, "max_read_ms": 7900}
+    assert READY_MARK not in (recorder.path / "run.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("fields", [
+    {"reads": -1}, {"reads": "31"}, {"failed_reads": True}, {"timeouts": 1.5}, {"max_read_ms": None},
+    {"read": "fast"}, {"read": None}, {"polls": -2}, {"reads": None, "read": None, "failed_reads": None}])
+def test_a_ready_end_with_a_malformed_count_keeps_the_three_keys(tmp_path, fields):
+    recorder, _, _ = recorded(tmp_path)
+    end = {key: value for key, value in ready_end(**{**NEW_COUNTS, **fields}).items() if value is not None}
+    recorder.on_event(end)
+    assert run_json(recorder)["ready"] == {"status": "ready", "waited_s": 12, "switched": True}
+
+
 def test_run_json_ready_holds_no_text(tmp_path):
     recorder, _, _ = recorded(tmp_path)
     recorder.on_event(ready_end(note=READY_MARK))
@@ -1074,10 +1097,16 @@ def test_a_ready_run_is_recorded_from_the_toolbox_to_the_summary(tmp_path):
     assert [(event["type"], event.get("phase")) for event in recorded_events[:3]] == [
         ("ready", "start"), ("observation", None), ("ready", "end")]
     assert recorded_events[1]["source"] == "ready"
-    assert run_json(recorder)["ready"] == {"status": "ready", "waited_s": 4, "switched": True}
+    ready = run_json(recorder)["ready"]
+    assert {key: ready[key] for key in ("status", "waited_s", "switched")} == {
+        "status": "ready", "waited_s": 4, "switched": True}
+    assert set(ready) == {"status", "waited_s", "switched", "read", "polls", "reads", "failed_reads", "timeouts",
+                          "max_read_ms"}
+    assert (ready["read"], ready["polls"], ready["failed_reads"], ready["timeouts"]) == ("snapshot", 15, 0, 0)
     assert SIGNAL not in (recorder.path / "run.json").read_text(encoding="utf-8")
     summary = summary_of(recorder.path)
-    assert "  준비: ready · 4초 · 대상 바뀜" in summary
+    assert ("  준비: ready · 4초 · snapshot · 확인 15바퀴 · 읽기 15회(실패 0, 시간 초과 0, 최대 0.0초) · 대상 바뀜"
+            in summary)
     assert SIGNAL not in "\n".join(summary)
 
 
@@ -1121,6 +1150,54 @@ def test_observation_elements_keep_mark_and_scope(tmp_path):
     elements = events(recorder)[0]["elements"]
     assert [(e["name"], e["mark"], e["scope"]) for e in elements] == [
         ("목록", 1, None), ("All", 2, 1), ("WA0", 3, 1), ("조회", 4, None)]
+
+
+def test_observation_elements_keep_native_id_in_and_alias(tmp_path):
+    cli = FakeCli()
+    desktop = DesktopClient("ad.exe", "run1", runner=cli)
+    profile = Profile(system="sys", elements=(
+        {"id": "56", "role": "image", "name": "Shipment Plan", "in": {"role": "toolbar", "id": "tb1"}},))
+    recorder = RunRecorder(tmp_path / "runs", desktop, META, now=lambda: NOW, heartbeat_s=60, profile=profile)
+    OPEN_RECORDERS.append(recorder)
+    bounds = {"x": 2000.0, "y": 160.0, "width": 40.0, "height": 24.0}
+    tree = {"role": "window", "name": "창", "children": [
+        {"role": "toolbar", "native_id": {"kind": "automation_id", "value": "tb1"}, "children": [
+            {"role": "image", "native_id": {"kind": "automation_id", "value": "56"}, "bounds": bounds}]},
+        {"role": "statictext", "name": "라벨"}]}
+
+    recorder.on_observation(window_row(), {"ok": True, "data": {"tree": tree}}, "t")
+
+    image, label = events(recorder)[0]["elements"]
+    assert (image["kind"], image["mark"], image["alias"]) == ("id", 1, "Shipment Plan")
+    assert image["native_id"] == {"kind": "automation_id", "value": "56"}
+    assert image["in"] == {"role": "toolbar", "id": "tb1"}
+    assert image["rect"] == {"x": 70.5, "y": 160.5, "width": 40.0, "height": 24.0} and "bounds" not in image
+    assert not {"native_id", "in", "alias"} & set(label)
+
+
+def test_a_recorder_without_a_profile_still_records_id_only_leaves(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    tree = {"role": "window", "name": "창", "children": [
+        {"role": "image", "native_id": {"kind": "automation_id", "value": "56"}}]}
+
+    recorder.on_observation(window_row(), {"ok": True, "data": {"tree": tree}}, "t")
+
+    [image] = events(recorder)[0]["elements"]
+    assert image["kind"] == "id" and image["native_id"]["value"] == "56" and "alias" not in image
+
+
+def test_id_elements_are_not_cut_with_the_text(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    envelope = labels_tree(401)
+    envelope["data"]["tree"]["children"].append(
+        {"role": "image", "native_id": {"kind": "automation_id", "value": "56"}})
+
+    recorder.on_observation(window_row(), envelope, "t")
+
+    observation = events(recorder)[0]
+    assert len([e for e in observation["elements"] if e["kind"] == "text"]) == 400
+    assert observation["elements"][-1]["kind"] == "id" and observation["elements"][-1]["mark"] == 403
+    assert observation["text_truncated"] is True
 
 
 def test_marks_survive_the_text_cut(tmp_path):

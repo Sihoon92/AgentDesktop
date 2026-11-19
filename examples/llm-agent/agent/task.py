@@ -14,6 +14,8 @@ class TaskError(Exception):
 
 @dataclass(frozen=True)
 class Task:
+    """`ready` (ready signal dicts) and `ready_read` ("snapshot" or "find") come from the system
+    profile through agent.systems.apply_ready; they are not task file keys."""
     goal: str
     exe: str
     permission_level: int
@@ -33,6 +35,8 @@ class Task:
     model_source: str = "기본값"
     ready_text: str | None = None
     ready_timeout_s: int = 180
+    ready: tuple = ()
+    ready_read: str = "snapshot"
 
 
 DEFAULT_MODEL = Task.model

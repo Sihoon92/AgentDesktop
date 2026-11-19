@@ -9,6 +9,7 @@ from agent.loop import READY_BRIEFING, run_agent
 from agent.ready import READY_MESSAGES
 from agent.task import Task
 from agent.tools import Toolbox
+from agent.workflow_run import run_workflow
 from tests.ready_support import SIGNAL, FakeClock, FakeWindow, TimelineDesktop, window_tree
 
 EXE = r"C:\Apps\System\Main.exe"
@@ -35,7 +36,9 @@ class RecordingObserver:
         return [event for event in self.events if event.get("type") == "ready"]
 
 
-def task(ready=True, **overrides):
+def task(ready=True, signals=None, **overrides):
+    if signals is not None:
+        overrides["ready"] = tuple(signals)
     if ready:
         overrides.setdefault("ready_text", SIGNAL)
         overrides.setdefault("ready_timeout_s", 60)
@@ -71,7 +74,7 @@ def test_launch_ready_moves_the_target_to_the_ready_window():
     result = toolbox.launch_ready()
     assert result["ok"] is True
     assert result["pid"] == 200
-    assert result["ready"] == {"waited_ms": 4000, "switched": True}
+    assert result["ready"] == {"waited_ms": 4200, "switched": True}
     assert [window["id"] for window in result["windows"]] == ["w-main"]
     assert [window["id"] for window in toolbox.call("list_windows", {})["windows"]] == ["w-main"]
 
@@ -83,14 +86,15 @@ def test_launch_ready_records_events_and_one_ready_observation():
     toolbox.launch_ready()
     start, end = observer.ready_events()
     assert start == {"type": "ready", "phase": "start"}
-    assert set(end) == END_KEYS
-    assert end == {"type": "ready", "phase": "end", "status": "ready", "waited_ms": 4000, "polls": 5,
-                   "switched": True, "running_hint": False}
+    assert set(end) == END_KEYS | NEW_END_KEYS
+    assert end == {"type": "ready", "phase": "end", "status": "ready", "waited_ms": 4200, "polls": 15,
+                   "switched": True, "running_hint": False, "reads": 15, "failed_reads": 0, "timeouts": 0,
+                   "max_read_ms": 0, "candidates": 1, "read": "snapshot"}
     assert [seen["source"] for seen in observer.observations] == ["ready"]
     seen = observer.observations[0]
     assert seen["window"]["id"] == "w-main"
     assert SIGNAL in seen["text"]
-    assert len(desktop.snapshots_of("w-main")) == 3, "the judging read is the observation, not read again"
+    assert len(desktop.snapshots_of("w-main")) == 8, "the judging read is the observation, not read again"
     assert all("--include-bounds" in snapshot for snapshot in desktop.snapshots_of("w-main"))
     assert SIGNAL not in json.dumps(observer.ready_events(), ensure_ascii=False)
 
@@ -267,3 +271,142 @@ def test_baseline_stops_with_the_ready_reason():
     toolbox, _ = toolbox_for(already_running(clock), clock, the_task)
     result = run_baseline(toolbox, the_task)
     assert (result.status, result.steps, result.reason) == ("stopped", 1, READY_MESSAGES["already_running"])
+
+
+# --- system profile (plan task 2, K4, K5) ---
+
+NEW_END_KEYS = {"reads", "failed_reads", "timeouts", "max_read_ms", "candidates", "read"}
+ORDER = "Order Management"
+
+
+def id_signal_desktop(clock):
+    """The main screen in pid 100 whose toolbar (id 12) gets the picture-only item (id 56) at 2 s."""
+    toolbar = {"role": "toolbar", "native_id": {"kind": "automation_id", "value": "12"}, "children": []}
+    filled = {**toolbar, "children": [{"role": "image", "native_id": {"kind": "automation_id", "value": "56"},
+                                       "children": []}]}
+    return TimelineDesktop(clock, [FakeWindow("w-main", 100, title="Main", appear=0.0,
+                                              trees=[(0.0, window_tree("Main") | {"children": [toolbar]}),
+                                                     (2.0, window_tree("Main") | {"children": [filled]})])])
+
+
+def test_a_task_with_only_name_signals_in_ready_waits_before_the_first_call():
+    clock = FakeClock()
+    desktop = splash_then_main(clock)
+    the_task = task(ready=False, signals=({"name": SIGNAL}, {"name": "기준정보"}), ready_timeout_s=60)
+    toolbox, observer = toolbox_for(desktop, clock, the_task)
+    launches_at_first_call = []
+
+    def first_turn(items):
+        launches_at_first_call.append(len(desktop.commands("launch")))
+        return GIVE_UP
+
+    run_agent(ScriptedModel([first_turn]), toolbox, the_task)
+
+    assert launches_at_first_call == [1]
+    assert observer.ready_events()[-1]["status"] == "ready"
+
+
+def test_a_task_with_only_id_signals_waits_before_the_first_call():
+    import pytest
+
+    pytest.importorskip("agent.identity")
+    clock = FakeClock()
+    desktop = id_signal_desktop(clock)
+    the_task = task(ready=False, signals=({"id": "56", "role": "image", "in": {"role": "toolbar", "id": "12"}},),
+                    ready_timeout_s=60)
+    toolbox, observer = toolbox_for(desktop, clock, the_task)
+    launches_at_first_call = []
+
+    def first_turn(items):
+        launches_at_first_call.append(len(desktop.commands("launch")))
+        return GIVE_UP
+
+    run_agent(ScriptedModel([first_turn]), toolbox, the_task)
+
+    assert launches_at_first_call == [1]
+    end = observer.ready_events()[-1]
+    assert (end["status"], end["waited_ms"]) == ("ready", 2100)
+
+
+def test_the_ready_end_event_carries_the_new_counts():
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [FakeWindow("w-main", 100, title="Main", appear=0.0,
+                                                 trees=[(0.0, window_tree("Main")), (1.0, window_tree("Main", *MENUS))])],
+                              snapshot_s=0.5)
+    toolbox, observer = toolbox_for(desktop, clock)
+
+    toolbox.launch_ready()
+
+    end = observer.ready_events()[-1]
+    assert set(end) == END_KEYS | NEW_END_KEYS
+    assert end["read"] == "snapshot"
+    assert end["reads"] == len(desktop.commands("snapshot"))
+    assert (end["failed_reads"], end["timeouts"], end["max_read_ms"], end["candidates"]) == (0, 0, 500, 1)
+    assert all(type(end[key]) is int for key in NEW_END_KEYS - {"read"})
+
+
+def test_launch_ready_reads_the_way_the_task_names():
+    clock = FakeClock()
+    desktop = splash_then_main(clock)
+    the_task = task(ready=False, signals=({"name": SIGNAL},), ready_read="find", ready_timeout_s=60)
+    toolbox, observer = toolbox_for(desktop, clock, the_task)
+
+    result = toolbox.launch_ready()
+
+    assert result["ok"] is True
+    assert desktop.commands("find")
+    end = observer.ready_events()[-1]
+    assert end["read"] == "find" and end["timeouts"] == 0
+    assert SIGNAL not in json.dumps(observer.ready_events(), ensure_ascii=False)
+    assert [seen["source"] for seen in observer.observations] == ["ready"]
+
+
+def test_the_ready_events_hold_no_signal_of_any_kind():
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [FakeWindow("w-main", 100, title="Main", appear=0.0)])
+    the_task = task(ready=False, signals=({"name": ORDER, "role": "button"}, {"id": "7781", "role": "image"}),
+                    ready_timeout_s=2)
+    toolbox, observer = toolbox_for(desktop, clock, the_task)
+
+    toolbox.launch_ready()
+
+    text = json.dumps(observer.ready_events(), ensure_ascii=False)
+    assert ORDER not in text and "7781" not in text and "button" not in text
+
+
+def test_restart_target_waits_for_profile_signals_again():
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [FakeWindow("w-main", 100, title="Main", appear=0.0,
+                                                 trees=[(0.0, window_tree("Main", *MENUS))])])
+    the_task = task(ready=False, signals=({"name": SIGNAL},), ready_timeout_s=5)
+    toolbox, observer = toolbox_for(desktop, clock, the_task)
+    toolbox.launch_ready()
+
+    toolbox.call("restart_target", {})
+
+    assert [event["phase"] for event in observer.ready_events()] == ["start", "end", "start", "end"]
+
+
+def test_baseline_waits_for_profile_signals():
+    clock = FakeClock()
+    desktop = splash_then_main(clock)
+    the_task = task(ready=False, signals=({"name": SIGNAL},), ready_timeout_s=60,
+                    baseline_target={"role": "menuitem", "name": SIGNAL})
+    toolbox, observer = toolbox_for(desktop, clock, the_task)
+
+    run_baseline(toolbox, the_task, timeout_s=1)
+
+    assert [event["phase"] for event in observer.ready_events()] == ["start", "end"]
+    assert observer.observations[0]["source"] == "ready"
+
+
+def test_a_replay_waits_for_profile_signals():
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [FakeWindow("w-main", 100, title="Main", appear=0.0)])
+    the_task = task(ready=False, signals=({"name": SIGNAL},), ready_timeout_s=2)
+    toolbox, observer = toolbox_for(desktop, clock, the_task)
+
+    result = run_workflow(toolbox, the_task, {"id": "w-1", "steps": []}, {})
+
+    assert (result.status, result.reason) == ("stopped", "READY_TIMEOUT")
+    assert [event["phase"] for event in observer.ready_events()] == ["start", "end"]

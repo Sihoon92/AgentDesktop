@@ -1059,3 +1059,198 @@ def test_a_gated_toolbox_is_unchanged(tmp_path):
         assert toolbox.precheck("click_part", part_call(mark=GOOD_MARK, part="center"))["refused_code"] \
             == "blocked_until_question"
         assert toolbox.evidence([GOOD_MARK], None)["refused_code"] == "blocked_until_question"
+
+
+# --- system profile: id and alias in the Toolbox (plan task 4, K6) ---
+
+MENU_BAR = {"role": "toolbar", "id": "12"}
+PLAN_ENTRY = {"id": "60", "role": "image", "in": MENU_BAR, "name": "Execution Plan"}
+BAR_ENTRY = {"id": "12", "role": "toolbar", "name": "Menu bar"}
+SHIP_BOX = {"x": 1010, "y": 530, "width": 40, "height": 20}
+PLAN_BOX = {"x": 1060, "y": 530, "width": 40, "height": 20}
+
+
+def _id_node(role, native, bounds, children=()):
+    return {"role": role, "native_id": {"kind": "automation_id", "value": native}, "bounds": bounds,
+            "children": list(children)}
+
+
+def id_scene(plan_box=PLAN_BOX):
+    """A named button, then toolbar 12 holding picture-only items 56 and 60, and toolbar 13 that
+    reuses id 56. Every item sits left of 1180, so a click on one only moves the focus."""
+    return {"windows": [MAIN], "tree": {"role": "window", "name": "메인", "bounds": MAIN_BOUNDS, "children": [
+        _node("button", "조회", {"x": 1300, "y": 520, "width": 80, "height": 24}, ref_id="@s1:e1",
+              available_actions=["Click"]),
+        _id_node("toolbar", "12", {"x": 1005, "y": 525, "width": 160, "height": 30}, [
+            _id_node("image", "56", dict(SHIP_BOX)), _id_node("image", "60", dict(plan_box))]),
+        _id_node("toolbar", "13", {"x": 1005, "y": 560, "width": 160, "height": 30}, [
+            _id_node("image", "56", {"x": 1010, "y": 565, "width": 40, "height": 20})]),
+    ]}}
+
+
+def menu_profile(*entries):
+    from agent.profile import Profile
+
+    return Profile(system="MES", elements=entries or (PLAN_ENTRY, BAR_ENTRY))
+
+
+def mark_of(toolbox, native, area=None):
+    return next(element["mark"] for element in toolbox.marked_elements()
+                if (element.get("native_id") or {}).get("value") == native
+                and (area is None or element.get("in") == area))
+
+
+def marks_by_line(toolbox):
+    return [(element["mark"], element["role"], (element.get("native_id") or {}).get("value"), element.get("alias"))
+            for element in toolbox.marked_elements()]
+
+
+def test_the_observation_text_shows_id_and_alias_from_the_profile(tmp_path):
+    toolbox, _, _ = toolbox_for(id_scene(), tmp_path, profile=menu_profile())
+
+    observation = toolbox.call("observe", OBSERVE)["observation"]
+
+    assert '[2] toolbar id="12" alias="Menu bar"' in observation
+    assert '[3] image id="56"\n' in observation
+    assert '[4] image id="60" alias="Execution Plan"' in observation
+    assert '[5] image id="56"' in observation
+    assert '[1] button "조회" @s1:e1' in observation and 'id="' not in observation.split("\n")[1]
+
+
+def test_without_a_profile_the_toolbox_shows_ids_but_no_alias(tmp_path):
+    toolbox, _, _ = toolbox_for(id_scene(), tmp_path)
+
+    observation = toolbox.call("observe", OBSERVE)["observation"]
+
+    assert 'image id="60"' in observation and "alias=" not in observation
+    assert 'toolbar id="12"' not in observation, "an unregistered node with children is no element"
+
+
+def test_click_part_presses_an_id_only_element_by_its_mark(tmp_path):
+    toolbox, cli, _ = toolbox_for(id_scene(), tmp_path, profile=menu_profile())
+    mark = mark_of(toolbox, "60")
+
+    result = toolbox.call("click_part", part_call(mark=mark, part="center"))
+
+    assert result["ok"] is True
+    clicks = [words for words in cli.commands() if words[0] == "mouse-click"]
+    assert len(clicks) == 1 and "--xy=1080,540" in clicks[0]
+
+
+def test_click_part_on_an_id_element_needs_permission_level_two(tmp_path):
+    toolbox, cli, _ = toolbox_for(id_scene(), tmp_path, level=1, profile=menu_profile())
+
+    result = toolbox.call("click_part", part_call(mark=mark_of(toolbox, "60"), part="center"))
+
+    assert "refused" in result
+    assert "click_part" not in {tool["name"] for tool in toolbox.definitions()}
+    assert not [words for words in cli.commands() if words[0] == "mouse-click"]
+
+
+def test_the_guard_tells_two_unnamed_id_elements_apart(tmp_path):
+    toolbox, _, _ = toolbox_for(id_scene(), tmp_path, profile=menu_profile())
+    ship, plan = mark_of(toolbox, "56", MENU_BAR), mark_of(toolbox, "60")
+
+    for _ in range(3):
+        assert toolbox.call("click_part", part_call(mark=ship, part="center"))["ok"]
+    assert toolbox.call("click_part", part_call(mark=plan, part="center"))["ok"]
+    with pytest.raises(AgentStopped):
+        toolbox.call("click_part", part_call(mark=ship, part="center"))
+
+
+def test_the_guard_knows_an_id_element_that_moved_in_its_window(tmp_path):
+    """The id, not the spot, names an element without a name: a moved item is the same press."""
+    toolbox, cli, _ = toolbox_for(id_scene(), tmp_path, profile=menu_profile())
+    for left in (1060, 1100, 1140):
+        cli.scene = id_scene({**PLAN_BOX, "x": left})
+        toolbox.call("observe", OBSERVE)
+        assert toolbox.call("click_part", part_call(mark=mark_of(toolbox, "60"), part="center"))["ok"]
+    cli.scene = id_scene({**PLAN_BOX, "x": 1020})
+    toolbox.call("observe", OBSERVE)
+
+    with pytest.raises(AgentStopped):
+        toolbox.call("click_part", part_call(mark=mark_of(toolbox, "60"), part="center"))
+
+
+def test_marked_elements_carry_native_id_in_and_alias(tmp_path):
+    toolbox, _, _ = toolbox_for(id_scene(), tmp_path, profile=menu_profile())
+
+    elements = {element["mark"]: element for element in toolbox.marked_elements()}
+
+    assert elements[4]["native_id"] == {"kind": "automation_id", "value": "60"}
+    assert (elements[4]["in"], elements[4]["alias"], elements[4]["kind"]) == (MENU_BAR, "Execution Plan", "id")
+    assert elements[3]["in"] == MENU_BAR and "alias" not in elements[3]
+    assert elements[5]["in"] == {"role": "toolbar", "id": "13"} and "alias" not in elements[5]
+    assert (elements[2]["alias"], "in" in elements[2]) == ("Menu bar", False)
+    assert not {"native_id", "in", "alias"} & set(elements[1])
+
+
+def test_every_read_uses_the_profile(tmp_path):
+    """observe, the re-read after an action, wait_for_text, observed_trees and the ready window
+    all number the registered toolbar, so a mark means one element everywhere."""
+    toolbox, cli, observer = toolbox_for(id_scene(), tmp_path, profile=menu_profile())
+    expected = marks_by_line(toolbox)
+    assert (2, "toolbar", "12", "Menu bar") in expected
+
+    toolbox.call("click", click_ref("@s1:e1"))
+    after_action = marks_by_line(toolbox)
+    toolbox.call("wait_for_text", {"text": "조회", "timeout_ms": 0})
+    after_wait = marks_by_line(toolbox)
+    list(toolbox.observed_trees(source=None))
+    after_trees = marks_by_line(toolbox)
+
+    assert after_action == after_wait == after_trees == expected
+    assert all('alias="Menu bar"' in text for _window, _envelope, text in observer.observations)
+
+
+def test_the_ready_window_is_read_with_the_profile(tmp_path):
+    cli = FakeCli(scene=id_scene())
+    cli.process_alive = False
+    observer = EventObserver()
+    clock = iter(range(0, 10_000))
+    toolbox = Toolbox(DesktopClient("ad.exe", "run1", runner=cli),
+                      Task("goal", EXE, 2, [], ready_text="조회", ready_timeout_s=30),
+                      confirm=lambda _prompt: True, sleep=lambda _s: None, clock=lambda: next(clock),
+                      observer=observer, captures_dir=tmp_path / "captures", profile=menu_profile())
+
+    assert toolbox.launch_ready()["ok"] is True
+
+    [ready] = [text for (_window, _envelope, text), (source, _wait) in zip(observer.observations, observer.sources)
+               if source == "ready"]
+    assert '[2] toolbar id="12" alias="Menu bar"' in ready
+    assert (2, "toolbar", "12", "Menu bar") in marks_by_line(toolbox)
+
+
+def test_the_state_before_an_action_reads_with_the_profile(tmp_path):
+    """A window last read in part is read again before the action; read without the profile,
+    the registered toolbar would count as added by the press."""
+    toolbox, _, _ = toolbox_for(id_scene(), tmp_path, profile=menu_profile())
+    toolbox.call("observe", {**OBSERVE, "root_ref": "@s1:e1"})
+
+    result = toolbox.call("click", {**click_ref("@s1:e1"), "expect": "any"})
+
+    effects = result["effects"]
+    assert (effects["added"]["count"], effects["removed"]["count"]) == (0, 0)
+
+
+def test_a_click_part_preview_shows_the_alias_but_not_the_id_or_area(tmp_path):
+    toolbox, _, _ = toolbox_for(id_scene(), tmp_path, profile=menu_profile())
+
+    target = toolbox.preview("click_part", part_call(mark=mark_of(toolbox, "60"), part="center"))
+    plain = toolbox.preview("click_part", part_call(mark=mark_of(toolbox, "56", MENU_BAR), part="center"))
+
+    assert (target["role"], target["alias"], target["points"]) == ("image", "Execution Plan", [[1080, 540]])
+    assert not {"native_id", "in"} & set(target)
+    assert "alias" not in plain
+
+
+def test_a_ref_preview_shows_the_alias_of_its_element(tmp_path):
+    scene = id_scene()
+    scene["tree"]["children"][0] = {**_id_node("button", "7001", {"x": 1300, "y": 520, "width": 80, "height": 24}),
+                                    "ref_id": "@s1:e1", "available_actions": ["Click"]}
+    toolbox, _, _ = toolbox_for(scene, tmp_path, profile=menu_profile({"id": "7001", "role": "button", "name": "Run"}))
+
+    target = toolbox.preview("click", click_ref("@s1:e1"))
+
+    assert (target["role"], target["alias"]) == ("button", "Run")
+    assert not {"native_id", "in"} & set(target)

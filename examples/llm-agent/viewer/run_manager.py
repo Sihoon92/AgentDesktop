@@ -15,8 +15,17 @@ finished, as run.py does. workflows() lists a system's saved workflows and start
 replays one with no model: an ungated toolbox, no one to ask and no knowledge, its values
 checked before a run folder exists and again with the real run id, and the outcome counted in
 the store when it ends. Replays share the one-run-at-a-time slot and the stop signal.
+
+Every run reads its system's profile once (agent.profile, folder from profile_dir, the settings'
+profile_dir, AGENT_PROFILE_DIR, else the default), by the knowledge folder's system name, and
+hands it to the ready signals, the recorder and the toolbox, and makes a workflow with ids only
+when the profile says the system's ids stay the same, as run.py does. A profile that fails its
+check refuses the run before anything starts. profile_editor is the registration screen's
+server side (viewer/profile_editor.py); while it reads the screen it holds exclusive(), which
+keeps any run from starting, and a run in progress keeps it from reading.
 """
 
+import contextlib
 import functools
 import threading
 import time
@@ -25,10 +34,13 @@ from pathlib import Path, PureWindowsPath
 from agent.approval import ApprovalGate, Decision
 from agent.ask import Answer, AskGate, NoAsker
 from agent.desktop import DesktopClient, start_session
+from agent.handles import process_window_handles
 from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, system_name
 from agent.llm import ModelSetupError, Models
 from agent.loop import RunResult, run_agent
+from agent.profile import Profile, ProfileError, load_profile, profile_root
 from agent.recorder import RunRecorder
+from agent.shortcut import resolve_shortcut
 from agent.registration import register_after_run
 from agent.summary import current_code, write_summary
 from agent.systems import apply_ready, system_exe, system_names
@@ -39,6 +51,7 @@ from agent.workflow_author import after_run
 from agent.workflow_format import WorkflowError, resolve_values
 from agent.workflow_run import record_outcome, run_workflow
 from agent.workflow_store import WorkflowStore, workflow_root
+from viewer.profile_editor import ProfileEditor
 
 WORKFLOW_RUN = "workflow"
 """started_by and model of a replay in run.json: no model takes part."""
@@ -61,15 +74,21 @@ def decline(_prompt):
     return False
 
 
-def default_toolbox(desktop, task, confirm, observer, asker, knowledge, captures_dir, vision=None):
+def default_toolbox(desktop, task, confirm, observer, asker, knowledge, captures_dir, vision=None, profile=None):
     return Toolbox(desktop, task, confirm=confirm, observer=observer, asker=asker, knowledge=knowledge,
-                   captures_dir=captures_dir, vision=vision)
+                   captures_dir=captures_dir, vision=vision, profile=profile)
 
 
-def default_replay_toolbox(desktop, task, observer, captures_dir):
+def default_replay_toolbox(desktop, task, observer, captures_dir, profile=None):
     """The toolbox of a replay: no question policy or repeat guard, no one to ask, no knowledge."""
     return Toolbox(desktop, task, confirm=decline, observer=observer, asker=NoAsker(), captures_dir=captures_dir,
-                   gated=False)
+                   gated=False, profile=profile)
+
+
+def _profile_options(profile):
+    """{"profile": profile} for a toolbox factory when the system has one, else nothing, so a
+    factory written before profiles is called as it was."""
+    return {} if profile == Profile(system=profile.system) else {"profile": profile}
 
 
 def _split_models(built):
@@ -90,13 +109,15 @@ def _leave_summary(run_dir):
 class RunManager:
     def __init__(self, runs_dir, binary, default_exe, model_factory, toolbox_factory=default_toolbox,
                  desktop_factory=None, gate_factory=ApprovalGate, ask_gate_factory=AskGate, knowledge_dir=None,
-                 task_defaults=None, environ=None, workflow_dir=None, replay_toolbox_factory=default_replay_toolbox):
+                 task_defaults=None, environ=None, workflow_dir=None, replay_toolbox_factory=default_replay_toolbox,
+                 profile_dir=None):
         """task_defaults are the settings file's values that every new run's task starts from; their
         systems give the runs a target by name and their ready signal reaches only the exes they
         name. environ supplies OPENAI_MODEL below them (None reads no env). model_factory(task) returns
         an agent.llm.Models, or a bare text model, and may raise ModelSetupError. The workflow folder
         is workflow_dir, else the settings' workflow_dir, else AGENT_WORKFLOW_DIR from environ, else
-        the default (agent.workflow_store.workflow_root)."""
+        the default (agent.workflow_store.workflow_root); the profile folder follows the same order
+        (agent.profile.profile_root)."""
         self.runs_dir = Path(runs_dir)
         self.binary = str(binary)
         self.default_exe = default_exe
@@ -118,6 +139,41 @@ class RunManager:
         self._replay_toolbox_factory = replay_toolbox_factory
         self.workflow_root = workflow_root(workflow_dir, self._task_defaults.get("workflow_dir"),
                                            {} if environ is None else environ)
+        self.profile_root = profile_root(profile_dir, self._task_defaults.get("profile_dir"),
+                                         {} if environ is None else environ)
+        self._held = False
+        self.profile_editor = ProfileEditor(self._desktop_factory, dict(self._task_defaults.get("systems") or {}),
+                                            self.profile_root)
+
+    @contextlib.contextmanager
+    def exclusive(self):
+        """Holds the one-run slot without a run, for the registration screen's reads: RunBusy when a
+        run is active or the slot is already held, and start() and start_workflow() raise RunBusy
+        while it is held. active() keeps saying None, as only a run id may stand there."""
+        with self._lock:
+            if self._active is not None or self._held:
+                raise RunBusy(f"실행 중인 작업이 있습니다: {self._active or '등록 화면'}")
+            self._held = True
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._held = False
+
+    def _take_slot(self):
+        with self._lock:
+            if self._active is not None:
+                raise RunBusy(f"실행 중인 작업이 있습니다: {self._active}")
+            if self._held:
+                raise RunBusy("등록 화면이 화면을 읽는 중이라 실행을 시작할 수 없습니다")
+            self._active = "starting"
+
+    def _profile(self, system):
+        """The one profile a run of `system` reads, or InvalidRun naming where the file is broken."""
+        try:
+            return load_profile(self.profile_root, system)
+        except ProfileError as error:
+            raise InvalidRun(f"시스템 프로파일을 읽지 못했습니다: {error.reason}") from error
 
     def active(self):
         with self._lock:
@@ -211,14 +267,13 @@ class RunManager:
         `system` the settings file's systems hold picks its exe. `stage_call_limit` is the calls
         each stage gets; None means the settings file's value or the default."""
         exe, system = self._target(exe, system)
-        task = apply_ready(self.build_task(goal, exe, level, stage_call_limit), self._task_defaults)
+        task = self.build_task(goal, exe, level, stage_call_limit)
         if type(approve) is not bool:
             raise InvalidRun("approve는 true 또는 false여야 합니다")
         system = self.build_system(system, task.exe, task.system)
-        with self._lock:
-            if self._active is not None:
-                raise RunBusy(f"실행 중인 작업이 있습니다: {self._active}")
-            self._active = "starting"
+        profile = self._profile(system)
+        task = apply_ready(task, self._task_defaults, profile)
+        self._take_slot()
         try:
             built = self._model_factory(task)
             model, vision = _split_models(built)
@@ -226,7 +281,7 @@ class RunManager:
             if isinstance(built, Models):
                 meta["vision"] = vision is not None
             desktop = self._desktop_factory()
-            recorder = RunRecorder(self.runs_dir, desktop, meta)
+            recorder = RunRecorder(self.runs_dir, desktop, meta, profile=profile)
         except RunStartFailed:
             self._release()
             raise
@@ -241,6 +296,7 @@ class RunManager:
             ask_gate = self._ask_gate_factory(timeout_s=getattr(task, "ask_timeout_s", 1800))
             store = KnowledgeStore(knowledge_root(self._knowledge_dir, task.knowledge_dir), system)
             extra = {} if vision is None else {"vision": vision}
+            extra.update(_profile_options(profile))
             toolbox = self._toolbox_factory(desktop, task, decline, recorder, ask_gate, store, recorder.path / "captures",
                                             **extra)
             register = functools.partial(register_after_run, store=store, run_id=recorder.run_id)
@@ -251,7 +307,8 @@ class RunManager:
             self._release()
             raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
         stop = threading.Event()
-        run = functools.partial(self._run, model, toolbox, task, recorder, (gate, register, stop), workflows)
+        run = functools.partial(self._run, model, toolbox, task, recorder, (gate, register, stop),
+                                (workflows, profile.stable_ids))
         return self._begin(recorder, run, stop, gate=gate, ask_gate=ask_gate)
 
     def _begin(self, recorder, run, stop, gate=None, ask_gate=None):
@@ -287,15 +344,14 @@ class RunManager:
             resolve_values(workflow, values, VALUE_CHECK_RUN_ID)
         except WorkflowError as error:
             raise InvalidRun(f"{error.code}: {error}") from error
-        task = apply_ready(self.build_task(workflow["goal"], exe, workflow["permission_level"]), self._task_defaults)
-        with self._lock:
-            if self._active is not None:
-                raise RunBusy(f"실행 중인 작업이 있습니다: {self._active}")
-            self._active = "starting"
+        profile = self._profile(store.system)
+        task = apply_ready(self.build_task(workflow["goal"], exe, workflow["permission_level"]), self._task_defaults,
+                           profile)
+        self._take_slot()
         try:
             desktop = self._desktop_factory()
             meta = {**self._meta(task, store.system), "model": WORKFLOW_RUN, "started_by": WORKFLOW_RUN}
-            recorder = RunRecorder(self.runs_dir, desktop, meta)
+            recorder = RunRecorder(self.runs_dir, desktop, meta, profile=profile)
         except RunStartFailed:
             self._release()
             raise
@@ -303,7 +359,8 @@ class RunManager:
             self._release()
             raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
         try:
-            toolbox = self._replay_toolbox_factory(desktop, task, recorder, recorder.path / "captures")
+            toolbox = self._replay_toolbox_factory(desktop, task, recorder, recorder.path / "captures",
+                                                   **_profile_options(profile))
         except Exception as error:
             recorder.finish(RunResult("stopped", 0, f"실행을 시작하지 못했습니다: {error}"))
             _leave_summary(recorder.path)
@@ -391,14 +448,16 @@ class RunManager:
         except KnowledgeError as error:
             raise InvalidRun("시스템 이름은 영문, 숫자, 한글, '.', '_', '-'로 64자까지 쓸 수 있습니다") from error
 
-    def _run(self, model, toolbox, task, recorder, hooks, workflows):
+    def _run(self, model, toolbox, task, recorder, hooks, making):
         gate, register, stop = hooks
+        workflows, use_ids = making
         try:
             result = run_agent(model, toolbox, task, recorder.on_event, gate=gate, register=register, stop=stop)
         except Exception as error:
             result = RunResult("stopped", 0, f"실행 중 오류: {type(error).__name__}: {error}")
         try:
-            result = after_run(model, result, recorder.path, workflows, recorder.on_event)
+            result = after_run(model, result, recorder.path, workflows, recorder.on_event,
+                               **({"use_ids": True} if use_ids else {}))
         except Exception:
             pass
         self._end(recorder, result)
@@ -451,7 +510,8 @@ class RunManager:
         session = start_session(self.binary, "llm-agent viewer")
         if session is None:
             raise RunStartFailed("agent-desktop 세션을 시작하지 못했습니다")
-        return DesktopClient(self.binary, session)
+        return DesktopClient(self.binary, session, window_handles=process_window_handles,
+                             read_shortcut=resolve_shortcut)
 
 
 def _listed(workflow):

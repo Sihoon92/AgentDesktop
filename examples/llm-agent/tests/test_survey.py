@@ -7,7 +7,7 @@ import pytest
 from agent.survey import id_keys, kinds
 
 FIXTURES = Path(__file__).parent / "fixtures"
-KIND_KEYS = {"named_ref", "unnamed_ref", "unnamed_ref_with_id", "text", "blank", "nodes", "depth"}
+KIND_KEYS = {"named_ref", "unnamed_ref", "unnamed_ref_with_id", "text", "blank", "id_only", "nodes", "depth"}
 
 
 def snapshot_tree(name):
@@ -30,7 +30,7 @@ def counts(tree):
 def test_kinds_returns_every_contract_key_for_an_empty_window():
     found = kinds({"role": "window"})
     assert set(found) == KIND_KEYS
-    assert found == {"named_ref": 0, "unnamed_ref": 0, "unnamed_ref_with_id": 0, "text": 0, "blank": 0,
+    assert found == {"named_ref": 0, "unnamed_ref": 0, "unnamed_ref_with_id": 0, "text": 0, "blank": 0, "id_only": 0,
                      "nodes": 1, "depth": 1}
 
 
@@ -102,11 +102,11 @@ def test_nodes_and_depth_cover_the_whole_tree():
     "name, expected",
     [
         ("snapshot_virtual_mes_easy.json",
-         {"named_ref": 20, "unnamed_ref": 2, "unnamed_ref_with_id": 2, "text": 2, "blank": 0, "nodes": 31, "depth": 4}),
+         {"named_ref": 20, "unnamed_ref": 2, "unnamed_ref_with_id": 2, "text": 2, "blank": 0, "id_only": 0, "nodes": 31, "depth": 4}),
         ("snapshot_virtual_mes_mes_like.json",
-         {"named_ref": 3, "unnamed_ref": 8, "unnamed_ref_with_id": 8, "text": 12, "blank": 1, "nodes": 30, "depth": 4}),
+         {"named_ref": 3, "unnamed_ref": 8, "unnamed_ref_with_id": 8, "text": 12, "blank": 1, "id_only": 0, "nodes": 30, "depth": 4}),
         ("snapshot_virtual_mes_hard.json",
-         {"named_ref": 1, "unnamed_ref": 2, "unnamed_ref_with_id": 2, "text": 2, "blank": 3, "nodes": 12, "depth": 4}),
+         {"named_ref": 1, "unnamed_ref": 2, "unnamed_ref_with_id": 2, "text": 2, "blank": 3, "id_only": 0, "nodes": 12, "depth": 4}),
     ],
 )
 def test_the_three_practice_profiles_give_their_own_counts(name, expected):
@@ -122,7 +122,7 @@ def test_the_three_practice_profiles_differ_where_exposure_differs():
 
 def test_a_captured_compact_snapshot_without_bounds_has_no_text_or_blank():
     found = kinds(snapshot_tree("snapshot_settings_open.json"))
-    assert found == {"named_ref": 37, "unnamed_ref": 6, "unnamed_ref_with_id": 2, "text": 0, "blank": 0,
+    assert found == {"named_ref": 37, "unnamed_ref": 6, "unnamed_ref_with_id": 2, "text": 0, "blank": 0, "id_only": 0,
                      "nodes": 144, "depth": found["depth"]}
     assert found["depth"] > 5
 
@@ -166,3 +166,28 @@ def test_id_keys_are_the_same_for_the_same_ids_in_a_fresh_snapshot():
     first = snapshot_tree("snapshot_settings_open.json")
     again = json.loads(json.dumps(first).replace("s1fdmvm0ic1pbm", "s9other0000000"))
     assert id_keys(first) == id_keys(again) and len(id_keys(first)) > 10
+
+
+def native(value):
+    return {"kind": "automation_id", "value": value}
+
+
+def test_id_only_counts_nodes_with_an_id_and_a_place_but_no_ref_or_name():
+    tree = window(
+        {"role": "image", "native_id": native("60"), "bounds": box()},
+        {"role": "group", "native_id": native("71"), "bounds": box(), "children": [
+            {"role": "image", "native_id": native("72"), "bounds": box()}]},
+        {"role": "button", "native_id": native("73"), "bounds": box(), "ref_id": "@s:e1"},
+        {"role": "image", "native_id": native("74"), "bounds": box(), "name": "그림"},
+        {"role": "image", "native_id": native("75")},
+        {"role": "image", "native_id": native("76"), "bounds": box(width=0)},
+        {"role": "image", "native_id": native(""), "bounds": box()},
+        {"role": "image", "bounds": box()})
+    tree["native_id"] = native("root")
+
+    found = kinds(tree)
+
+    assert found["id_only"] == 3
+    assert found["blank"] == 4
+    assert {key: found[key] for key in ("named_ref", "unnamed_ref", "unnamed_ref_with_id", "text")} == {
+        "named_ref": 0, "unnamed_ref": 1, "unnamed_ref_with_id": 1, "text": 1}

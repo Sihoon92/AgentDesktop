@@ -737,6 +737,7 @@ pre {
 .knowledge-view[hidden] { display: none; }
 .knowledge-mode .start-form, .knowledge-mode .layout, .knowledge-mode .timeline-bar { display: none; }
 .workflow-mode .start-form, .workflow-mode .layout, .workflow-mode .timeline-bar { display: none; }
+.profile-mode .start-form, .profile-mode .layout, .profile-mode .timeline-bar { display: none; }
 .view-switch button[hidden] { display: none; }
 .knowledge-inner { max-width: 960px; margin: 0 auto; padding: 16px; }
 .knowledge-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 14px; margin-bottom: 4px; }
@@ -959,3 +960,59 @@ pre {
 }
 .closed-cover[hidden] { display: none; }
 .closed-text { max-width: 32em; margin: 0; font-size: 16px; text-align: center; overflow-wrap: anywhere; outline: none; }
+
+/* The registration view (profiles.js). */
+.profile-view .knowledge-inner { max-width: 1400px; }
+/* The picture stays in view while the table and the ready panel scroll past it (sticky inside
+   #profile-view, the scrolling box); a picture taller than the view scrolls inside the stage.
+   Below 1100px the two stack and nothing sticks, so they never overlap. */
+.profile-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(540px, 1fr); gap: 16px; align-items: start; }
+.profile-stage { background: var(--stage-bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+  position: sticky; top: 8px; max-height: calc(100vh - 160px); overflow: auto; }
+@media (max-width: 1100px) {
+  .profile-grid { grid-template-columns: 1fr; }
+  .profile-stage { position: static; max-height: none; overflow: visible; }
+}
+.profile-picture { position: relative; line-height: 0; }
+.profile-picture img { width: 100%; height: auto; display: block; }
+.profile-overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+.profile-box { fill: transparent; stroke: var(--element); stroke-width: 2; vector-effect: non-scaling-stroke; cursor: pointer; }
+.profile-box.text { stroke: var(--text-box); stroke-dasharray: 4 3; }
+.profile-box.id { stroke: var(--proposal); }
+.profile-box.hovered { fill: rgba(242, 183, 5, 0.25); stroke-width: 3; }
+.profile-box.selected { stroke: var(--target); stroke-width: 3; }
+.profile-panel { display: flex; flex-direction: column; gap: 12px; }
+.profile-section { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+.profile-section h3 { margin: 0 0 8px; font-size: 14px; }
+.profile-facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0 0 8px; }
+.profile-facts dt { color: var(--muted); }
+.profile-facts dd { margin: 0; overflow-wrap: anywhere; }
+.profile-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.profile-table th, .profile-table td { border-bottom: 1px solid var(--border); padding: 4px 6px; text-align: left; vertical-align: middle; }
+/* Columns: the cut picture (at most 150px), the element (role · id on one line, its area below,
+   wide enough to keep to those two lines in a 610px panel), the name box wide enough for about
+   twelve Hangul, and a button whose text never wraps. */
+.profile-table input[type="text"] { width: 100%; min-width: 12em; box-sizing: border-box; }
+.profile-table td.profile-name { min-width: 13em; }
+.profile-table td.profile-crop-cell { width: 1%; position: relative; }
+.profile-table td.profile-what { min-width: 10em; overflow-wrap: anywhere; line-height: 1.3; }
+.profile-what span { display: block; }
+.profile-what .profile-area { color: var(--muted); font-size: 12px; }
+.profile-table td.profile-row-action { width: 1%; }
+.profile-table button { white-space: nowrap; }
+.profile-table tr.has-problem td, .profile-signals li.has-problem { background: var(--warn-bg); }
+/* A row's piece is drawn 1:1 (profiles.js) and shown at most 150 by 48, keeping its shape; a
+   piece shrunk that way opens at its own size below it while the pointer is on the row or its
+   name box has the focus (tr.big.zoomed). */
+.profile-crop { max-width: 150px; max-height: 48px; width: auto; height: auto; border: 1px solid var(--border); background: var(--panel-2); display: block; }
+.profile-crop-full { display: none; }
+.profile-table tr.big.zoomed .profile-crop-full { display: block; position: absolute; left: 0; top: calc(100% - 2px); z-index: 5;
+  max-width: min(640px, 80vw); border: 1px solid var(--border); background: var(--panel-2); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3); }
+.profile-read-mode.differs select { outline: 2px solid var(--warn); outline-offset: 1px; }
+.profile-advice[hidden] { display: none; }
+.profile-action-message { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.profile-problem { display: block; color: var(--bad); font-size: 12px; }
+.profile-signals { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.profile-signals li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 4px; border-radius: 4px; }
+.profile-check { display: flex; gap: 6px; align-items: center; margin: 8px 0; }
+.profile-actions { display: flex; gap: 8px; margin-top: 8px; }

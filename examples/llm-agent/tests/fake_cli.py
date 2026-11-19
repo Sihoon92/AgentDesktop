@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from agent.frames import frame_origin
+from agent.identity import is_leaf, native_value
 
 try:
     from PIL import Image
@@ -60,8 +61,13 @@ def scene_window(window_id, title, bounds, **extra):
 
 
 def _is_element(node, is_window_root):
+    """agent.observe's element rule without a profile: a ref, text below the root window, or an
+    id-only leaf that is not a window."""
     has_text = any(node.get(key) for key in ("name", "description", "value"))
-    return bool(node.get("ref_id") or (has_text and not is_window_root))
+    if node.get("ref_id") or (has_text and not is_window_root):
+        return True
+    id_only_leaf = native_value(node) is not None and not has_text and is_leaf(node)
+    return id_only_leaf and node.get("role") != "window"
 
 
 def _marked_nodes(tree):

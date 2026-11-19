@@ -21,6 +21,11 @@ namespace VirtualMesApp
         internal const int DefaultSeed = 20261112;
         internal const string ComboAnywhere = "anywhere";
         internal const string ComboArrow = "arrow";
+        internal const string MenuContainerOn = "on";
+        internal const string MenuContainerOff = "off";
+        internal const string MenuDupNone = "none";
+        internal const string MenuDupSame = "same";
+        internal const string MenuDupOther = "other";
 
         internal string Profile = Exposures.DefaultProfile;
         internal Dictionary<UiRegion, Exposure> Expose;
@@ -62,6 +67,24 @@ namespace VirtualMesApp
         /// MES), or anywhere on the box (the behaviour before the arrow became the default).
         /// </summary>
         internal string ComboOpen = ComboArrow;
+
+        /// <summary>
+        /// Whether the areas that hold the menu items (the menu bar, the menu list and the
+        /// duplicate's strip) carry an AutomationId: on (the default) or off.
+        /// </summary>
+        internal string MenuContainerId = MenuContainerOn;
+
+        /// <summary>
+        /// A second element with the AutomationId of the first menu item: none (the default),
+        /// same (the second menu item, in the same menu bar) or other (one element in its own
+        /// strip under the menu bar, so only the holding area tells the two apart).
+        /// </summary>
+        internal string MenuDupId = MenuDupNone;
+
+        internal bool MenuContainerIds
+        {
+            get { return this.MenuContainerId == MenuContainerOn; }
+        }
 
         /// <summary>
         /// Parses the command line. With no arguments at all, the first line of
@@ -132,6 +155,16 @@ namespace VirtualMesApp
                 {
                     options.ComboOpen = ComboOpenValue(Value(args, ref index, flag));
                 }
+                else if (flag == "--menu-container-id")
+                {
+                    options.MenuContainerId = OneOf(
+                        Value(args, ref index, flag), flag, MenuContainerOn, MenuContainerOff);
+                }
+                else if (flag == "--menu-dup-id")
+                {
+                    options.MenuDupId = OneOf(
+                        Value(args, ref index, flag), flag, MenuDupNone, MenuDupSame, MenuDupOther);
+                }
                 else if (flag == "--log")
                 {
                     options.LogPath = Value(args, ref index, flag);
@@ -198,6 +231,8 @@ namespace VirtualMesApp
             root["delay_ms"] = this.DelayMs.HasValue ? (object)this.DelayMs.Value : null;
             root["log"] = this.LogPath;
             root["combo_open"] = this.ComboOpen;
+            root["menu_container_id"] = this.MenuContainerId;
+            root["menu_dup_id"] = this.MenuDupId;
             root["splash_ms"] = this.SplashMs.HasValue ? (object)this.SplashMs.Value : null;
             root["launcher"] = this.Launcher;
             root["single_instance"] = this.SingleInstance;
@@ -274,6 +309,16 @@ namespace VirtualMesApp
             return text;
         }
 
+        private static string OneOf(string text, string flag, params string[] allowed)
+        {
+            if (Array.IndexOf(allowed, text) < 0)
+            {
+                throw new OptionsException(
+                    flag + " is " + string.Join(", ", allowed) + ", got: " + text);
+            }
+            return text;
+        }
+
         private static int Integer(string text, string flag)
         {
             int value;
@@ -312,7 +357,8 @@ namespace VirtualMesApp
                 }
                 if (!Exposures.TryParseExposure(parts[1], out exposure))
                 {
-                    throw new OptionsException("Unknown mode: " + parts[1] + ". Use ref, text, bare or pixel.");
+                    throw new OptionsException(
+                        "Unknown mode: " + parts[1] + ". Use ref, text, bare, idonly or pixel.");
                 }
                 if (!Exposures.IsAllowed(region, exposure))
                 {

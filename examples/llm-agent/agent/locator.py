@@ -7,8 +7,15 @@ column. Position comes from `rect` (a recorded picture) or `bounds` (the live sc
 rows and columns are judged by how much two boxes overlap relative to their own size,
 so the same locator finds the same element at another scale or window position.
 
+With use_ids (a system whose ids stay the same when it restarts), the element's native id
+and, when it sits in one, its area (agent.identity) are added to the role, name and
+description: an id never stands in for a name. A locator without "id" or "in" does not look
+at ids, so workflows saved before ids were written find what they found.
+
 `find` never guesses: it returns every element that fits, and choosing is the caller's.
 """
+
+from agent.identity import container_key, native_value
 
 ROW = "same_row"
 COLUMN = "same_column"
@@ -51,19 +58,22 @@ def new_windows(before, after):
     return [window for window in window_elements(after) if _window_key(after, window) not in seen]
 
 
-def describe(scoped, mark, avoid=()):
+def describe(scoped, mark, avoid=(), use_ids=False):
     """The locator, without its scope, that finds exactly the element numbered `mark`.
 
     Names in `avoid` are never used as the anchor: text that changes from run to run,
     such as the current value beside a label, would not be there to find next time.
+    With use_ids, the element's id and area are part of what it is written as, except an area
+    named by a name in `avoid`: it would not be there under another value.
     """
     target = next((e for e in scoped if e.get("mark") == mark), None)
     if target is None:
         raise LocatorError("the target is not in this scope")
-    locator = _identity(target)
+    avoided = {_text(name) for name in avoid} - {None}
+    locator = _identity(target, use_ids, avoided)
     if _only(find(scoped, locator), target):
         return locator
-    for near in _anchors(scoped, target, {_text(name) for name in avoid} - {None}):
+    for near in _anchors(scoped, target, locator, avoided):
         anchored = {**locator, "near": near}
         if _only(find(scoped, anchored), target):
             return anchored
@@ -71,13 +81,17 @@ def describe(scoped, mark, avoid=()):
 
 
 def find(scoped, locator, name=None):
-    """Every element of `scoped` that fits `locator`. `name` replaces the locator's name."""
+    """Every element of `scoped` that fits `locator`. `name` replaces the locator's name. An "id"
+    must be the element's native id letter for letter, and an "in" the element's area."""
     wanted = _text(name if name is not None else locator.get("name"))
     matches = [
         e for e in scoped
         if e.get("role") == locator.get("role")
         and _text(e.get("name")) == wanted
         and _text(e.get("description")) == _text(locator.get("description"))
+        and ("id" not in locator or native_value(e) == locator["id"])
+        and ("in" not in locator or (container_key(e.get("in")) is not None
+                                     and container_key(e.get("in")) == container_key(locator["in"])))
     ]
     near = locator.get("near")
     if not near:
@@ -102,8 +116,9 @@ def box(element):
     return _box(element)
 
 
-def _anchors(scoped, target, avoided):
-    """Row anchors first, then column anchors, each nearest first."""
+def _anchors(scoped, target, identity, avoided):
+    """Row anchors first, then column anchors, each nearest first. The n-th is counted among
+    the elements that fit `identity`, as find counts it."""
     box = _box(target)
     if box is None:
         return []
@@ -113,7 +128,7 @@ def _anchors(scoped, target, avoided):
         if name is not None and name not in avoided and names.count(name) == 1 and e is not target
         and _box(e) is not None
     ]
-    matches = find(scoped, _identity(target))
+    matches = find(scoped, identity)
     nears = []
     for relation in (ROW, COLUMN):
         axis = _axis(relation)
@@ -127,11 +142,17 @@ def _anchors(scoped, target, avoided):
     return nears
 
 
-def _identity(element):
+def _identity(element, use_ids=False, avoided=frozenset()):
     locator = {"role": element.get("role")}
     for key in ("name", "description"):
         if _text(element.get(key)) is not None:
             locator[key] = _text(element.get(key))
+    native = native_value(element) if use_ids else None
+    if native is not None:
+        locator["id"] = native
+        area = element.get("in")
+        if container_key(area) is not None and ("id" in area or _text(area.get("name")) not in avoided):
+            locator["in"] = {key: area[key] for key in ("role", "id", "name") if key in area}
     return locator
 
 

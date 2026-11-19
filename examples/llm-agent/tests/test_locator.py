@@ -386,3 +386,165 @@ def test_box_reads_rect_or_bounds_and_refuses_no_area():
     assert box({"rect": {"x": 1, "y": 2, "width": 0, "height": 4}}) is None
     assert box({"rect": None}) is None
     assert box({}) is None
+
+
+TOOLBAR = {"role": "toolbar", "id": "12"}
+
+
+def ided(mark, role, native, name=None, box=(0, 0, 10, 10), area=None, **extra):
+    """An element as an observation records it with a native id (plan K3): native_id as
+    {"kind", "value"} and, when it sits in one, its area as "in"."""
+    element = el(mark, role, name, box, **extra)
+    element["native_id"] = {"kind": "automation_id", "value": native}
+    if area is not None:
+        element["in"] = area
+    return element
+
+
+def picture_menu():
+    """Two menu items drawn as pictures: no name, no text near them, an id each, one toolbar."""
+    return [
+        ided(1, "toolbar", "12", box=(0, 0, 400, 40)),
+        ided(2, "image", "56", box=(10, 5, 30, 30), area=TOOLBAR),
+        ided(3, "image", "60", box=(50, 5, 30, 30), area=TOOLBAR),
+    ]
+
+
+def test_describe_adds_id_and_in_on_top_of_the_name():
+    elements = [ided(1, "button", "7001", "조회", area=TOOLBAR), el(2, "button", "저장")]
+
+    assert describe(elements, 1, use_ids=True) == {"role": "button", "name": "조회", "id": "7001", "in": TOOLBAR}
+
+
+def test_describe_without_use_ids_is_what_it_was():
+    elements = [ided(1, "button", "7001", "조회", area=TOOLBAR), el(2, "button", "저장")]
+
+    assert describe(elements, 1) == {"role": "button", "name": "조회"}
+    assert describe(elements, 1, use_ids=False) == {"role": "button", "name": "조회"}
+
+
+def test_describe_with_use_ids_on_a_record_without_ids_is_what_it_was():
+    """An observation recorded before native ids were kept makes the same locator, not an error."""
+    elements = form()
+
+    for element in elements:
+        if element["role"] == "window" or element["scope"] is not None:
+            continue
+        try:
+            plain = describe(in_scope(elements, None), element["mark"])
+        except LocatorError:
+            with pytest.raises(LocatorError):
+                describe(in_scope(elements, None), element["mark"], use_ids=True)
+            continue
+        assert describe(in_scope(elements, None), element["mark"], use_ids=True) == plain
+
+
+def test_an_element_without_an_area_gets_no_in():
+    elements = [ided(1, "button", "7001", "조회")]
+
+    assert describe(elements, 1, use_ids=True) == {"role": "button", "name": "조회", "id": "7001"}
+
+
+def test_an_area_named_by_its_name_is_written_as_it_is():
+    area = {"role": "pane", "name": "메뉴"}
+
+    assert describe([ided(1, "image", "56", area=area)], 1, use_ids=True) == {"role": "image", "id": "56", "in": area}
+
+
+def test_describe_tells_picture_only_items_apart_by_id():
+    elements = picture_menu()
+
+    assert describe(elements, 2, use_ids=True) == {"role": "image", "id": "56", "in": TOOLBAR}
+    assert describe(elements, 3, use_ids=True) == {"role": "image", "id": "60", "in": TOOLBAR}
+    with pytest.raises(LocatorError):
+        describe(elements, 2)
+
+
+def test_find_needs_the_id_and_the_container_a_locator_writes():
+    other = {"role": "toolbar", "id": "13"}
+    elements = [ided(1, "image", "56", area=TOOLBAR), ided(2, "image", "56", area=other),
+                ided(3, "image", "56"), ided(4, "image", "60", area=TOOLBAR)]
+
+    assert marks(find(elements, {"role": "image", "id": "56", "in": TOOLBAR})) == [1]
+    assert marks(find(elements, {"role": "image", "id": "56", "in": other})) == [2]
+    assert marks(find(elements, {"role": "image", "id": "56"})) == [1, 2, 3]
+    assert marks(find(elements, {"role": "image", "id": "56", "in": {"role": "toolbar", "name": "12"}})) == []
+    assert marks(find(elements, {"role": "button", "id": "56"})) == []
+
+
+def test_find_with_an_id_still_needs_the_name():
+    elements = [ided(1, "button", "7001", "조회"), ided(2, "button", "7001")]
+
+    assert marks(find(elements, {"role": "button", "name": "검색", "id": "7001"})) == []
+    assert marks(find(elements, {"role": "button", "name": "조회", "id": "7001"})) == [1]
+    assert marks(find(elements, {"role": "button", "id": "7001"})) == [2]
+
+
+def test_find_compares_ids_letter_for_letter():
+    elements = [ided(1, "image", "56"), ided(2, "image", "056")]
+
+    assert marks(find(elements, {"role": "image", "id": "56"})) == [1]
+
+
+def test_find_without_an_id_does_not_look_at_ids():
+    """A workflow saved before ids were written finds the same elements as before."""
+    elements = [ided(1, "button", "7001", "조회", area=TOOLBAR), el(2, "button", "조회")]
+
+    assert marks(find(elements, {"role": "button", "name": "조회"})) == [1, 2]
+
+
+def test_find_reads_a_native_id_given_as_text():
+    elements = [{**el(1, "image"), "native_id": "56"}]
+
+    assert marks(find(elements, {"role": "image", "id": "56"})) == [1]
+
+
+def test_find_after_describe_gives_only_the_target_with_ids():
+    elements = [
+        ided(1, "statictext", "l1", "Shop", (10, 200, 60, 30)),
+        ided(2, "button", "pick", None, (100, 200, 30, 30), area=TOOLBAR),
+        ided(3, "button", "pick", None, (150, 200, 30, 30), area=TOOLBAR),
+        ided(4, "button", "clear", None, (200, 200, 30, 30), area=TOOLBAR),
+        *picture_menu()[1:],
+        el(7, "button", "조회(F5)", (500, 100, 80, 30)),
+    ]
+    elements[4]["mark"], elements[5]["mark"] = 5, 6
+
+    for element in elements:
+        locator = describe(elements, element["mark"], use_ids=True)
+        assert find(elements, locator) == [element], locator
+
+
+def test_the_anchor_counts_among_the_elements_that_share_the_id():
+    """near's n-th is counted among the elements with the same role, name, description, id and
+    area, the way find counts it: here the third button in the row is the second with id "a"."""
+    elements = [
+        el(1, "statictext", "Shop", (10, 200, 60, 30)),
+        ided(2, "button", "a", None, (100, 200, 30, 30)),
+        ided(3, "button", "b", None, (150, 200, 30, 30)),
+        ided(4, "button", "a", None, (200, 200, 30, 30)),
+    ]
+
+    locator = describe(elements, 4, use_ids=True)
+
+    assert locator == {"role": "button", "id": "a", "near": {"name": "Shop", "relation": "same_row", "nth": 2}}
+    assert find(elements, locator) == [elements[3]]
+    assert describe(elements, 4) == {"role": "button", "near": {"name": "Shop", "relation": "same_row", "nth": 3}}
+
+
+def test_an_area_named_by_an_avoided_name_is_not_written():
+    """An area named by text that changes (a date, a count) would not be there for another run:
+    the id is written without it, and near is added when the id alone is not enough."""
+    dated = {"role": "pane", "name": "2026-11-19 3건"}
+    elements = [ided(1, "image", "56", box=(10, 5, 30, 30), area=dated),
+                ided(2, "image", "60", box=(50, 5, 30, 30), area=TOOLBAR)]
+
+    assert describe(elements, 1, avoid=[" 2026-11-19 3건 "], use_ids=True) == {"role": "image", "id": "56"}
+    assert describe(elements, 1, use_ids=True) == {"role": "image", "id": "56", "in": dated}
+    assert describe(elements, 2, avoid=["12"], use_ids=True) == {"role": "image", "id": "60", "in": TOOLBAR}
+
+    twins = [el(1, "statictext", "Shop", (10, 200, 60, 30)),
+             ided(2, "button", "a", None, (100, 200, 30, 30), area=dated),
+             ided(3, "button", "a", None, (150, 200, 30, 30), area={"role": "pane", "name": "어제"})]
+    assert describe(twins, 2, avoid=["2026-11-19 3건"], use_ids=True) == {
+        "role": "button", "id": "a", "near": {"name": "Shop", "relation": "same_row", "nth": 1}}

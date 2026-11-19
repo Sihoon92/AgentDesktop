@@ -950,3 +950,106 @@ def test_single_instance_does_not_block_a_copy_in_another_folder(tmp_path):
             second.cli("launch", second.exe)
             assert wait_for_logged(second.log, "main_started", timeout_s=30)["by"] == "launcher"
             assert "launcher_skipped" not in logged(second)
+
+
+MENU_BAR_IDS = ["8001", "8002", "8003", "8004", "8005"]
+MENU_LIST_IDS = ["8101", "8102", "8103", "8104", "8105", "8106"]
+MENU_BAR = {"role": "group", "id": "8000"}
+MENU_LIST = {"role": "group", "id": "8100"}
+MENU_OTHER = {"role": "group", "id": "8200"}
+
+
+def menu_items(app, window, ids):
+    return [n for n in app.placed_nodes(window) if n.get("id") in ids]
+
+
+def production_list(app, before, timeout_s=10):
+    """Waits for the 생산운영 list window and its six entries, and returns the entries."""
+    assert app.wait_for_event("menu_opened")["category"] == "생산운영"
+    app.wait_for_windows(before + 1)
+    window = app.window_titled("메뉴 목록")
+    deadline = time.monotonic() + timeout_s
+    while True:
+        listed = menu_items(app, window, MENU_LIST_IDS)
+        if len(listed) == len(MENU_LIST_IDS) or time.monotonic() > deadline:
+            return listed
+        time.sleep(0.2)
+
+
+def open_production_list(app, item):
+    """Opens the 생산운영 list from its menu item with the real mouse and returns its entries."""
+    before = len(app.windows())
+    app.click_at_center(item)
+    return production_list(app, before)
+
+
+def test_idonly_menu_items_have_a_fixed_id_no_name_and_no_ref(tmp_path):
+    with LiveApp(tmp_path, "--expose", "menu=idonly") as app:
+        main = app.main()
+        items = menu_items(app, main, MENU_BAR_IDS)
+        assert [n["id"] for n in items] == MENU_BAR_IDS
+        assert all(n["role"] == "image" and "name" not in n and "ref" not in n and n.get("bounds") for n in items)
+        assert all(n["in"] == MENU_BAR for n in items)
+        assert "생산운영" not in names(app, main)
+
+
+def test_menu_ids_survive_a_restart(tmp_path):
+    seen = []
+    for run in ("first", "second"):
+        with LiveApp(tmp_path / run, "--expose", "menu=bare") as app:
+            bar = menu_items(app, app.main(), MENU_BAR_IDS)
+            assert all(n["role"] == "button" and "name" not in n and n.get("ref") for n in bar)
+            before = len(app.windows())
+            app.click(next(n for n in bar if n["id"] == "8002")["ref"])
+            listed = production_list(app, before)
+            assert all(n["role"] == "button" and "name" not in n and n.get("ref") for n in listed)
+            assert all(n["in"] == MENU_LIST for n in listed)
+            seen.append(([(n["id"], n["in"]) for n in bar], [n["id"] for n in listed]))
+    assert seen[0] == seen[1]
+    assert seen[0] == ([(number, MENU_BAR) for number in MENU_BAR_IDS], MENU_LIST_IDS)
+
+
+def test_a_real_click_on_an_idonly_menu_item_opens_its_list(tmp_path):
+    with LiveApp(tmp_path, "--expose", "menu=idonly") as app:
+        production = next(n for n in menu_items(app, app.main(), MENU_BAR_IDS) if n["id"] == "8002")
+        listed = open_production_list(app, production)
+        assert [n["id"] for n in listed] == MENU_LIST_IDS
+        assert all(n["role"] == "image" and "name" not in n and "ref" not in n for n in listed)
+        assert all(n["in"] == MENU_LIST for n in listed)
+        app.click_at_center(listed[0])
+        assert app.wait_for_event("screen_opened")["screen"] == "front-process"
+
+
+def test_dup_id_other_puts_the_same_role_and_id_in_another_container(tmp_path):
+    with LiveApp(tmp_path, "--expose", "menu=idonly", "--menu-dup-id", "other") as app:
+        twins = [n for n in app.placed_nodes(app.main()) if n.get("id") == "8001"]
+        assert len(twins) == 2
+        assert {n["role"] for n in twins} == {"image"}
+        assert sorted(n["in"]["id"] for n in twins) == ["8000", "8200"]
+        assert [n for n in twins if n["in"] == MENU_OTHER]
+
+
+def test_dup_id_same_gives_the_first_two_menu_items_one_id(tmp_path):
+    with LiveApp(tmp_path, "--expose", "menu=bare", "--menu-dup-id", "same") as app:
+        bar = [n for n in app.placed_nodes(app.main()) if n.get("in") == MENU_BAR and n.get("role") == "button"]
+        assert [n["id"] for n in bar] == ["8001", "8001", "8003", "8004", "8005"]
+        app.click_at_center(bar[1])
+        assert app.wait_for_event("menu_opened")["category"] == "생산운영"
+
+
+def test_menu_container_id_off_leaves_the_menu_items_with_no_container(tmp_path):
+    with LiveApp(tmp_path, "--expose", "menu=idonly", "--menu-container-id", "off") as app:
+        main = app.main()
+        items = menu_items(app, main, MENU_BAR_IDS)
+        assert [n["id"] for n in items] == MENU_BAR_IDS
+        assert all(n["in"] is None for n in items)
+        assert not [n for n in app.placed_nodes(main) if n.get("id") == "8000"]
+        listed = open_production_list(app, items[1])
+        assert [n["id"] for n in listed] == MENU_LIST_IDS and all(n["in"] is None for n in listed)
+
+
+def test_ref_menu_keeps_its_names_and_ids_and_its_bar_gets_a_container_id(tmp_path):
+    with LiveApp(tmp_path) as app:
+        bar = [n for n in app.placed_nodes(app.main()) if (n.get("id") or "").startswith("menu-")]
+        assert [n["name"] for n in bar] == ["기준정보", "생산운영", "품질관리", "설비관리", "자재관리"]
+        assert all(n.get("ref") and n["in"] == MENU_BAR for n in bar)

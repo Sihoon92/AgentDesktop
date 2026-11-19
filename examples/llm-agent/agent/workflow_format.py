@@ -1,7 +1,8 @@
 """The workflow file: what a replay runs, checked before it is saved and again when it is read.
 
 A workflow names its targets by window scope, role, name, description and a named
-neighbour (agent/locator.py), never by coordinates, refs or window ids. Only the keys
+neighbour (agent/locator.py), never by coordinates, refs or window ids. A system whose ids
+stay the same adds the target's native id ("id") and its area ("in", only with "id"). Only the keys
 below are accepted, so a hand edit that adds a coordinate or misspells a key is refused
 instead of replayed. Error messages say which step and which key, never the value: the
 values are screen text and paths, and the messages reach the terminal and the viewer.
@@ -35,7 +36,8 @@ ACT_KEYS = ("n", "goal", "do", "tool", "args", "target", "value", "expect", "clo
 ACT_REQUIRED = ("n", "goal", "do", "tool", "target")
 SELECT_KEYS = ("n", "goal", "do", "scope", "all", "item_role", "items")
 CHECK_FILE_KEYS = ("n", "goal", "do", "path")
-LOCATOR_KEYS = ("role", "name", "description", "near")
+LOCATOR_KEYS = ("role", "name", "description", "id", "in", "near")
+AREA_SHAPES = ({"role", "id"}, {"role", "name"})
 NEAR_KEYS = ("name", "relation", "nth")
 SCOPE_KEYS = ("opened_by", "top")
 ARGS_KEYS = {"click_part": ("part", "action"), "press": ("combo",)}
@@ -355,6 +357,10 @@ def _check_locator(locator, where, name_may_be_param):
             uses.append((name, "name"))
     if "description" in locator:
         _require_text(locator["description"], f"{where}.description")
+    if "id" in locator:
+        _check_id(locator, where)
+    elif "in" in locator:
+        _invalid(f"{where}.in", "id가 있을 때만 쓸 수 있습니다")
     if "near" in locator:
         near = locator["near"]
         if not isinstance(near, dict):
@@ -366,6 +372,23 @@ def _check_locator(locator, where, name_may_be_param):
         if type(near["nth"]) is not int or near["nth"] < 1:
             _invalid(f"{where}.near.nth", "1 이상의 정수여야 합니다")
     return uses
+
+
+def _check_id(locator, where):
+    """A target's own id (not the workflow's): non-empty text, not a parameter, and never on a
+    target whose name is a parameter, which must find another element for another value."""
+    _require_text(locator["id"], f"{where}.id")
+    if param_name(locator["id"]):
+        _invalid(f"{where}.id", "여기에는 파라미터를 쓸 수 없습니다")
+    if param_name(locator.get("name")):
+        _invalid(f"{where}.id", "이름이 파라미터인 대상에는 id를 쓸 수 없습니다")
+    if "in" not in locator:
+        return
+    area = locator["in"]
+    if not isinstance(area, dict) or set(area) not in AREA_SHAPES:
+        _invalid(f"{where}.in", "role과 id, 또는 role과 name이어야 합니다")
+    for key in area:
+        _require_text(area[key], f"{where}.in.{key}")
 
 
 def _param_ref(value, where):

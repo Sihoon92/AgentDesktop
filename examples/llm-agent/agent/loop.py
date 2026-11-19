@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 
 from agent.guard import AgentStopped
 from agent.history import Transcript
+from agent.ready import signals
 from agent.results import refused
 from agent.stages import StageError, StagePlan
 from agent.tool_schemas import READ_ONLY_TOOLS
@@ -28,6 +29,11 @@ Rules:
 - Refs are valid only for the latest observation. Each action returns a new observation; use its refs.
 - A line that starts with [n] is an element numbered n. The numbers are valid only for the
   observation they appear in, like refs. Elements without a ref have a number too.
+- id="..." on an element without a name is a value the app gives that element. Use it to tell
+  unnamed elements apart; it is not a name, and you never press anything by it.
+- alias="..." is a name an administrator gave an element whose label is drawn only as a picture.
+  Read it as that element's name. If it seems not to match what the screen shows, do not trust it:
+  check with look, or ask the user. An element without a ref is pressed with click_part on its number.
 - An element's desc often explains it better than its name.
 - After you launch the target and observe the first screen, call plan to split the goal into
   stages. Write each stage as a result the screen shows: goal is the state of the screen when the
@@ -200,7 +206,7 @@ class _Run:
         self._vision_tokens = 0
 
     def run(self):
-        ready = self._toolbox.launch_ready(cancelled=self._stopped) if self._task.ready_text else None
+        ready = self._toolbox.launch_ready(cancelled=self._stopped) if signals(self._task) else None
         if ready is not None and not ready.get("ok"):
             result = self._result("stopped", ready["message"])
         else:

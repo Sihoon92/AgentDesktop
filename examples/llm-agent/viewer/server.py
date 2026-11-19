@@ -8,6 +8,9 @@ is touched, so a request can never name a path outside the runs folder.
 On Windows the port is held exclusively, so a second viewer on the same port fails to open
 instead of sharing it with an old one. Only a server made with allow_shutdown (view.py) can be
 shut down from the browser; it answers first and winds the run down on another thread.
+The registration screen's routes (/api/profile) go to the run manager's profile_editor; launching,
+listing and reading the target hold the manager's one-run slot, so they answer 409 while a run is
+active and no run starts while they read. Their answers never carry an exe path.
 """
 
 import hmac
@@ -25,6 +28,7 @@ from agent.knowledge import KnowledgeError, KnowledgeStore, list_systems
 from agent.summary import summary_of
 from viewer import history
 from viewer.history import BadQuery, RunIndex, is_run_id, parse_query
+from viewer.profile_editor import EditorError
 from viewer.run_manager import InvalidRun, RunBusy, RunStartFailed
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -43,6 +47,8 @@ MAX_ANSWER_ITEMS = 50
 KNOWLEDGE_NAME = re.compile(r"[A-Za-z0-9가-힣._-]{1,64}")
 ITEM_DECISIONS = ("approve", "edit", "reject")
 SHUTDOWN_WAIT_S = 120
+PROFILE_ACTIONS = ("launch", "windows", "read", "check", "save")
+NO_REGISTRATION = "이 뷰어는 실행을 관리하지 않아 등록 화면을 쓸 수 없습니다"
 PAGE_POLICY = "default-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
 
@@ -135,6 +141,11 @@ def read_events(events_path, since):
     return events, max(len(lines), since)
 
 
+def _profile_editor(manager):
+    """The registration screen's editor of a manager that has one, else None."""
+    return getattr(manager, "profile_editor", None) if manager is not None else None
+
+
 def _system_choices(manager):
     """(system names, default choice) for the start form. Only names are sent, never their exe
     paths; a manager from before systems existed has neither, which reads as no list."""
@@ -216,6 +227,10 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_systems()
         if segments == ["api", "workflows"]:
             return self._send_workflows(query)
+        if segments == ["api", "profile"]:
+            return self._profile_get(query)
+        if len(segments) == 4 and segments[:3] == ["api", "profile", "shots"]:
+            return self._send_profile_shot(segments[3])
         if len(segments) == 3 and segments[:2] == ["api", "knowledge"]:
             return self._send_knowledge(segments[2])
         if len(segments) == 3 and segments[:2] == ["api", "runs"]:
@@ -241,6 +256,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._start_run()
         if segments == ["api", "shutdown"]:
             return self._shutdown()
+        if len(segments) == 3 and segments[:2] == ["api", "profile"] and segments[2] in PROFILE_ACTIONS:
+            return self._profile_post(segments[2])
         if len(segments) == 4 and segments[:2] == ["api", "workflows"] and segments[3] == "run":
             return self._start_workflow(segments[2])
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "stop":
@@ -435,14 +452,15 @@ class ViewerHandler(BaseHTTPRequestHandler):
         if manager is None:
             return {"can_start": False, "active": None, "default_exe": None, "can_answer": False,
                     "default_system": None, "default_stage_call_limit": None, "systems": [], "default_choice": None,
-                    "can_shutdown": can_shutdown, "stopping": False}
+                    "can_shutdown": can_shutdown, "stopping": False, "can_register": False}
         systems, choice = _system_choices(manager)
         stopping = getattr(manager, "stopping", None)
         return {"can_start": True, "active": manager.active(), "default_exe": manager.default_exe,
                 "can_answer": manager.can_answer(), "default_system": manager.default_system,
                 "default_stage_call_limit": getattr(manager, "default_stage_call_limit", None),
                 "systems": systems, "default_choice": choice,
-                "can_shutdown": can_shutdown, "stopping": bool(stopping()) if callable(stopping) else False}
+                "can_shutdown": can_shutdown, "stopping": bool(stopping()) if callable(stopping) else False,
+                "can_register": _profile_editor(manager) is not None}
 
     def _start_run(self):
         manager = self.server.run_manager
@@ -498,6 +516,55 @@ class ViewerHandler(BaseHTTPRequestHandler):
         except RunStartFailed as error:
             return self._send_json(503, {"error": str(error)})
         self._send_json(201, {"run_id": run_id})
+
+    def _profile_get(self, query):
+        editor = _profile_editor(self.server.run_manager)
+        if editor is None:
+            return self._send_json(503, {"error": NO_REGISTRATION})
+        system = (query.get("system") or [""])[0]
+        try:
+            answer = editor.get(system)
+        except EditorError as error:
+            return self._send_json(error.status, error.payload)
+        self._send_json(200, answer)
+
+    def _profile_post(self, action):
+        """launch, windows, read and check hold the one-run slot (RunBusy is 409); save only writes
+        the profile file, so it takes no slot."""
+        manager = self.server.run_manager
+        editor = _profile_editor(manager)
+        if editor is None:
+            return self._send_json(503, {"error": NO_REGISTRATION})
+        if self.server.shutting_down:
+            return self._send_json(503, {"error": "뷰어를 종료하는 중입니다"})
+        payload, problem = self._read_json()
+        if problem:
+            return self._send_json(*problem)
+        system = payload.get("system")
+        try:
+            if action == "save":
+                return self._send_json(200, editor.save(system, payload.get("read_id"), payload.get("profile")))
+            with manager.exclusive():
+                if action == "launch":
+                    answer = editor.launch(system)
+                elif action == "windows":
+                    answer = editor.windows(system)
+                elif action == "read":
+                    answer = editor.read(system, payload.get("window_id"), payload.get("delay_s", 0))
+                else:
+                    answer = editor.check(system, payload.get("window_id"), payload.get("ready"))
+        except RunBusy as error:
+            return self._send_json(409, {"error": str(error)})
+        except EditorError as error:
+            return self._send_json(error.status, error.payload)
+        self._send_json(200, answer)
+
+    def _send_profile_shot(self, name):
+        editor = _profile_editor(self.server.run_manager)
+        path = editor.shot_path(name) if editor is not None else None
+        if path is None:
+            return self._send_json(404, {"error": "없는 그림입니다"})
+        self._send_file(path)
 
     def _read_json(self):
         """Returns (object, None) or ({}, (status, error body))."""

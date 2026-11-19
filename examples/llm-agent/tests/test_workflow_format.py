@@ -421,3 +421,87 @@ def test_other_values_ignores_the_path(tmp_path):
     assert other_values(workflow, {**example, "shop": ["WA1", "WA0"]}) is False
     assert other_values(workflow, {**example, "shop": ["WA0"]}) is True
     assert other_values(workflow, {**example, "screen": "후공정 생산현황"}) is True
+
+
+TOOLBAR = {"role": "toolbar", "id": "12"}
+
+
+def test_a_locator_takes_id_and_in():
+    workflow = sample()
+    step(workflow, 1)["target"].update({"id": "7001", "in": TOOLBAR})
+    step(workflow, 3)["target"].update({"id": "56", "in": {"role": "pane", "name": "Shop 줄"}})
+    step(workflow, 4)["all"]["id"] = "all"
+    step(workflow, 6)["target"]["id"] = "7002"
+
+    assert check_workflow(workflow) is workflow
+
+
+def test_an_id_target_without_a_name_passes():
+    workflow = sample()
+    step(workflow, 1)["target"] = {"scope": "main", "role": "image", "id": "56", "in": TOOLBAR}
+
+    check_workflow(workflow)
+
+
+def id_locator(change):
+    workflow = with_text_param()
+    target = step(workflow, 6)["target"]
+    if change == "in without id":
+        target["in"] = TOOLBAR
+    elif change == "empty id":
+        target["id"] = " "
+    elif change == "number id":
+        target["id"] = 56
+    elif change == "unknown key in in":
+        target.update({"id": "56", "in": {"role": "toolbar", "id": "12", "nth": 1}})
+    elif change == "in with role only":
+        target.update({"id": "56", "in": {"role": "toolbar"}})
+    elif change == "in with id and name":
+        target.update({"id": "56", "in": {"role": "toolbar", "id": "12", "name": "메뉴"}})
+    elif change == "in not a mapping":
+        target.update({"id": "56", "in": "toolbar"})
+    elif change == "in with an empty id":
+        target.update({"id": "56", "in": {"role": "toolbar", "id": ""}})
+    elif change == "in with an empty role":
+        target.update({"id": "56", "in": {"role": " ", "id": "12"}})
+    elif change == "id on a $name target":
+        step(workflow, 2)["target"]["id"] = "56"
+    elif change == "id as a parameter":
+        target["id"] = "$screen"
+    elif change == "in on a select_only all without id":
+        step(workflow, 4)["all"]["in"] = TOOLBAR
+    else:
+        raise AssertionError(change)
+    return workflow
+
+
+ID_BROKEN = ["in without id", "empty id", "number id", "unknown key in in", "in with role only", "in with id and name",
+             "in not a mapping", "in with an empty id", "in with an empty role", "id on a $name target",
+             "id as a parameter", "in on a select_only all without id"]
+
+
+@pytest.mark.parametrize("change", ID_BROKEN)
+def test_bad_id_locators_are_refused(change):
+    with pytest.raises(WorkflowError) as caught:
+        check_workflow(id_locator(change))
+    assert caught.value.code == "WORKFLOW_INVALID"
+
+
+def test_a_bad_id_message_names_the_key_but_not_the_value():
+    workflow = sample()
+    step(workflow, 6)["target"].update({"id": "secret-7001", "in": {"role": "toolbar", "id": "secret-12", "x": 1}})
+
+    with pytest.raises(WorkflowError) as caught:
+        check_workflow(workflow)
+
+    assert "6" in str(caught.value) and "secret" not in str(caught.value)
+
+
+def test_the_locator_id_is_not_the_workflow_id():
+    """The workflow's own id keeps its w-YYYYMMDD-NNN rule; a target's id is any non-empty text."""
+    workflow = sample()
+    step(workflow, 6)["target"]["id"] = "w-1"
+    check_workflow(workflow)
+    workflow["id"] = "7001"
+    with pytest.raises(WorkflowError):
+        check_workflow(workflow)

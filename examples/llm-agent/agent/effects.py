@@ -1,11 +1,13 @@
 """Compares what the harness saw before and after an action, and judges an expectation.
 
-An element is identified by (kind, role, name, description) plus its order among the
-elements sharing that key, so neither a value nor a position is identity. Focus moves
+An element is identified by (kind, role, name, description, native id value) plus its order
+among the elements sharing that key, so neither a value nor a position is identity; unnamed
+elements that only their ids tell apart stay apart. Focus moves
 are reported on their own and never count as a change: a click that only places a
 caret must not look like the screen reacted.
 """
 
+from agent import identity
 from agent.tool_schemas import EXPECTATIONS
 
 __all__ = ["EXPECTATIONS", "WINDOW_EXPECTATIONS", "diff", "met", "state"]
@@ -99,7 +101,8 @@ def _keyed(elements):
     counts = {}
     keyed = {}
     for element in elements:
-        key = (element.get("kind"), element.get("role"), element.get("name"), element.get("description"))
+        key = (element.get("kind"), element.get("role"), element.get("name"), element.get("description"),
+               identity.native_value(element))
         order = counts.get(key, 0)
         counts[key] = order + 1
         keyed[key + (order,)] = element

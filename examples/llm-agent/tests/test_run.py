@@ -1396,9 +1396,9 @@ def authoring_setup(monkeypatch, tmp_path, status="confirmed", made=True):
     monkeypatch.setattr(run, "run_agent", lambda *_a, **_k: run.RunResult(status, 4, "done", 100))
     seen = {}
 
-    def after_run(model, result, run_dir, store, log):
-        seen.update(model=model, run_dir=run_dir, store=store, finished=(run_dir / "run.json").read_text(
-            encoding="utf-8"))
+    def after_run(model, result, run_dir, store, log, use_ids=False):
+        seen.update(model=model, run_dir=run_dir, store=store, use_ids=use_ids,
+                    finished=(run_dir / "run.json").read_text(encoding="utf-8"))
         if made:
             saved = store.add({**workflow_sample(tmp_path), "system": store.system})
             outcome = {"created": True, "id": saved["id"], "code": None, "steps": 10, "params": 2}
@@ -1484,8 +1484,8 @@ def make_workflow_setup(monkeypatch, tmp_path, key="test"):
     monkeypatch.setattr(run, "start_session", lambda *_a, **_k: sessions.append(1) or "session-1")
     seen = []
 
-    def make_workflow(model, run_dir, store, log, today=None):
-        seen.append({"model": model, "run_dir": run_dir, "store": store})
+    def make_workflow(model, run_dir, store, log, today=None, use_ids=False):
+        seen.append({"model": model, "run_dir": run_dir, "store": store, "use_ids": use_ids})
         log({"type": "workflow", "created": True, "id": WORKFLOW_ID, "code": None, "steps": 9, "params": 2})
         return {"created": True, "id": WORKFLOW_ID, "code": None, "steps": 9, "params": 2}, 70
 
@@ -1569,3 +1569,298 @@ def test_make_workflow_with_a_task_file_is_refused(monkeypatch, tmp_path, capsys
     code = run.main([str(write_task(tmp_path, mes_exe(tmp_path))), "--make-workflow", "latest"])
 
     assert code == 2 and "함께 쓸 수 없습니다" in capsys.readouterr().err and seen == []
+
+
+# system profile: one profile per run, read in run.py (plan task 6, contracts K5, K6, K8, K9)
+
+from agent.profile import Profile, save_profile  # noqa: E402
+
+ALIAS_MARK = "ZQ등록이름-5521"
+SIGNAL_MARK = "ZQ준비신호-6631"
+ID_MARK = "ID-7717"
+AREA_ID = "AREA-8803"
+SCENE_BOUNDS = {"x": 1000, "y": 500, "width": 800, "height": 600}
+
+
+def write_profile(folder, system, **fields):
+    save_profile(folder, Profile(system=system, **fields))
+    return folder
+
+
+def broken_profile(folder, system):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{system}.yaml").write_text(
+        f"format: 1\nsystem: {system}\nelements:\n  - {{id: '{ID_MARK}', role: image, name: {ALIAS_MARK}, "
+        f"colour: red}}\n", encoding="utf-8")
+    return folder
+
+
+def ready_profile(folder, system, text, **fields):
+    return write_profile(folder, system, ready=({"name": text},), **fields)
+
+
+def mes_settings(monkeypatch, tmp_path, extra=""):
+    """Settings naming VirtualMes.exe as the system virtualmes, so a profile's ready signals reach it."""
+    exe = mes_exe(tmp_path)
+    settings_file(monkeypatch, tmp_path, f"systems:\n  virtualmes: '{exe}'\n" + extra)
+    return exe
+
+
+def watch_profiles(monkeypatch):
+    """Keeps the profile each load, apply_ready, RunRecorder and Toolbox call gets."""
+    seen = {"loaded": [], "ready": [], "recorder": [], "toolbox": []}
+    real_load = run.load_profile
+    real_apply = run.apply_ready
+
+    def load(root, system):
+        loaded = real_load(root, system)
+        seen["loaded"].append((root, system, loaded))
+        return loaded
+
+    def apply(task, settings_values, profile=None):
+        seen["ready"].append(profile)
+        return real_apply(task, settings_values, profile)
+
+    class WatchedRecorder(run.RunRecorder):
+        def __init__(self, *args, profile=None, **kwargs):
+            seen["recorder"].append(profile)
+            super().__init__(*args, profile=profile, **kwargs)
+
+    class WatchedToolbox(run.Toolbox):
+        def __init__(self, *args, profile=None, **kwargs):
+            seen["toolbox"].append(profile)
+            super().__init__(*args, profile=profile, **kwargs)
+
+    monkeypatch.setattr(run, "load_profile", load)
+    monkeypatch.setattr(run, "apply_ready", apply)
+    monkeypatch.setattr(run, "RunRecorder", WatchedRecorder)
+    monkeypatch.setattr(run, "Toolbox", WatchedToolbox)
+    return seen
+
+
+@pytest.mark.parametrize("where", ["argument", "settings", "environment"])
+def test_profile_dir_argument_beats_the_settings_and_the_env(monkeypatch, tmp_path, where):
+    folders = {name: ready_profile(tmp_path / f"profiles-{name}", "virtualmes", f"{name} 신호")
+               for name in ("argument", "settings", "environment")}
+    order = ["argument", "settings", "environment"]
+    given = order[order.index(where):]
+    mes_settings(monkeypatch, tmp_path, f"profile_dir: '{folders['settings']}'\n" if "settings" in given else "")
+    monkeypatch.setenv("AGENT_PROFILE_DIR", str(folders["environment"]))
+    argv = ["--system", "virtualmes", "--goal", "x"]
+    if where == "argument":
+        argv += ["--profile-dir", folders["argument"]]
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, *argv)
+
+    assert toolbox._task.ready == ({"name": f"{where} 신호"},)
+
+
+def test_a_run_without_a_profile_dir_reads_the_default_folder(monkeypatch, tmp_path):
+    from agent import profile as profile_module
+
+    monkeypatch.delenv("AGENT_PROFILE_DIR", raising=False)
+    monkeypatch.setattr(profile_module, "DEFAULT_ROOT", ready_profile(tmp_path / "default", "virtualmes", "기본 신호"))
+    mes_settings(monkeypatch, tmp_path)
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, "--system", "virtualmes", "--goal", "x")
+
+    assert toolbox._task.ready == ({"name": "기본 신호"},)
+
+
+def test_a_run_gives_one_profile_to_the_ready_wait_the_toolbox_and_the_recorder(monkeypatch, tmp_path):
+    folder = ready_profile(tmp_path / "profiles", "virtualmes", "준비", ready_read="find", stable_ids=True)
+    mes_settings(monkeypatch, tmp_path)
+    seen = watch_profiles(monkeypatch)
+
+    _, toolbox, _ = wired(monkeypatch, tmp_path, "--system", "virtualmes", "--goal", "x", "--profile-dir", folder)
+
+    [(root, system, profile)] = seen["loaded"]
+    assert (root, system) == (folder.resolve(), "virtualmes")
+    assert seen["ready"] == [profile] and seen["recorder"] == [profile] and seen["toolbox"] == [profile]
+    assert (toolbox._task.ready, toolbox._task.ready_read) == (({"name": "준비"},), "find")
+
+
+def test_the_profile_is_read_by_the_knowledge_system_name(monkeypatch, tmp_path):
+    """--system names the knowledge folder and the profile file alike, also for an exe the settings do not name."""
+    folder = write_profile(tmp_path / "profiles", "공정", stable_ids=True)
+    seen = watch_profiles(monkeypatch)
+
+    wired(monkeypatch, tmp_path, "--exe", mes_exe(tmp_path), "--goal", "x", "--system", "공정", "--profile-dir", folder)
+
+    [(_, system, profile)] = seen["loaded"]
+    assert system == "공정" and profile.stable_ids is True
+
+
+def test_a_baseline_run_reads_the_profile_too(monkeypatch, tmp_path):
+    folder = write_profile(tmp_path / "profiles", "virtualmes", stable_ids=True)
+    seen = watch_profiles(monkeypatch)
+
+    wired(monkeypatch, tmp_path, write_task(tmp_path, mes_exe(tmp_path)), "--baseline", "--profile-dir", folder)
+
+    [(_, _, profile)] = seen["loaded"]
+    assert profile.stable_ids is True and seen["recorder"] == [profile] and seen["toolbox"] == [profile]
+
+
+def test_a_model_run_makes_its_workflow_with_the_profiles_stable_ids(monkeypatch, tmp_path):
+    seen = authoring_setup(monkeypatch, tmp_path)
+    folder = write_profile(tmp_path / "profiles", "virtualmes", stable_ids=True)
+
+    run.main(["--exe", str(mes_exe(tmp_path)), "--goal", "조회해서 저장해줘", "--profile-dir", str(folder)])
+    assert seen["use_ids"] is True
+
+    run.main(["--exe", str(mes_exe(tmp_path)), "--goal", "조회해서 저장해줘", "--profile-dir", str(tmp_path / "none")])
+    assert seen["use_ids"] is False
+
+
+@pytest.mark.parametrize("mode", ["model", "baseline", "replay", "make"])
+def test_a_broken_profile_stops_before_anything_is_launched(monkeypatch, tmp_path, capsys, mode):
+    folder = broken_profile(tmp_path / "profiles", "virtualmes")
+    if mode == "replay":
+        _, sessions, _ = replay_setup(monkeypatch, tmp_path)
+        argv = ["--exe", str(mes_exe(tmp_path)), "--workflow", WORKFLOW_ID]
+    elif mode == "make":
+        seen, sessions = make_workflow_setup(monkeypatch, tmp_path)
+        past_run(tmp_path, "20261119-090000")
+        argv = ["--make-workflow", "latest"]
+    else:
+        calls = isolate(monkeypatch, tmp_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "test")
+        sessions = []
+        monkeypatch.setattr(run, "start_session", lambda *_a, **_k: sessions.append(1) or "session-1")
+        argv = ([str(write_task(tmp_path, mes_exe(tmp_path))), "--baseline"] if mode == "baseline"
+                else ["--exe", str(mes_exe(tmp_path)), "--goal", "x"])
+
+    code = run.main([*argv, "--profile-dir", str(folder)])
+
+    out = capsys.readouterr()
+    assert code == 2
+    assert "시스템 프로파일을 읽지 못했습니다: elements 1번째 항목: 모르는 키" in out.err
+    assert ALIAS_MARK not in out.out + out.err and ID_MARK not in out.out + out.err
+    assert sessions == []
+    if mode == "make":
+        assert seen == []
+    else:
+        assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())
+    if mode in ("model", "baseline"):
+        assert calls == []
+
+
+def test_a_replay_reads_the_profile_too(monkeypatch, tmp_path):
+    seen, _, _ = replay_setup(monkeypatch, tmp_path)
+    exe = mes_settings(monkeypatch, tmp_path)
+    folder = ready_profile(tmp_path / "profiles", "virtualmes", "준비", ready_read="find")
+    watched = watch_profiles(monkeypatch)
+
+    assert run.main(["--system", "virtualmes", "--workflow", WORKFLOW_ID, "--profile-dir", str(folder)]) == 0
+
+    [(_, system, profile)] = watched["loaded"]
+    task = seen[0]["task"]
+    assert system == "virtualmes" and task.exe == str(exe)
+    assert (task.ready, task.ready_read) == (({"name": "준비"},), "find")
+    assert watched["recorder"] == [profile] and watched["toolbox"] == [profile]
+
+
+def test_make_workflow_uses_the_record_systems_stable_ids(monkeypatch, tmp_path):
+    seen, _ = make_workflow_setup(monkeypatch, tmp_path)
+    folder = write_profile(tmp_path / "profiles", "mes", stable_ids=True)
+    past_run(tmp_path, "20261119-090000", system="mes")
+    past_run(tmp_path, "20261119-100000", system="virtualmes")
+
+    assert run.main(["--make-workflow", "20261119-090000", "--profile-dir", str(folder)]) == 0
+    assert run.main(["--make-workflow", "20261119-100000", "--profile-dir", str(folder)]) == 0
+
+    assert [(call["store"].system, call["use_ids"]) for call in seen] == [("mes", True), ("virtualmes", False)]
+
+
+def registered_scene():
+    """A main window whose toolbar (only an id names it) holds a registered menu item that has a
+    child, an id-only leaf, and a named button after them. Without the profile the registered item
+    is no element, so every later number would be one lower."""
+    def box(x, y, w=40, h=30):
+        return {"x": 1000 + x, "y": 500 + y, "width": w, "height": h}
+
+    def native(value):
+        return {"kind": "automation_id", "value": value}
+
+    from fake_cli import scene_window
+
+    tree = {"role": "window", "name": "메인", "bounds": SCENE_BOUNDS, "children": [
+        {"role": "text", "name": SIGNAL_MARK, "bounds": box(10, 10, 200, 20)},
+        {"role": "toolbar", "native_id": native(AREA_ID), "bounds": box(0, 40, 400, 40), "children": [
+            {"role": "image", "native_id": native(ID_MARK), "bounds": box(10, 45), "children": [
+                {"role": "image", "bounds": box(12, 47, 20, 20)}]},
+            {"role": "image", "native_id": native("ID-9001"), "bounds": box(60, 45)},
+        ]},
+        {"role": "button", "name": "조회", "ref_id": "@s1:e1", "available_actions": ["Click"],
+         "bounds": box(300, 300, 80, 24)},
+    ]}
+    return {"windows": [scene_window("w-1", "메인", SCENE_BOUNDS)], "tree": tree}
+
+
+def scene_run(monkeypatch, tmp_path, settings_extra=""):
+    """run.main as a real model run on registered_scene with the real RunRecorder and Toolbox: the
+    model only gives up after the first observation. Returns (exit code, the toolbox, run folder)."""
+    from fake_cli import FakeCli
+    from test_loop import GIVE_UP, ScriptedModel
+
+    from agent.desktop import DesktopClient
+    from agent.loop import run_agent
+
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    fake_clients(monkeypatch)
+    exe = tmp_path / "Scene.exe"
+    exe.write_text("", encoding="utf-8")
+    settings_file(monkeypatch, tmp_path, f"systems:\n  scene: '{exe}'\n" + settings_extra)
+    folder = write_profile(
+        tmp_path / "profiles", "scene", ready=({"name": SIGNAL_MARK},),
+        elements=({"id": ID_MARK, "role": "image", "in": {"role": "toolbar", "id": AREA_ID}, "name": ALIAS_MARK},))
+    cli = FakeCli(scene=registered_scene())
+    cli.process_alive = False
+    monkeypatch.setattr(run, "DesktopClient",
+                        lambda binary, session, window_handles=None, read_shortcut=None:
+                        DesktopClient(binary, session, runner=cli))
+    seen = {}
+
+    def agent(_model, toolbox, task, log, gate=None, register=None):
+        seen["toolbox"] = toolbox
+        return run_agent(ScriptedModel([GIVE_UP]), toolbox, task, log, gate=gate, register=register)
+
+    monkeypatch.setattr(run, "run_agent", agent)
+    code = run.main(["--system", "scene", "--goal", "조회", "--profile-dir", str(folder)])
+    [run_dir] = [path for path in (tmp_path / "runs").iterdir() if path.is_dir()]
+    return code, seen["toolbox"], run_dir
+
+
+def recorded_events(run_dir):
+    return [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_recorded_marks_match_the_toolbox_marks_with_a_registered_parent(monkeypatch, tmp_path):
+    """The seam of plan K6: the recorder and the toolbox number the same elements when they are
+    given the same profile, here with a registered element that has a child."""
+    _, toolbox, run_dir = scene_run(monkeypatch, tmp_path)
+
+    last = [event for event in recorded_events(run_dir) if event.get("type") == "observation"][-1]
+    recorded = [(e["mark"], e["role"], e.get("name"), (e.get("native_id") or {}).get("value"), e.get("alias"))
+                for e in last["elements"]]
+    marked = [(e["mark"], e["role"], e.get("name"), (e.get("native_id") or {}).get("value"), e.get("alias"))
+              for e in toolbox.marked_elements()]
+    assert recorded == marked
+    assert (2, "image", None, ID_MARK, ALIAS_MARK) in recorded
+    assert [name for _, _, name, _, _ in recorded][-1] == "조회"
+
+
+def test_no_profile_text_reaches_run_json_or_the_summary(monkeypatch, tmp_path, capsys):
+    code, _, run_dir = scene_run(monkeypatch, tmp_path)
+
+    events_text = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+    assert ALIAS_MARK in events_text and ID_MARK in events_text
+    for name in ("run.json", "summary.txt"):
+        text = (run_dir / name).read_text(encoding="utf-8")
+        for mark in (ALIAS_MARK, SIGNAL_MARK, ID_MARK, AREA_ID):
+            assert mark not in text, (name, mark)
+    out = capsys.readouterr()
+    for mark in (ALIAS_MARK, SIGNAL_MARK, ID_MARK, AREA_ID):
+        assert mark not in out.out + out.err
+    assert json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["ready"]["status"] == "ready"

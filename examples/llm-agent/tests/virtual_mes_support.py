@@ -115,6 +115,26 @@ def wait_for_logged(log, name, count=1, timeout_s=15):
     raise AssertionError(f"event {name!r} x{count} did not appear within {timeout_s}s")
 
 
+def _flat_entry(node):
+    native = node.get("native_id") or {}
+    entry = {
+        "role": node.get("role"), "name": node.get("name"), "ref": node.get("ref_id"),
+        "bounds": node.get("bounds"), "states": node.get("states"), "id": native.get("value"),
+        "value": node.get("value"),
+    }
+    return {key: value for key, value in entry.items() if value not in (None, "", [])}
+
+
+def _place_of(node):
+    native = (node.get("native_id") or {}).get("value")
+    if native:
+        return {"role": node.get("role"), "id": native}
+    name = (node.get("name") or "").strip()
+    if name:
+        return {"role": node.get("role"), "name": name}
+    return None
+
+
 class LiveApp:
     """Runs a private copy of VirtualMes.exe and drives it through agent-desktop.
 
@@ -184,18 +204,29 @@ class LiveApp:
         flat = []
 
         def visit(node):
-            native = node.get("native_id") or {}
-            entry = {
-                "role": node.get("role"), "name": node.get("name"), "ref": node.get("ref_id"),
-                "bounds": node.get("bounds"), "states": node.get("states"), "id": native.get("value"),
-                "value": node.get("value"),
-            }
-            flat.append({key: value for key, value in entry.items() if value not in (None, "", [])})
+            flat.append(_flat_entry(node))
             for child in node.get("children") or []:
                 visit(child)
 
         visit(self.snapshot(window_id)["tree"])
         return flat
+
+    def placed_nodes(self, window_id):
+        """Like nodes(), and each entry also has "in": the nearest ancestor below the window that
+        has an automation id ({"role", "id"}), or else a name ({"role", "name"}), or None."""
+        flat = []
+
+        def visit(node, inherited, is_root):
+            flat.append({**_flat_entry(node), "in": inherited})
+            below = None if is_root else (_place_of(node) or inherited)
+            for child in node.get("children") or []:
+                visit(child, below, False)
+
+        visit(self.snapshot(window_id)["tree"], None, True)
+        return flat
+
+    def window_titled(self, title):
+        return next(window["id"] for window in self.windows() if window["title"] == title)
 
     def all_nodes(self):
         return [node for window in self.windows() for node in self.nodes(window["id"])]

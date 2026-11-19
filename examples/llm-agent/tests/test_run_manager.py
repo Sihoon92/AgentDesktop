@@ -1534,3 +1534,261 @@ def test_a_replay_without_a_save_path_saves_under_its_own_run_id(tmp_path):
     assert run_json(tmp_path, run_id)["status"] == "verified"
     [saved] = app.saved
     assert run_id in Path(saved).name and Path(saved).parent == tmp_path / "out" and "check" not in Path(saved).name
+
+
+# --- system profile: the viewer's runs and the registration screen (plan task 9, K9, K11) ----
+
+from agent import profile as profile_module  # noqa: E402
+from agent.profile import Profile, save_profile  # noqa: E402
+from viewer.profile_editor import ProfileEditor  # noqa: E402
+
+PROFILE_READY = ({"name": "생산운영"}, {"id": "56", "role": "image"})
+PROFILE_ELEMENTS = ({"id": "60", "role": "image", "in": {"role": "toolbar", "id": "12"}, "name": "Execution Plan"},)
+
+
+@pytest.fixture(autouse=True)
+def no_real_profile_folder(tmp_path, monkeypatch):
+    """No test here may read examples/llm-agent/profiles."""
+    monkeypatch.setattr(profile_module, "DEFAULT_ROOT", tmp_path / "default-profiles")
+
+
+class ProfileSpy:
+    """A toolbox factory that takes the profile keyword and remembers it."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, desktop, task, confirm, observer, asker, knowledge, captures_dir, **extra):
+        self.calls.append({"task": task, **extra})
+        return Toolbox(desktop, task, confirm=confirm, sleep=lambda _s: None, observer=observer, asker=asker,
+                       knowledge=knowledge, captures_dir=captures_dir, profile=extra.get("profile"))
+
+
+class RecorderSpy:
+    def __init__(self, real):
+        self.real = real
+        self.profiles = []
+
+    def __call__(self, runs_dir, desktop, meta, **options):
+        self.profiles.append(options.get("profile"))
+        return self.real(runs_dir, desktop, meta, **options)
+
+
+def profiled_manager(tmp_path, monkeypatch, profile_dir=None, **settings):
+    """A systems manager whose toolbox factory takes the profile; returns (manager, spy, exes)."""
+    monkeypatch.setattr(run_manager_module, "run_agent", lambda *args, **kwargs: RunResult("gave_up", 0, "test"))
+    exes = site_exes(tmp_path)
+    defaults = {"systems": {"울산": str(exes["ulsan"]), "천안소형": str(exes["cheonan"])}, **settings}
+    spy = ProfileSpy()
+    manager = RunManager(tmp_path / "runs", "ad.exe", None, lambda _task: GatedModel(), spy,
+                         desktop_factory=lambda: DesktopClient("ad.exe", "run1", runner=FakeCli()),
+                         knowledge_dir=tmp_path / "knowledge", task_defaults=defaults,
+                         profile_dir=profile_dir if profile_dir is not None else tmp_path / "profiles")
+    return manager, spy, exes
+
+
+def write_profile(folder, system="울산", **fields):
+    values = {"ready": PROFILE_READY, "elements": PROFILE_ELEMENTS, "stable_ids": True, "ready_read": "find", **fields}
+    save_profile(folder, Profile(system=system, **values))
+
+
+def test_exclusive_refuses_while_a_run_is_active(tmp_path, monkeypatch):
+    manager, model, _ = gated_run(tmp_path, monkeypatch)
+    try:
+        with pytest.raises(RunBusy):
+            with manager.exclusive():
+                pass
+    finally:
+        model.release.set()
+        manager.join(timeout=5)
+
+
+def test_a_run_cannot_start_while_exclusive_is_held(tmp_path, monkeypatch):
+    manager, _, _ = profiled_manager(tmp_path, monkeypatch)
+
+    with manager.exclusive():
+        assert manager.active() is None, "the status keeps naming only a run id"
+        with pytest.raises(RunBusy):
+            manager.start("열어줘", None, 2, system="울산")
+        with pytest.raises(RunBusy):
+            with manager.exclusive():
+                pass
+    assert not (tmp_path / "runs").exists() or not list((tmp_path / "runs").iterdir())
+
+    started(manager, None, 2, system="울산")
+    assert len(manager_runs(tmp_path)) == 1
+
+
+def manager_runs(tmp_path):
+    return [path for path in (tmp_path / "runs").iterdir() if path.is_dir()]
+
+
+def test_exclusive_is_released_when_its_body_raises(tmp_path, monkeypatch):
+    manager, _, _ = profiled_manager(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError):
+        with manager.exclusive():
+            raise ValueError("read failed")
+
+    with manager.exclusive():
+        pass
+
+
+def test_a_viewer_run_gets_the_profile_like_run_py(tmp_path, monkeypatch):
+    write_profile(tmp_path / "profiles")
+    recorders = RecorderSpy(run_manager_module.RunRecorder)
+    monkeypatch.setattr(run_manager_module, "RunRecorder", recorders)
+    after = []
+    monkeypatch.setattr(run_manager_module, "after_run",
+                        lambda model, result, run_dir, store, log, **options: after.append(options) or result)
+    manager, spy, _ = profiled_manager(tmp_path, monkeypatch, ready_text="설정 신호", ready_timeout_s=90)
+
+    started(manager, None, 2, system="울산")
+
+    task = spy.calls[0]["task"]
+    assert (task.ready, task.ready_read, task.ready_text, task.ready_timeout_s) == (PROFILE_READY, "find", None, 90)
+    profile = spy.calls[0]["profile"]
+    assert (profile.elements, profile.stable_ids) == (PROFILE_ELEMENTS, True)
+    assert recorders.profiles == [profile]
+    assert after == [{"use_ids": True}]
+
+
+def test_a_system_without_a_profile_runs_as_before(tmp_path, monkeypatch):
+    after = []
+    monkeypatch.setattr(run_manager_module, "after_run",
+                        lambda model, result, run_dir, store, log, **options: after.append(options) or result)
+    manager, spy, _ = profiled_manager(tmp_path, monkeypatch, ready_text="설정 신호")
+
+    started(manager, None, 2, system="울산")
+
+    assert "profile" not in spy.calls[0], "the toolbox factory is called as before"
+    assert (spy.calls[0]["task"].ready_text, spy.calls[0]["task"].ready) == ("설정 신호", ())
+    assert after == [{}]
+
+
+def test_a_profile_without_stable_ids_makes_workflows_without_ids(tmp_path, monkeypatch):
+    write_profile(tmp_path / "profiles", stable_ids=False)
+    after = []
+    monkeypatch.setattr(run_manager_module, "after_run",
+                        lambda model, result, run_dir, store, log, **options: after.append(options) or result)
+    manager, spy, _ = profiled_manager(tmp_path, monkeypatch)
+
+    started(manager, None, 2, system="울산")
+
+    assert after == [{}] and spy.calls[0]["profile"].elements == PROFILE_ELEMENTS
+
+
+def test_the_profile_is_read_by_the_knowledge_system_name(tmp_path, monkeypatch):
+    write_profile(tmp_path / "profiles", system="천안소형")
+    manager, spy, _ = profiled_manager(tmp_path, monkeypatch)
+
+    started(manager, None, 2, system="천안소형")
+    started(manager, None, 2, system="울산")
+
+    assert spy.calls[0]["task"].ready == PROFILE_READY
+    assert spy.calls[1]["task"].ready == () and "profile" not in spy.calls[1]
+
+
+def test_a_broken_profile_is_an_invalid_run(tmp_path, monkeypatch):
+    folder = tmp_path / "profiles"
+    folder.mkdir()
+    (folder / "울산.yaml").write_text("format: 1\nsystem: 울산\nready:\n  - {name: '비밀 글', role: ''}\n",
+                                      encoding="utf-8")
+    manager, spy, _ = profiled_manager(tmp_path, monkeypatch)
+
+    with pytest.raises(InvalidRun) as raised:
+        manager.start("열어줘", None, 2, system="울산")
+
+    assert str(raised.value).startswith("시스템 프로파일을 읽지 못했습니다: ")
+    assert "비밀 글" not in str(raised.value)
+    assert spy.calls == [] and manager.active() is None
+    assert not (tmp_path / "runs").exists() or not manager_runs(tmp_path)
+
+
+def test_the_profile_folder_follows_the_argument_then_the_settings_then_the_environment(tmp_path):
+    exe = tmp_path / "App.exe"
+    exe.write_bytes(b"")
+
+    def root(**options):
+        return RunManager(tmp_path / "runs", "ad.exe", str(exe), lambda _task: None, **options).profile_root
+
+    assert root(profile_dir=tmp_path / "a", task_defaults={"profile_dir": str(tmp_path / "b")},
+                environ={"AGENT_PROFILE_DIR": str(tmp_path / "c")}) == (tmp_path / "a").resolve()
+    assert root(task_defaults={"profile_dir": str(tmp_path / "b")},
+                environ={"AGENT_PROFILE_DIR": str(tmp_path / "c")}) == (tmp_path / "b").resolve()
+    assert root(environ={"AGENT_PROFILE_DIR": str(tmp_path / "c")}) == (tmp_path / "c").resolve()
+    assert root() == tmp_path / "default-profiles"
+
+
+def test_the_manager_hands_the_registration_screen_its_systems_and_folder(tmp_path, monkeypatch):
+    manager, _, exes = profiled_manager(tmp_path, monkeypatch)
+
+    editor = manager.profile_editor
+
+    assert isinstance(editor, ProfileEditor)
+    assert editor._systems == {"울산": str(exes["ulsan"]), "천안소형": str(exes["cheonan"])}
+    assert editor._root == (tmp_path / "profiles").resolve()
+    assert manager.profile_editor is editor
+
+
+def test_a_replay_reads_the_profile_too(tmp_path):
+    workflow = stored(tmp_path)
+    write_profile(tmp_path / "profiles", system="mes", ready=({"name": "메뉴", "role": "button"},),
+                  ready_read="snapshot")
+    seen = []
+    manager, _ = workflow_manager(tmp_path, profile_dir=tmp_path / "profiles",
+                                  task_defaults={"exe": str(tmp_path / "Mes.exe")})
+    real = manager._replay_toolbox_factory
+
+    def factory(desktop, task, observer, captures_dir, **extra):
+        seen.append((task, extra))
+        return real(desktop, task, observer, captures_dir)
+
+    manager._replay_toolbox_factory = factory
+    manager.start_workflow(workflow["id"], given(tmp_path), system="mes")
+    manager.join(timeout=10)
+
+    [(task, extra)] = seen
+    assert extra["profile"].elements == PROFILE_ELEMENTS
+    assert (task.ready, task.ready_read) == (({"name": "메뉴", "role": "button"},), "snapshot")
+
+
+def test_a_broken_profile_refuses_a_replay(tmp_path):
+    workflow = stored(tmp_path)
+    folder = tmp_path / "profiles"
+    folder.mkdir()
+    (folder / "mes.yaml").write_text("format: 2\nsystem: mes\n", encoding="utf-8")
+    manager, app = workflow_manager(tmp_path, profile_dir=folder)
+
+    with pytest.raises(InvalidRun) as raised:
+        manager.start_workflow(workflow["id"], given(tmp_path), system="mes")
+
+    assert str(raised.value).startswith("시스템 프로파일을 읽지 못했습니다: ")
+    assert app.calls == [] and manager.active() is None
+
+
+def test_the_default_toolboxes_take_the_profile(tmp_path):
+    from agent.task import Task
+
+    profile = Profile(system="mes", elements=PROFILE_ELEMENTS)
+    task = Task("g", str(tmp_path / "A.exe"), 2, [])
+    desktop = DesktopClient("ad.exe", "run1", runner=FakeCli())
+
+    model_run = run_manager_module.default_toolbox(desktop, task, lambda _p: False, None, NoAsker(), None,
+                                                   tmp_path / "c1", profile=profile)
+    replay = run_manager_module.default_replay_toolbox(desktop, task, None, tmp_path / "c2", profile=profile)
+
+    assert model_run._profile is profile and replay._profile is profile
+    assert run_manager_module.default_toolbox(desktop, task, lambda _p: False, None, NoAsker(), None,
+                                              tmp_path / "c3")._profile is None
+
+
+def test_a_replay_cannot_start_while_exclusive_is_held(tmp_path):
+    workflow = stored(tmp_path)
+    manager, app = workflow_manager(tmp_path)
+
+    with manager.exclusive():
+        with pytest.raises(RunBusy):
+            manager.start_workflow(workflow["id"], given(tmp_path), system="mes")
+
+    assert app.calls == [] and manager.active() is None

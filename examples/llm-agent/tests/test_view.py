@@ -894,3 +894,55 @@ def test_build_run_manager_hands_the_workflow_dir_to_the_manager(monkeypatch, tm
                                              workflow_dir=tmp_path / "wf")
 
     assert notice is None and manager.workflow_root == (tmp_path / "wf").resolve()
+
+
+def test_view_takes_profile_dir(monkeypatch, tmp_path):
+    _, _, given = served(monkeypatch, ["--profile-dir", str(tmp_path / "pf")])
+    _, _, absent = served(monkeypatch, [])
+
+    assert given[0]["profile_dir"] == tmp_path / "pf"
+    assert "profile_dir" not in absent[0]
+
+
+def test_build_run_manager_hands_the_profile_dir_to_the_manager(monkeypatch, tmp_path):
+    binary = tmp_path / "agent-desktop.exe"
+    binary.write_bytes(b"")
+    monkeypatch.setattr(view, "find_binary", lambda: binary)
+
+    manager, notice = view.build_run_manager(tmp_path / "runs", None, task_defaults={"profile_dir": "ignored"},
+                                             profile_dir=tmp_path / "pf")
+
+    assert notice is None and manager.profile_root == (tmp_path / "pf").resolve()
+    assert manager.profile_editor._root == (tmp_path / "pf").resolve()
+
+
+class EditorSpy:
+    def __init__(self):
+        self.closed = 0
+
+    def close(self):
+        self.closed += 1
+
+
+class ManagerWithEditor:
+    workflow_root = None
+    profile_root = Path("C:/profiles")
+
+    def __init__(self):
+        self.profile_editor = EditorSpy()
+
+    def active(self):
+        return None
+
+
+def test_the_viewer_removes_the_registration_pictures_when_it_ends(monkeypatch, capsys):
+    manager = ManagerWithEditor()
+    monkeypatch.delenv("AGENT_KNOWLEDGE_DIR", raising=False)
+    monkeypatch.setattr(view, "make_server", lambda *args, **kwargs: FakeServer())
+    monkeypatch.setattr(view, "build_run_manager", lambda runs_dir, exe, **options: (manager, None))
+    monkeypatch.setattr(view, "load_dotenv", lambda path: None)
+
+    assert view.main(["--runs", str(FIXTURE_RUNS), "--no-browser"]) == 0
+
+    assert manager.profile_editor.closed == 1
+    assert "프로파일 폴더: " in capsys.readouterr().out

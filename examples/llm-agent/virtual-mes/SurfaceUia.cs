@@ -15,7 +15,11 @@ namespace VirtualMesApp
         Text,
         Button,
         CheckBox,
-        Cell
+        Cell,
+
+        /// <summary>An image with an AutomationId and nothing else: no name and no pattern, so no
+        /// ref. A real click still reaches the item, which the surface hit-tests itself.</summary>
+        Image
     }
 
     /// <summary>
@@ -76,6 +80,10 @@ namespace VirtualMesApp
             if (exposure == Exposure.Bare)
             {
                 return item.Kind == ItemKind.Button || item.Kind == ItemKind.Cell ? UiaShape.Button : UiaShape.Hidden;
+            }
+            if (exposure == Exposure.IdOnly)
+            {
+                return item.Kind == ItemKind.Button || item.Kind == ItemKind.Cell ? UiaShape.Image : UiaShape.Hidden;
             }
             if (exposure == Exposure.Text)
             {
@@ -195,8 +203,17 @@ namespace VirtualMesApp
             return null;
         }
 
+        /// <summary>
+        /// Everything comes from the window's default provider, except the AutomationId of a
+        /// surface that sets its own: a value here wins over the default provider's, and an
+        /// empty one hides the default's.
+        /// </summary>
         public object GetPropertyValue(int propertyId)
         {
+            if (propertyId == AutomationElementIdentifiers.AutomationIdProperty.Id)
+            {
+                return this.surface.AreaId;
+            }
             return null;
         }
 
@@ -353,7 +370,7 @@ namespace VirtualMesApp
             }
             if (propertyId == AutomationElementIdentifiers.NameProperty.Id)
             {
-                if (this.exposure == Exposure.Bare)
+                if (this.exposure == Exposure.Bare || this.exposure == Exposure.IdOnly)
                 {
                     return string.Empty;
                 }
@@ -361,7 +378,7 @@ namespace VirtualMesApp
             }
             if (propertyId == AutomationElementIdentifiers.AutomationIdProperty.Id)
             {
-                return this.shape == UiaShape.Text ? null : item.Id;
+                return this.shape == UiaShape.Text ? null : (item.AutomationId ?? item.Id);
             }
             if (propertyId == AutomationElementIdentifiers.IsEnabledProperty.Id)
             {
@@ -408,6 +425,10 @@ namespace VirtualMesApp
             if (this.shape == UiaShape.Cell)
             {
                 return ControlType.DataItem.Id;
+            }
+            if (this.shape == UiaShape.Image)
+            {
+                return ControlType.Image.Id;
             }
             return ControlType.Text.Id;
         }
