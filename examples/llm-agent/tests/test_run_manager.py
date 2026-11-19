@@ -2,6 +2,7 @@ import functools
 import json
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1204,3 +1205,332 @@ def test_a_new_run_does_not_inherit_the_stop(tmp_path, monkeypatch):
     manager.join(timeout=5)
 
     assert run_json(tmp_path, second)["status"] == "gave_up"
+
+
+# --- workflows: listing and replaying from the viewer (plan task 9) ---------------------------
+
+from agent import workflow_store  # noqa: E402
+from agent.ask import NoAsker  # noqa: E402
+from agent.workflow_store import WorkflowStore  # noqa: E402
+from replay_support import AppOptions, FakeApp, FakeClock, make_values  # noqa: E402
+from replay_support import make_workflow as replay_workflow  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def no_real_workflow_folder(tmp_path, monkeypatch):
+    """No test here may write into examples/llm-agent/workflows."""
+    monkeypatch.setattr(workflow_store, "DEFAULT_ROOT", tmp_path / "default-workflows")
+
+
+class BlockingClock(FakeClock):
+    """A fake clock whose sleeps wait until the test releases them."""
+
+    def __init__(self):
+        super().__init__()
+        self.sleeping = threading.Event()
+        self.release = threading.Event()
+
+    def sleep(self, seconds):
+        self.sleeping.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test never released the clock")
+        super().sleep(seconds)
+
+
+def no_model(_task):
+    raise AssertionError("a replay must not build a model")
+
+
+def workflow_manager(tmp_path, options=None, clock=None, model_factory=no_model, **extra):
+    clock = clock or FakeClock()
+    app = FakeApp(clock, options)
+    exe = tmp_path / "Mes.exe"
+    exe.write_bytes(b"")
+    manager = RunManager(
+        tmp_path / "runs", "ad.exe", str(exe), model_factory,
+        desktop_factory=lambda: DesktopClient("ad.exe", "run1", runner=app),
+        replay_toolbox_factory=lambda desktop, task, observer, captures_dir: Toolbox(
+            desktop, task, confirm=lambda _prompt: False, sleep=clock.sleep, clock=clock.now, observer=observer,
+            asker=NoAsker(), captures_dir=captures_dir, gated=False),
+        workflow_dir=tmp_path / "workflows",
+        **extra,
+    )
+    return manager, app
+
+
+def stored(tmp_path, system="mes", **overrides):
+    make_values(tmp_path)
+    return WorkflowStore(tmp_path / "workflows", system).add(replay_workflow(tmp_path, system=system, **overrides))
+
+
+def given(tmp_path, **overrides):
+    values = {"save_path": str(tmp_path / "out" / "a.xlsx")}
+    values.update(overrides)
+    return values
+
+
+def test_workflows_lists_the_systems_entries(tmp_path):
+    first = stored(tmp_path)
+    second = stored(tmp_path, goal="다른 지시")
+    stored(tmp_path, system="other")
+    manager, _ = workflow_manager(tmp_path)
+
+    listed = manager.workflows("mes")
+
+    assert [item["id"] for item in listed] == [first["id"], second["id"]]
+    assert set(listed[0]) == {"id", "goal", "status", "passes", "failures", "verified_with_other_values",
+                              "params", "fixed"}
+    assert listed[0]["status"] == "unverified" and listed[0]["passes"] == 0 and listed[1]["goal"] == "다른 지시"
+    assert listed[0]["params"][0] == {"name": "shop", "kind": "list", "example": ["WA0", "WA1"]}
+    assert [param["name"] for param in listed[0]["params"]] == ["shop", "period", "save_path"]
+    assert manager.workflows("nothing-here") == []
+
+
+def test_workflows_survives_a_broken_file(tmp_path):
+    good = stored(tmp_path)
+    folder = tmp_path / "workflows" / "mes"
+    (folder / "w-20261119-900.yaml").write_text("format: 1\nid: [broken", encoding="utf-8")
+    (folder / "w-20261119-901.yaml").write_text("format: 1\nid: w-20261119-901\n", encoding="utf-8")
+    manager, _ = workflow_manager(tmp_path)
+
+    assert [item["id"] for item in manager.workflows("mes")] == [good["id"]]
+
+
+def test_workflows_of_an_invalid_system_name_are_refused(tmp_path):
+    manager, _ = workflow_manager(tmp_path)
+
+    with pytest.raises(InvalidRun):
+        manager.workflows("../escape")
+
+
+def test_the_workflow_folder_follows_the_argument_then_the_settings_then_the_environment(tmp_path):
+    exe = tmp_path / "Mes.exe"
+    exe.write_bytes(b"")
+    common = {"runs_dir": tmp_path / "runs", "binary": "ad.exe", "default_exe": str(exe), "model_factory": no_model}
+    env = {"AGENT_WORKFLOW_DIR": str(tmp_path / "env")}
+    settings = {"workflow_dir": str(tmp_path / "set")}
+
+    assert RunManager(**common, workflow_dir=tmp_path / "arg", task_defaults=settings,
+                      environ=env).workflow_root == (tmp_path / "arg").resolve()
+    assert RunManager(**common, task_defaults=settings, environ=env).workflow_root == (tmp_path / "set").resolve()
+    assert RunManager(**common, environ=env).workflow_root == (tmp_path / "env").resolve()
+    assert RunManager(**common).workflow_root == tmp_path / "default-workflows"
+
+
+def test_start_workflow_runs_without_a_model(tmp_path):
+    workflow = stored(tmp_path)
+    manager, app = workflow_manager(tmp_path)
+
+    run_id = manager.start_workflow(workflow["id"], given(tmp_path, shop="WA3"), system="mes")
+    manager.join(timeout=10)
+
+    meta = run_json(tmp_path, run_id)
+    assert meta["status"] == "verified" and meta["started_by"] == "workflow" and meta["model"] == "workflow"
+    assert meta["workflow_run"] == {"id": workflow["id"], "steps": 12, "steps_done": 12, "code": None}
+    assert app.applied == {"WA3"} and app.saved == [str(tmp_path / "out" / "a.xlsx")]
+    steps = [event for event in run_events(tmp_path, run_id) if event["type"] == "workflow_step"]
+    assert len(steps) == 12 and all(event["ok"] for event in steps)
+    assert (tmp_path / "runs" / run_id / "summary.txt").is_file()
+    assert manager.active() is None
+
+
+@pytest.mark.parametrize(("workflow_id", "values", "code"), [
+    ("w-20991231-001", {}, "WORKFLOW_NOT_FOUND"),
+    (None, {"nope": "1"}, "PARAM_UNKNOWN"),
+    (None, {"shop": "WA0,,WA1"}, "PARAM_INVALID"),
+    (None, {"save_path": "relative.xlsx"}, "PARAM_INVALID"),
+])
+def test_start_workflow_refuses_bad_input(tmp_path, workflow_id, values, code):
+    workflow = stored(tmp_path)
+    manager, app = workflow_manager(tmp_path)
+
+    with pytest.raises(InvalidRun, match=code):
+        manager.start_workflow(workflow_id or workflow["id"], values, system="mes")
+
+    assert not (tmp_path / "runs").exists() and app.calls == [] and manager.active() is None
+
+
+def test_start_workflow_refuses_a_save_path_that_exists(tmp_path):
+    workflow = stored(tmp_path)
+    taken = tmp_path / "out" / "taken.xlsx"
+    taken.write_bytes(b"old")
+    manager, app = workflow_manager(tmp_path)
+
+    with pytest.raises(InvalidRun, match="FILE_EXISTS"):
+        manager.start_workflow(workflow["id"], {"save_path": str(taken)}, system="mes")
+
+    assert not (tmp_path / "runs").exists() and app.calls == []
+
+
+@pytest.mark.parametrize("values", [None, ["shop"], {"shop": 3}, {1: "x"}])
+def test_start_workflow_needs_text_values_by_name(tmp_path, values):
+    workflow = stored(tmp_path)
+    manager, _ = workflow_manager(tmp_path)
+
+    with pytest.raises(InvalidRun):
+        manager.start_workflow(workflow["id"], values, system="mes")
+
+
+def test_start_workflow_refuses_a_broken_workflow_file(tmp_path):
+    workflow = stored(tmp_path)
+    path = tmp_path / "workflows" / "mes" / f"{workflow['id']}.yaml"
+    path.write_text(path.read_text(encoding="utf-8") + "x: 1\n", encoding="utf-8")
+    manager, _ = workflow_manager(tmp_path)
+
+    with pytest.raises(InvalidRun, match="WORKFLOW_INVALID"):
+        manager.start_workflow(workflow["id"], given(tmp_path), system="mes")
+
+
+def test_only_one_run_at_a_time_includes_replays(tmp_path):
+    workflow = stored(tmp_path)
+    clock = BlockingClock()
+    manager, _ = workflow_manager(tmp_path, AppOptions(menu_after_s=3), clock=clock,
+                                  model_factory=lambda _task: GatedModel())
+
+    run_id = manager.start_workflow(workflow["id"], given(tmp_path), system="mes")
+    assert clock.sleeping.wait(timeout=5)
+    assert manager.active() == run_id
+    with pytest.raises(RunBusy):
+        manager.start_workflow(workflow["id"], given(tmp_path, save_path=str(tmp_path / "out" / "b.xlsx")),
+                               system="mes")
+    with pytest.raises(RunBusy):
+        manager.start("설정을 열어줘", None, 2)
+
+    clock.release.set()
+    manager.join(timeout=10)
+    assert manager.active() is None
+
+
+def test_stop_reaches_a_replay(tmp_path):
+    workflow = stored(tmp_path)
+    clock = BlockingClock()
+    manager, app = workflow_manager(tmp_path, AppOptions(menu_after_s=3), clock=clock)
+
+    run_id = manager.start_workflow(workflow["id"], given(tmp_path), system="mes")
+    assert clock.sleeping.wait(timeout=5)
+    assert manager.stop(run_id) and manager.stopping()
+    clock.release.set()
+    manager.join(timeout=10)
+
+    meta = run_json(tmp_path, run_id)
+    assert meta["status"] == "stopped" and meta["workflow_run"]["code"] == "STOPPED_BY_USER"
+    assert meta["workflow_run"]["steps_done"] == 1
+    assert app.process_alive and "close-app" not in app.command_names()
+    assert any(event["type"] == "stop_requested" for event in run_events(tmp_path, run_id))
+
+
+def test_the_replay_updates_the_store(tmp_path):
+    workflow = stored(tmp_path)
+    store = WorkflowStore(tmp_path / "workflows", "mes")
+    manager, _ = workflow_manager(tmp_path)
+    manager.start_workflow(workflow["id"], given(tmp_path, shop="WA3"), system="mes")
+    manager.join(timeout=10)
+
+    passed = store.get(workflow["id"])
+    assert passed["status"] == "verified" and passed["passes"] == 1 and passed["verified_with_other_values"] is True
+
+    failing, _ = workflow_manager(tmp_path, AppOptions(duplicate_menu=True))
+    run_id = failing.start_workflow(workflow["id"], given(tmp_path, save_path=str(tmp_path / "out" / "c.xlsx")),
+                                    system="mes")
+    failing.join(timeout=10)
+    after = store.get(workflow["id"])
+    assert run_json(tmp_path, run_id)["status"] == "stopped"
+    assert after["failures"] == 1 and after["status"] == "verified" and after["passes"] == 1
+
+
+class AfterRunSpy:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, model, result, run_dir, store, log):
+        self.calls.append({"model": model, "status": result.status, "run_dir": run_dir, "folder": store.folder,
+                           "finished": json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["status"]})
+        log({"type": "workflow", "created": True, "id": "w-20261119-001", "code": None, "steps": 3, "params": 1})
+        return RunResult(result.status, result.steps, result.reason, tokens=(result.tokens or 0) + 7,
+                         stats=result.stats)
+
+
+def test_a_model_run_started_here_makes_a_workflow(tmp_path, monkeypatch):
+    spy = AfterRunSpy()
+    monkeypatch.setattr(run_manager_module, "after_run", spy)
+    model = launch_then_finish()
+    manager, _ = make_manager(tmp_path, model, workflow_dir=tmp_path / "workflows")
+
+    run_id = manager.start("설정을 열어줘", None, 2, system="mes")
+    manager.join(timeout=10)
+
+    assert len(spy.calls) == 1
+    seen = spy.calls[0]
+    assert seen["model"] is model and seen["run_dir"] == tmp_path / "runs" / run_id
+    assert seen["folder"] == (tmp_path / "workflows").resolve() / "mes"
+    assert seen["finished"] == "running"
+    meta = run_json(tmp_path, run_id)
+    assert meta["workflow"] == {"created": True, "id": "w-20261119-001", "code": None}
+    assert meta["tokens"] >= 7
+
+
+class RunThenDraft:
+    """Plays the list run's turns, then answers the workflow draft call with the list draft."""
+
+    def __init__(self, turns, draft):
+        self.run = ScriptedModel(turns)
+        self.draft = draft
+
+    def respond(self, instructions, items, tools, effort=None):
+        if any(tool.get("name") == "propose_workflow" for tool in tools):
+            return self.draft.respond(instructions, items, tools, effort)
+        return self.run.respond(instructions, items, tools, effort)
+
+
+def test_a_successful_model_run_here_makes_a_workflow_with_the_real_authoring(tmp_path):
+    from test_workflow_author import DraftModel, list_draft
+    from workflow_support import LIST_GOAL, ListApp, _Accepting, _turns
+
+    saved = tmp_path / "out" / "front.xlsx"
+    saved.parent.mkdir(parents=True)
+    app = ListApp(saved)
+    exe = tmp_path / "Mes.exe"
+    exe.write_bytes(b"")
+    draft = DraftModel(list_draft())
+    manager = RunManager(
+        tmp_path / "runs", "ad.exe", str(exe), lambda _task: RunThenDraft(_turns(app, str(saved)), draft),
+        lambda desktop, task, confirm, observer, asker, knowledge, captures_dir: Toolbox(
+            desktop, task, confirm=confirm, sleep=lambda _s: None, observer=observer, asker=_Accepting(),
+            knowledge=knowledge, captures_dir=captures_dir),
+        desktop_factory=lambda: DesktopClient("ad.exe", "run1", runner=app.run),
+        task_defaults={"max_steps": 60}, workflow_dir=tmp_path / "workflows", knowledge_dir=tmp_path / "knowledge",
+    )
+
+    run_id = manager.start(LIST_GOAL, None, 2, system="mes")
+    manager.join(timeout=30)
+
+    meta = run_json(tmp_path, run_id)
+    assert meta["status"] == "confirmed", meta.get("reason")
+    made = [event for event in run_events(tmp_path, run_id) if event["type"] == "workflow"]
+    assert len(made) == 1 and made[0]["created"] is True, made
+    entries = WorkflowStore(tmp_path / "workflows", "mes").entries()
+    assert [entry["id"] for entry in entries] == [made[0]["id"]] == [meta["workflow"]["id"]]
+    assert entries[0]["status"] == "unverified" and len(draft.calls) == 1
+
+
+def test_the_default_replay_toolbox_asks_no_one_and_knows_nothing(tmp_path):
+    from agent.task import Task
+
+    toolbox = run_manager_module.default_replay_toolbox(
+        DesktopClient("ad.exe", "run1", runner=FakeCli()), Task("g", str(tmp_path / "A.exe"), 2, []), None,
+        tmp_path / "captures")
+
+    assert toolbox._gated is False and isinstance(toolbox.asker, NoAsker) and toolbox.knowledge is None
+    assert toolbox.can_ask is False
+
+
+def test_a_replay_without_a_save_path_saves_under_its_own_run_id(tmp_path):
+    workflow = stored(tmp_path)
+    manager, app = workflow_manager(tmp_path)
+
+    run_id = manager.start_workflow(workflow["id"], {}, system="mes")
+    manager.join(timeout=10)
+
+    assert run_json(tmp_path, run_id)["status"] == "verified"
+    [saved] = app.saved
+    assert run_id in Path(saved).name and Path(saved).parent == tmp_path / "out" and "check" not in Path(saved).name

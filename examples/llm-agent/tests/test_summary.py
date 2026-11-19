@@ -545,3 +545,85 @@ def test_summary_never_shows_the_ready_text():
     summary_text = "\n".join(summarize(run, events))
     assert READY_MARK not in summary_text
     assert "  준비: ready · 1초 · 대상 그대로" in summary_text
+
+
+WORKFLOW_MADE = {"type": "workflow", "created": True, "id": "w-20261119-001", "code": None, "steps": 12, "params": 2}
+WORKFLOW_RUN = {"id": "w-20261119-001", "steps": 12, "steps_done": 5, "code": "EXPECT_UNMET"}
+TEXT_MARK = "ZQX-워크플로글-4417"
+
+
+def lines_with(prefix, run, events):
+    return [line for line in summarize(run, events) if line.startswith(prefix)]
+
+
+def test_summary_of_a_made_workflow():
+    assert lines_with("  workflow:", {"status": "confirmed"}, [WORKFLOW_MADE]) == [
+        "  workflow: 만듦 w-20261119-001 · 단계 12 · 파라미터 2"]
+
+
+def test_summary_of_a_failed_authoring():
+    failed = {"type": "workflow", "created": False, "id": None, "code": "LOCATOR_NOT_UNIQUE", "steps": 0, "params": 0}
+
+    assert lines_with("  workflow:", {"status": "confirmed"}, [failed]) == ["  workflow: 못 만듦 · LOCATOR_NOT_UNIQUE"]
+
+
+def test_a_failed_authoring_without_a_code_says_so():
+    failed = {"type": "workflow", "created": False, "id": None, "code": None, "steps": 0, "params": 0}
+
+    assert lines_with("  workflow:", {}, [failed]) == ["  workflow: 못 만듦 · 코드 없음"]
+
+
+def test_the_last_workflow_event_is_summarized():
+    failed = {"type": "workflow", "created": False, "id": None, "code": "DRAFT_INVALID", "steps": 0, "params": 0}
+
+    assert lines_with("  workflow:", {}, [failed, WORKFLOW_MADE]) == [
+        "  workflow: 만듦 w-20261119-001 · 단계 12 · 파라미터 2"]
+
+
+def test_summary_of_a_replay():
+    stopped = {"status": "stopped", "workflow_run": WORKFLOW_RUN}
+    passed = {"status": "verified", "workflow_run": {**WORKFLOW_RUN, "steps_done": 12, "code": None}}
+
+    assert lines_with("  재실행:", stopped, []) == ["  재실행: w-20261119-001 · 단계 5/12 · EXPECT_UNMET"]
+    assert lines_with("  재실행:", passed, []) == ["  재실행: w-20261119-001 · 단계 12/12 · 통과"]
+
+
+def test_a_run_without_workflow_has_no_workflow_lines():
+    lines = summarize({"status": "confirmed"}, [])
+
+    assert not any(line.startswith(("  workflow:", "  재실행:")) for line in lines)
+
+
+def test_odd_workflow_values_are_unknown_or_other():
+    odd_event = {"type": "workflow", "created": True, "id": "보고서", "code": None, "steps": -1, "params": "2"}
+    odd_run = {"workflow_run": {"id": 7, "steps": "12", "steps_done": None, "code": None}}
+
+    assert lines_with("  workflow:", {}, [odd_event]) == ["  workflow: 만듦 기타 · 단계 알 수 없음 · 파라미터 알 수 없음"]
+    assert lines_with("  재실행:", odd_run, []) == ["  재실행: 기타 · 단계 알 수 없음/알 수 없음 · 통과"]
+    assert lines_with("  workflow:", {}, [{"type": "workflow", "created": "yes"}]) == []
+    assert lines_with("  재실행:", {"workflow_run": "w-20261119-001"}, []) == []
+
+
+def test_a_code_that_is_not_code_shaped_is_shown_as_other():
+    failed = {"type": "workflow", "created": False, "id": None, "code": f"{TEXT_MARK} 화면", "steps": 0, "params": 0}
+    stopped = {"workflow_run": {**WORKFLOW_RUN, "code": "C:\\out\\a.xlsx 없음"}}
+
+    assert lines_with("  workflow:", {}, [failed]) == ["  workflow: 못 만듦 · 기타"]
+    assert lines_with("  재실행:", stopped, []) == ["  재실행: w-20261119-001 · 단계 5/12 · 기타"]
+
+
+def test_summary_never_shows_goal_param_or_path_text():
+    events = [
+        {"type": "plan", "revision": 0, "stages": [{"n": 1, "goal": f"{TEXT_MARK} 목표", "done_when": TEXT_MARK,
+                                                    "status": "done"}],
+         "params": [{"name": "shopname", "value": f"{TEXT_MARK} WA0"}], "step": 1},
+        {"type": "finish_note", "by": "human", "saved_path": f"C:\\{TEXT_MARK}\\front.xlsx"},
+        WORKFLOW_MADE,
+        {"type": "workflow_step", "n": 1, "kind": "act", "ok": False, "code": "EXPECT_UNMET", "ms": 15000,
+         "goal": f"{TEXT_MARK} 단계 목표"},
+    ]
+    run = {"status": "stopped", "goal": TEXT_MARK, "workflow_run": WORKFLOW_RUN}
+
+    text = "\n".join(summarize(run, events))
+
+    assert TEXT_MARK not in text and "shopname" not in text and "front.xlsx" not in text

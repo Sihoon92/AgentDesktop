@@ -736,6 +736,8 @@ pre {
 .knowledge-view { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
 .knowledge-view[hidden] { display: none; }
 .knowledge-mode .start-form, .knowledge-mode .layout, .knowledge-mode .timeline-bar { display: none; }
+.workflow-mode .start-form, .workflow-mode .layout, .workflow-mode .timeline-bar { display: none; }
+.view-switch button[hidden] { display: none; }
 .knowledge-inner { max-width: 960px; margin: 0 auto; padding: 16px; }
 .knowledge-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 14px; margin-bottom: 4px; }
 .knowledge-head h2 { font-size: 16px; margin: 0 auto 4px 0; }
@@ -782,6 +784,21 @@ pre {
 }
 .knowledge-editor textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .knowledge-editor .hint { margin: 0; }
+
+/* the workflow view: the knowledge view's frame, with parameter boxes and a replay button */
+.workflow-status { font-size: 12px; font-weight: 650; }
+.workflow-status.verified { color: var(--ok); }
+.workflow-status.unverified { color: var(--muted); }
+.workflow-goal { margin: 0; overflow-wrap: anywhere; }
+.workflow-params { display: grid; gap: 6px; }
+.workflow-param { display: grid; grid-template-columns: minmax(80px, max-content) minmax(56px, max-content) minmax(160px, 1fr); align-items: center; gap: 2px 10px; }
+.workflow-param-name { font-family: var(--mono); font-size: 13px; }
+.workflow-param-kind { font-size: 12px; color: var(--muted); }
+.workflow-param input { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; min-width: 0; }
+.workflow-param input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.workflow-param-hint { grid-column: 3; font-size: 12px; color: var(--muted); }
+.workflow-fixed { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.workflow-fixed-title { color: var(--muted); }
 
 /* stages of a planned run: the bar over the capture, the timeline boundaries, limit questions */
 .stage-bar { flex: none; display: grid; gap: 4px; margin: 0 12px 8px; }

@@ -58,16 +58,17 @@ def openai_model(task, settings=None):
         raise RunStartFailed(str(error)) from error
 
 
-def build_run_manager(runs_dir, default_exe, knowledge_dir=None, task_defaults=None):
+def build_run_manager(runs_dir, default_exe, knowledge_dir=None, task_defaults=None, workflow_dir=None):
     """Returns a RunManager, or None with the reason when this viewer can only replay.
     task_defaults (the settings file) give new runs their model and the other task keys,
-    with OPENAI_MODEL below them."""
+    with OPENAI_MODEL below them. The workflow folder is workflow_dir, else the settings'
+    workflow_dir, else AGENT_WORKFLOW_DIR, else the default."""
     binary = find_binary()
     if not binary.exists():
         return None, f"agent-desktop 바이너리가 없어 기록 보기만 합니다: {binary}"
     model_factory = functools.partial(openai_model, settings=task_defaults)
     return RunManager(runs_dir, binary, default_exe, model_factory, knowledge_dir=knowledge_dir,
-                      task_defaults=task_defaults, environ=os.environ), None
+                      task_defaults=task_defaults, environ=os.environ, workflow_dir=workflow_dir), None
 
 
 def open_fragment(runs_dir, value):
@@ -259,6 +260,9 @@ def main(argv=None):
     parser.add_argument("--exe", help="Default absolute path of the app that new runs control (default: exe in the settings file)")
     parser.add_argument("--knowledge-dir", type=Path,
                         help=f"Knowledge folder to show and to give viewer-started runs (default: the settings file's knowledge_dir, ${KNOWLEDGE_ENV} or knowledge/)")
+    parser.add_argument("--workflow-dir", type=Path,
+                        help="Workflow folder to list and replay from (default: the settings file's workflow_dir, "
+                             "$AGENT_WORKFLOW_DIR or workflows/)")
     parser.add_argument("--no-browser", action="store_true", help="Print the address without opening a browser")
     parser.add_argument("--open", metavar="RUN_ID", help="Open this run (or 'latest') instead of the list")
     parser.add_argument("--prune", action="store_true", help="List runs to delete; nothing is deleted without --yes")
@@ -296,8 +300,9 @@ def main(argv=None):
         print(f"오류: {error}", file=sys.stderr)
         return 2
     knowledge_dir = knowledge_root(args.knowledge_dir, settings.get("knowledge_dir"))
+    workflow_option = {"workflow_dir": args.workflow_dir} if args.workflow_dir else {}
     run_manager, notice = build_run_manager(runs_dir, args.exe or settings.get("exe"), knowledge_dir=knowledge_dir,
-                                            task_defaults=settings)
+                                            task_defaults=settings, **workflow_option)
     token = secrets.token_urlsafe(32)
 
     def make(port):
@@ -323,6 +328,8 @@ def main(argv=None):
     print(f"뷰어 주소: {url}")
     print(f"기록 폴더: {runs_dir}")
     print(f"지식 폴더: {knowledge_dir}")
+    if getattr(run_manager, "workflow_root", None) is not None:
+        print(f"workflow 폴더: {run_manager.workflow_root}")
     if settings:
         print(f"설정 파일: {settings_path()} ({', '.join(settings)})")
     if notice:

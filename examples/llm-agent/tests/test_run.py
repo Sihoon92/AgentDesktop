@@ -1,5 +1,7 @@
+import datetime
 import json
 import os
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -1176,3 +1178,394 @@ def test_the_ready_text_and_system_paths_are_not_printed(monkeypatch, tmp_path, 
     out = capsys.readouterr().out
     assert "생산운영" not in out and "SiteA" not in out and "SiteB" not in out
     assert "systems, ready_text" in out
+
+
+# workflow: making one after a model run, replaying one, listing them (plan task 8, contract C12)
+
+WORKFLOW_ID = "w-20261119-001"
+REPLAY_DAY = datetime.date(2026, 11, 19)
+
+
+def workflow_sample(tmp_path):
+    from test_workflow_format import sample
+
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    return sample(save_example=str(out / "front.xlsx"))
+
+
+def stored_workflow(tmp_path, system="virtualmes"):
+    """A workflow saved under tmp_path/workflows/<system>; returns (store, the saved workflow)."""
+    from agent.workflow_store import WorkflowStore
+
+    store = WorkflowStore(tmp_path / "workflows", system)
+    saved = store.add({**workflow_sample(tmp_path), "system": system}, today=REPLAY_DAY)
+    return store, saved
+
+
+def replay_setup(monkeypatch, tmp_path, result=None):
+    """isolate, a stored workflow, AGENT_WORKFLOW_DIR on it, no API key, and run_workflow replaced:
+    returns (seen calls, sessions started, the store)."""
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("AGENT_WORKFLOW_DIR", str(tmp_path / "workflows"))
+    store, _ = stored_workflow(tmp_path)
+    sessions = []
+    monkeypatch.setattr(run, "start_session", lambda *_a, **_k: sessions.append(1) or "session-1")
+    monkeypatch.setattr(run, "make_client", lambda *_a, **_k: pytest.fail("a replay must not make a model client"))
+    seen = []
+
+    def replay(toolbox, task, workflow, values, log=lambda _e: None, stop=None, started_at=None):
+        seen.append({"toolbox": toolbox, "task": task, "workflow": workflow, "values": values})
+        log({"type": "workflow_step", "n": 1, "kind": "act", "ok": True, "code": None, "ms": 5, "goal": "메뉴 목록이 열림"})
+        steps = len(workflow["steps"])
+        return result or run.RunResult("verified", steps, "workflow 통과",
+                                       stats={"workflow_run": {"id": workflow["id"], "steps": steps,
+                                                               "steps_done": steps, "code": None}})
+
+    monkeypatch.setattr(run, "run_workflow", replay)
+    return seen, sessions, store
+
+
+def test_workflow_replay_runs_without_a_model_or_api_key(monkeypatch, tmp_path, capsys):
+    seen, _, _ = replay_setup(monkeypatch, tmp_path)
+
+    code = run.main(["--exe", str(mes_exe(tmp_path)), "--workflow", WORKFLOW_ID, "--param", "shop=WA0, WA2"])
+
+    assert code == 0
+    [call] = seen
+    assert call["workflow"]["id"] == WORKFLOW_ID
+    assert call["values"]["shop"] == ["WA0", "WA2"]
+    assert call["values"]["save_path"].endswith(".xlsx") and call["values"]["save_path"] != workflow_sample(
+        tmp_path)["params"]["save_path"]["example"]
+    task = call["task"]
+    assert (task.goal, task.permission_level, task.exe) == (call["workflow"]["goal"], 2, str(mes_exe(tmp_path)))
+    toolbox = call["toolbox"]
+    assert toolbox._gated is False and isinstance(toolbox.asker, NoAsker) and toolbox.knowledge is None
+    [(meta, kinds)] = recorded_runs(tmp_path)
+    assert meta["started_by"] == "workflow" and meta["model"] == "workflow" and meta["status"] == "verified"
+    assert meta["workflow_run"] == {"id": WORKFLOW_ID, "steps": 10, "steps_done": 10, "code": None}
+    assert "workflow_step" in kinds
+    assert "OPENAI_API_KEY" not in capsys.readouterr().err
+
+
+def test_replay_values_are_resolved_with_the_real_run_id(monkeypatch, tmp_path):
+    seen, _, _ = replay_setup(monkeypatch, tmp_path)
+
+    run.main(["--exe", str(mes_exe(tmp_path)), "--workflow", WORKFLOW_ID])
+
+    [run_dir] = [path for path in (tmp_path / "runs").iterdir() if path.is_dir()]
+    assert run_dir.name in seen[0]["values"]["save_path"]
+    assert "check" not in seen[0]["values"]["save_path"]
+
+
+def test_replay_updates_the_store(monkeypatch, tmp_path):
+    _, _, store = replay_setup(monkeypatch, tmp_path)
+
+    assert run.main(["--exe", str(mes_exe(tmp_path)), "--workflow", WORKFLOW_ID]) == 0
+    assert store.get(WORKFLOW_ID)["status"] == "verified" and store.get(WORKFLOW_ID)["passes"] == 1
+
+    stopped = run.RunResult("stopped", 3, "EXPECT_UNMET",
+                            stats={"workflow_run": {"id": WORKFLOW_ID, "steps": 10, "steps_done": 3,
+                                                    "code": "EXPECT_UNMET"}})
+    (tmp_path / "second").mkdir()
+    _, _, store = replay_setup(monkeypatch, tmp_path / "second", result=stopped)
+    assert run.main(["--exe", str(mes_exe(tmp_path)), "--workflow", WORKFLOW_ID]) == 1
+    after = store.get(WORKFLOW_ID)
+    assert after["failures"] == 1 and after["status"] == "unverified"
+
+
+def test_replay_takes_the_settings_ready_signal_for_its_exe(monkeypatch, tmp_path):
+    seen, _, _ = replay_setup(monkeypatch, tmp_path)
+    exe = mes_exe(tmp_path)
+    settings_file(monkeypatch, tmp_path, f"systems:\n  virtualmes: '{exe}'\nready_text: 준비\n")
+
+    run.main(["--system", "virtualmes", "--workflow", WORKFLOW_ID])
+
+    assert seen[0]["task"].exe == str(exe) and seen[0]["task"].ready_text == "준비"
+
+
+@pytest.mark.parametrize("extra, text", [
+    (["--workflow", "w-20990101-001"], "WORKFLOW_NOT_FOUND"),
+    (["--workflow", WORKFLOW_ID, "--param", "nope=1"], "PARAM_UNKNOWN"),
+    (["--workflow", WORKFLOW_ID, "--param", "period=전주"], "PARAM_UNKNOWN"),
+    (["--workflow", WORKFLOW_ID, "--param", "shop"], "이름=값"),
+    (["--workflow", WORKFLOW_ID, "--param", "shop=WA0,,WA1"], "PARAM_INVALID"),
+    (["--workflow", WORKFLOW_ID, "--param", "save_path=out.xlsx"], "PARAM_INVALID"),
+    (["--workflow", WORKFLOW_ID, "--goal", "g"], "함께 쓸 수 없습니다"),
+    (["--workflow", WORKFLOW_ID, "--baseline"], "함께 쓸 수 없습니다"),
+    (["--workflow", WORKFLOW_ID, "--make-workflow", "latest"], "함께 쓸 수 없습니다"),
+    (["--workflow", WORKFLOW_ID, "--system", "다른시스템"], "SYSTEM_MISMATCH"),
+    (["--param", "shop=WA0"], "--workflow"),
+])
+def test_bad_replay_arguments_fail_before_anything_starts(monkeypatch, tmp_path, capsys, extra, text):
+    seen, sessions, _ = replay_setup(monkeypatch, tmp_path)
+
+    code = run.main(["--exe", str(mes_exe(tmp_path)), *extra])
+
+    assert code == 2
+    assert text in capsys.readouterr().err
+    assert seen == [] and sessions == []
+    assert not (tmp_path / "runs").exists()
+
+
+def test_an_existing_save_path_is_refused_before_anything_starts(monkeypatch, tmp_path, capsys):
+    seen, sessions, _ = replay_setup(monkeypatch, tmp_path)
+    taken = tmp_path / "out" / "taken.xlsx"
+    taken.write_bytes(b"x")
+
+    code = run.main(["--exe", str(mes_exe(tmp_path)), "--workflow", WORKFLOW_ID, "--param", f"save_path={taken}"])
+
+    assert code == 2 and "FILE_EXISTS" in capsys.readouterr().err
+    assert seen == [] and sessions == [] and not (tmp_path / "runs").exists()
+
+
+def test_a_broken_workflow_file_is_refused_before_anything_starts(monkeypatch, tmp_path, capsys):
+    seen, sessions, store = replay_setup(monkeypatch, tmp_path)
+    (store.folder / f"{WORKFLOW_ID}.yaml").write_text("format: 1\nsteps: [\n", encoding="utf-8")
+
+    code = run.main(["--exe", str(mes_exe(tmp_path)), "--workflow", WORKFLOW_ID])
+
+    assert code == 2 and "WORKFLOW_INVALID" in capsys.readouterr().err
+    assert seen == [] and sessions == []
+
+
+def test_workflow_replay_with_a_task_file_is_refused(monkeypatch, tmp_path, capsys):
+    seen, sessions, _ = replay_setup(monkeypatch, tmp_path)
+
+    code = run.main([str(write_task(tmp_path, mes_exe(tmp_path))), "--workflow", WORKFLOW_ID])
+
+    assert code == 2 and "함께 쓸 수 없습니다" in capsys.readouterr().err
+    assert seen == [] and sessions == []
+
+
+def test_workflows_lists_ids_status_and_param_names(monkeypatch, tmp_path, capsys):
+    _, sessions, store = replay_setup(monkeypatch, tmp_path)
+    (store.folder / "w-20261119-002.yaml").write_text("format: [broken\n", encoding="utf-8")
+
+    code = run.main(["--system", "virtualmes", "--workflows"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert WORKFLOW_ID in out and "unverified" in out and "shop" in out and "save_path" in out
+    assert "w-20261119-002" not in out
+    assert sessions == [] and not (tmp_path / "runs").exists()
+
+
+def test_workflows_of_a_system_without_any_say_so(monkeypatch, tmp_path, capsys):
+    replay_setup(monkeypatch, tmp_path)
+
+    code = run.main(["--system", "없는시스템", "--workflows"])
+
+    assert code == 0 and WORKFLOW_ID not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("where", ["argument", "settings", "environment", "default"])
+def test_workflow_dir_order(monkeypatch, tmp_path, capsys, where):
+    from agent import workflow_store
+
+    isolate(monkeypatch, tmp_path)
+    roots = {name: tmp_path / name for name in ("argument", "settings", "environment", "default")}
+    for name, root in roots.items():
+        workflow_store.WorkflowStore(root, "virtualmes").add(
+            {**workflow_sample(tmp_path), "system": "virtualmes", "goal": f"{name} 목표"}, today=REPLAY_DAY)
+    monkeypatch.setattr(workflow_store, "DEFAULT_ROOT", roots["default"])
+    argv = ["--system", "virtualmes", "--workflows"]
+    if where == "argument":
+        argv += ["--workflow-dir", str(roots["argument"])]
+    if where in ("argument", "settings"):
+        settings_file(monkeypatch, tmp_path, f"workflow_dir: '{roots['settings']}'\n")
+    if where in ("argument", "settings", "environment"):
+        monkeypatch.setenv("AGENT_WORKFLOW_DIR", str(roots["environment"]))
+    else:
+        monkeypatch.delenv("AGENT_WORKFLOW_DIR", raising=False)
+
+    assert run.main(argv) == 0
+
+    out = capsys.readouterr().out
+    assert f"{where} 목표" in out
+    assert [name for name in roots if f"{name} 목표" in out] == [where]
+
+
+def authoring_setup(monkeypatch, tmp_path, status="confirmed", made=True):
+    """A model run (run_agent replaced) whose after_run saves the sample through the store it is
+    given, or fails with LOCATOR_NOT_UNIQUE. Returns what after_run saw."""
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("AGENT_WORKFLOW_DIR", str(tmp_path / "workflows"))
+    monkeypatch.setattr(run, "make_client", lambda *_a, **_k: FakeClient())
+    monkeypatch.setattr(run, "run_agent", lambda *_a, **_k: run.RunResult(status, 4, "done", 100))
+    seen = {}
+
+    def after_run(model, result, run_dir, store, log):
+        seen.update(model=model, run_dir=run_dir, store=store, finished=(run_dir / "run.json").read_text(
+            encoding="utf-8"))
+        if made:
+            saved = store.add({**workflow_sample(tmp_path), "system": store.system})
+            outcome = {"created": True, "id": saved["id"], "code": None, "steps": 10, "params": 2}
+        else:
+            outcome = {"created": False, "id": None, "code": "LOCATOR_NOT_UNIQUE", "steps": 0, "params": 0}
+        log({"type": "workflow", **outcome})
+        return run.RunResult(result.status, result.steps, result.reason, result.tokens + 50, result.stats)
+
+    monkeypatch.setattr(run, "after_run", after_run)
+    return seen
+
+
+def test_a_successful_model_run_makes_a_workflow_and_prints_its_id(monkeypatch, tmp_path, capsys):
+    seen = authoring_setup(monkeypatch, tmp_path)
+
+    code = run.main(["--exe", str(mes_exe(tmp_path)), "--goal", "조회해서 저장해줘"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "workflow: w-" in out and "(미확인, 단계 10, 파라미터 2)" in out
+    assert list((tmp_path / "workflows" / "virtualmes").glob("w-*.yaml"))
+    assert seen["store"].folder == tmp_path / "workflows" / "virtualmes"
+    assert '"status": "running"' in seen["finished"]
+    [(meta, kinds)] = recorded_runs(tmp_path)
+    assert meta["workflow"]["created"] is True and meta["tokens"] == 150
+    assert kinds.index("workflow") < kinds.index("finish")
+
+
+def test_a_failed_authoring_prints_the_code_and_keeps_the_result(monkeypatch, tmp_path, capsys):
+    authoring_setup(monkeypatch, tmp_path, made=False)
+
+    code = run.main(["--exe", str(mes_exe(tmp_path)), "--goal", "조회해서 저장해줘"])
+
+    assert code == 0
+    assert "workflow를 만들지 못했습니다: LOCATOR_NOT_UNIQUE" in capsys.readouterr().out
+    [(meta, _)] = recorded_runs(tmp_path)
+    assert meta["status"] == "confirmed" and meta["workflow"]["code"] == "LOCATOR_NOT_UNIQUE"
+
+
+def test_a_stopped_run_makes_no_workflow(monkeypatch, tmp_path, capsys):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("AGENT_WORKFLOW_DIR", str(tmp_path / "workflows"))
+    client = FakeClient()
+    monkeypatch.setattr(run, "make_client", lambda *_a, **_k: client)
+    monkeypatch.setattr(run, "run_agent", lambda *_a, **_k: run.RunResult("stopped", 2, "멈춤", 10))
+
+    code = run.main(["--exe", str(mes_exe(tmp_path)), "--goal", "조회해서 저장해줘"])
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "workflow" not in out
+    assert client.calls == []
+    [(meta, kinds)] = recorded_runs(tmp_path)
+    assert "workflow" not in meta and "workflow" not in kinds
+    assert not (tmp_path / "workflows").exists()
+
+
+def test_a_baseline_run_makes_no_workflow(monkeypatch, tmp_path):
+    isolate(monkeypatch, tmp_path)
+    monkeypatch.setattr(run, "run_baseline", lambda *_a, **_k: run.RunResult("verified", 1, "ok"))
+    monkeypatch.setattr(run, "after_run", lambda *_a, **_k: pytest.fail("a baseline run makes no workflow"))
+
+    assert run.main([str(write_task(tmp_path, mes_exe(tmp_path))), "--baseline"]) == 0
+
+
+def past_run(tmp_path, run_id, system="virtualmes"):
+    folder = tmp_path / "runs" / run_id
+    folder.mkdir(parents=True)
+    (folder / "run.json").write_text(json.dumps({"format": 2, "run_id": run_id, "status": "confirmed",
+                                                 "system": system, "goal": "g"}), encoding="utf-8")
+    (folder / "events.jsonl").write_text("", encoding="utf-8")
+    return folder
+
+
+def make_workflow_setup(monkeypatch, tmp_path, key="test"):
+    isolate(monkeypatch, tmp_path)
+    if key:
+        monkeypatch.setenv("OPENAI_API_KEY", key)
+    monkeypatch.setenv("AGENT_WORKFLOW_DIR", str(tmp_path / "workflows"))
+    monkeypatch.setattr(run, "make_client", lambda *_a, **_k: FakeClient())
+    sessions = []
+    monkeypatch.setattr(run, "start_session", lambda *_a, **_k: sessions.append(1) or "session-1")
+    seen = []
+
+    def make_workflow(model, run_dir, store, log, today=None):
+        seen.append({"model": model, "run_dir": run_dir, "store": store})
+        log({"type": "workflow", "created": True, "id": WORKFLOW_ID, "code": None, "steps": 9, "params": 2})
+        return {"created": True, "id": WORKFLOW_ID, "code": None, "steps": 9, "params": 2}, 70
+
+    monkeypatch.setattr(run, "make_workflow", make_workflow)
+    return seen, sessions
+
+
+@pytest.mark.parametrize("which", ["latest", "20261119-090000"])
+def test_make_workflow_from_a_past_run(monkeypatch, tmp_path, capsys, which):
+    seen, sessions = make_workflow_setup(monkeypatch, tmp_path)
+    older = past_run(tmp_path, "20261119-090000")
+    newer = past_run(tmp_path, "20261119-100000", system="mes")
+    before = {path: path.read_bytes() for path in (tmp_path / "runs").rglob("*") if path.is_file()}
+
+    code = run.main(["--make-workflow", which])
+
+    assert code == 0
+    assert {path: path.read_bytes() for path in (tmp_path / "runs").rglob("*") if path.is_file()} == before
+    [call] = seen
+    expected = newer if which == "latest" else older
+    assert call["run_dir"] == expected
+    assert call["store"].system == ("mes" if which == "latest" else "virtualmes")
+    assert call["store"].folder.parent == tmp_path / "workflows"
+    assert f"workflow: {WORKFLOW_ID}" in capsys.readouterr().out
+    assert sessions == []
+
+
+def test_make_workflow_needs_an_api_key(monkeypatch, tmp_path, capsys):
+    seen, _ = make_workflow_setup(monkeypatch, tmp_path, key=None)
+    past_run(tmp_path, "20261119-090000")
+
+    code = run.main(["--make-workflow", "latest"])
+
+    assert code == 2 and "OPENAI_API_KEY" in capsys.readouterr().err and seen == []
+
+
+@pytest.mark.parametrize("which", ["20261119-235959", "latest"])
+def test_make_workflow_from_a_missing_run_is_refused(monkeypatch, tmp_path, capsys, which):
+    seen, _ = make_workflow_setup(monkeypatch, tmp_path)
+
+    code = run.main(["--make-workflow", which])
+
+    assert code == 2 and seen == []
+    assert capsys.readouterr().err
+
+
+def test_workflow_lines_never_print_param_values_or_paths(monkeypatch, tmp_path, capsys):
+    seen, _, _ = replay_setup(monkeypatch, tmp_path)
+    target = tmp_path / "out" / "secret-name.xlsx"
+
+    run.main(["--exe", str(mes_exe(tmp_path)), "--workflow", WORKFLOW_ID, "--param", "shop=WA9",
+              "--param", f"save_path={target}"])
+
+    out = capsys.readouterr().out
+    summary_start = out.index("요약 (화면 내용 없음)")
+    assert "WA9" not in out[summary_start:] and "secret-name" not in out[summary_start:]
+
+
+def test_workflow_files_are_ignored_by_git():
+    found = subprocess.run(["git", "check-ignore", "-q", "workflows/virtualmes/w-20261119-001.yaml"],
+                           cwd=run.HERE, capture_output=True)
+
+    assert found.returncode == 0
+
+
+@pytest.mark.parametrize("extra", [["--goal", "g"], ["--exe", "C:\apps\a.exe"], ["--baseline"], ["--workflows"]])
+def test_make_workflow_with_other_modes_is_refused(monkeypatch, tmp_path, capsys, extra):
+    seen, sessions = make_workflow_setup(monkeypatch, tmp_path)
+    past_run(tmp_path, "20261119-090000")
+
+    code = run.main(["--make-workflow", "latest", *extra])
+
+    assert code == 2 and "함께 쓸 수 없습니다" in capsys.readouterr().err
+    assert seen == [] and sessions == []
+
+
+def test_make_workflow_with_a_task_file_is_refused(monkeypatch, tmp_path, capsys):
+    seen, _ = make_workflow_setup(monkeypatch, tmp_path)
+    past_run(tmp_path, "20261119-090000")
+
+    code = run.main([str(write_task(tmp_path, mes_exe(tmp_path))), "--make-workflow", "latest"])
+
+    assert code == 2 and "함께 쓸 수 없습니다" in capsys.readouterr().err and seen == []

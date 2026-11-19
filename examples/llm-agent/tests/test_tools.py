@@ -595,7 +595,7 @@ class EventObserver(RecordingObserver):
         self.events.append(event)
 
 
-def toolbox_for(scene, tmp_path, image_mode="user_message", level=2):
+def toolbox_for(scene, tmp_path, image_mode="user_message", level=2, **options):
     cli = FakeCli(scene=scene)
     cli.on_click = lambda x, y: cli.open_window(LIST_WINDOW) if x > 1180 else cli.focus(mark=3)
     observer = EventObserver()
@@ -608,6 +608,7 @@ def toolbox_for(scene, tmp_path, image_mode="user_message", level=2):
         clock=lambda: next(clock),
         observer=observer,
         captures_dir=tmp_path / "captures",
+        **options,
     )
     toolbox.call("launch_target", {})
     toolbox.call("observe", OBSERVE)
@@ -935,3 +936,126 @@ def test_a_ref_preview_does_not_carry_the_native_id(tmp_path):
     target = toolbox.preview("click", click_ref("@s1:e1"))
 
     assert target["role"] == "button" and "native_id" not in target
+
+
+SHOP_MARK, LINE_MARK, GOOD_MARK = 1, 3, 4
+
+
+def raw_click(window_id="w-1", x=1300, y=530):
+    return {"window_id": window_id, "x": x, "y": y, "button": "left", "intent": "누른다", "knowledge_id": None}
+
+
+def mismatch_twice(toolbox):
+    """Two presses that only move the caret while a window was expected: two mismatches in a row."""
+    return [toolbox.call("click_part", part_call(mark=mark, part="center", expect="window_opened"))
+            for mark in (SHOP_MARK, LINE_MARK)]
+
+
+def test_marked_elements_are_the_latest_observation_in_mark_order(scene):
+    toolbox, cli, _ = scene
+
+    elements = toolbox.marked_elements()
+
+    assert [e["mark"] for e in elements] == list(range(1, 8))
+    assert [e["name"] for e in elements] == ["Shop", "조회", "라인", "양품수", "믹싱", "바인더", None]
+    assert elements[1]["ref"] == "@s1:e1" and elements[1]["role"] == "button"
+    assert elements[2]["bounds"] == LINE_BOX
+    cli.scene["trees"] = {"w-1": _single(_node("statictext", "하나뿐", LINE_BOX))["tree"]}
+    toolbox.call("observe", OBSERVE)
+    assert [(e["mark"], e["name"]) for e in toolbox.marked_elements()] == [(1, "하나뿐")]
+
+
+def test_marked_elements_are_copies(scene):
+    toolbox, _, _ = scene
+
+    first = toolbox.marked_elements()
+    first[0]["name"] = "바뀜"
+    first[0]["states"].append("checked")
+    first[0]["bounds"]["x"] = 0
+    first.clear()
+
+    again = toolbox.marked_elements()
+    assert again[0]["name"] == "Shop" and again[0]["states"] == [] and again[0]["bounds"]["x"] == 1010
+    assert len(again) == 7
+
+
+def test_current_window_follows_the_observed_window(scene):
+    fresh, _ = make()
+    assert fresh.current_window is None
+    toolbox, cli, _ = scene
+    assert toolbox.current_window == "w-1"
+
+    cli.open_window(LIST_WINDOW)
+    toolbox.call("observe", {**OBSERVE, "window_id": "w-2"})
+    assert toolbox.current_window == "w-2"
+
+    toolbox.call("observe", {**OBSERVE, "window_id": "w-1"})
+    assert toolbox.current_window == "w-1"
+
+
+def test_an_ungated_toolbox_runs_a_raw_point_click_without_a_question(tmp_path):
+    toolbox, cli, _ = toolbox_for(SCENE, tmp_path, gated=False)
+
+    result = toolbox.call("mouse_click", raw_click())
+
+    assert "refused" not in result and result["ok"] is True
+    assert ["mouse-click", "--xy=1300,530", "--button=left"] in cli.commands()
+
+
+def test_an_ungated_toolbox_is_not_blocked_after_mismatches(tmp_path):
+    toolbox, cli, _ = toolbox_for(SCENE, tmp_path, gated=False)
+
+    first, second = mismatch_twice(toolbox)
+    third = toolbox.call("click_part", part_call(mark=GOOD_MARK, part="center", expect="window_opened"))
+
+    assert first["expected_met"] is False and second["expected_met"] is False
+    assert first["effects"]["focus"] == {"mark": LINE_MARK, "name": "라인"}
+    assert "refused" not in third and third["expected_met"] is True
+    assert cli.command_names().count("mouse-click") == 3
+    assert toolbox.evidence([GOOD_MARK], None) == {"ok": True, "kind": "text"}
+
+
+def test_an_ungated_toolbox_keeps_the_level_and_the_process_but_not_the_repeat_guard(tmp_path):
+    low, low_cli, _ = toolbox_for(SCENE, tmp_path, level=1, gated=False)
+    assert "refused" in low.call("mouse_click", raw_click())
+    assert "mouse-click" not in low_cli.command_names()
+
+    toolbox, cli, _ = toolbox_for(SCENE, tmp_path, gated=False)
+    other = {"window_id": WINDOW_OTHER_INSTANCE, "combo": "enter", "intent": "누른다", "knowledge_id": None}
+    assert "refused" in toolbox.call("press", other)
+    assert "press" not in cli.command_names()
+    for _ in range(5):
+        result = toolbox.call("click_part", part_call(mark=SHOP_MARK, part="center", expect="window_opened"))
+        assert "refused" not in result
+    assert cli.command_names().count("mouse-click") == 5
+    assert "refused" not in toolbox.call("toggle", {"ref": "@s1:e1", "intent": "켠다", "knowledge_id": None})
+    assert "refused" not in toolbox.call("toggle", {"ref": "@s1:e1", "intent": "켠다", "knowledge_id": None})
+    assert cli.command_names().count("toggle") == 2
+
+
+def test_a_gated_toolbox_keeps_the_repeat_guard(tmp_path):
+    toolbox, cli, _ = toolbox_for(SCENE, tmp_path)
+    for _ in range(2):
+        toolbox.call("toggle", {"ref": "@s1:e1", "intent": "켠다", "knowledge_id": None})
+    assert cli.command_names().count("toggle") == 1
+    for _ in range(3):
+        toolbox.call("click", {"ref": "@s1:e1", "intent": "누른다", "knowledge_id": None})
+    with pytest.raises(AgentStopped):
+        toolbox.call("click", {"ref": "@s1:e1", "intent": "누른다", "knowledge_id": None})
+
+
+def test_a_gated_toolbox_is_unchanged(tmp_path):
+    for options in ({}, {"gated": True}):
+        toolbox, cli, _ = toolbox_for(SCENE, tmp_path, **options)
+
+        assert toolbox.call("mouse_click", raw_click())["refused_code"] == "needs_confirmation"
+        assert "mouse-click" not in cli.command_names()
+        first, second = mismatch_twice(toolbox)
+        third = toolbox.call("click_part", part_call(mark=GOOD_MARK, part="center", expect="window_opened"))
+
+        assert first["expected_met"] is False and second["expected_met"] is False
+        assert third["refused_code"] == "blocked_until_question"
+        assert cli.command_names().count("mouse-click") == 2
+        assert toolbox.precheck("click_part", part_call(mark=GOOD_MARK, part="center"))["refused_code"] \
+            == "blocked_until_question"
+        assert toolbox.evidence([GOOD_MARK], None)["refused_code"] == "blocked_until_question"

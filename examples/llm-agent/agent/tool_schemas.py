@@ -146,6 +146,21 @@ SCHEMAS = [
                 "additionalProperties": False,
             },
         },
+        params={
+            "type": "array",
+            "description": "The values from the goal that may differ in a later run, as the goal writes them; "
+                           "an empty list when there are none",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "description": "A short name: lowercase letters, digits and _, starting with a letter"},
+                    "value": {"type": "string", "description": "The value exactly as the goal writes it"},
+                },
+                "required": ["name", "value"],
+                "additionalProperties": False,
+            },
+        },
     ),
     _tool(
         "stage_done",

@@ -55,8 +55,9 @@ async function initKnowledge() {
   const hash = new URLSearchParams(location.hash.slice(1));
   const reply = await knowledgeRequest("/api/knowledge");
   knowledge.available = reply.ok;
-  toggle.hidden = !reply.ok;
+  $("show-knowledge").hidden = !reply.ok;
   if (!reply.ok) return;
+  toggle.hidden = false;
   knowledge.systems = reply.body.systems || [];
   $("show-runs").addEventListener("click", () => showKnowledge(false));
   $("show-knowledge").addEventListener("click", () => showKnowledge(true));

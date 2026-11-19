@@ -60,7 +60,7 @@ def test_a_first_plan_starts_stage_one():
     assert [stage["status"] for stage in event["stages"]] == ["active", "pending", "pending"]
     assert [stage["n"] for stage in event["stages"]] == [1, 2, 3]
     assert event["stages"][1] == {"n": 2, "goal": "단계 2 결과", "done_when": "단계 2 확인", "status": "pending"}
-    assert set(event) == {"type", "revision", "stages"}
+    assert set(event) == {"type", "revision", "stages", "params"}
 
 
 def test_a_plan_outside_one_to_twelve_stages_is_refused():
@@ -408,3 +408,79 @@ def test_records_carry_no_screen_text():
         assert screen_text not in actions
     assert all(set(action) == {"tool", "intent", "expected_met", "refused_code", "opened", "closed"}
                for record in plan.records() for action in record["actions"])
+
+
+SHOP = {"name": "shop", "value": "WA0, WA1"}
+
+
+def test_plan_event_carries_params():
+    plan = StagePlan(LIMIT)
+
+    event = plan.set(stages(2), [SHOP, {"name": "period", "value": "전일"}])
+
+    assert event["params"] == [SHOP, {"name": "period", "value": "전일"}]
+
+
+def test_plan_without_params_gives_an_empty_list():
+    assert StagePlan(LIMIT).set(stages(1))["params"] == []
+    assert StagePlan(LIMIT).set(stages(1), [])["params"] == []
+
+
+@pytest.mark.parametrize("params", [
+    [{"name": "Shop", "value": "a"}],
+    [{"name": "a", "value": ""}],
+    [{"name": "a", "value": "   "}],
+    [{"name": "a", "value": "1"}, {"name": "a", "value": "2"}],
+    [{"name": "1a", "value": "x"}],
+    [{"name": "a" * 33, "value": "x"}],
+    [{"name": f"p{n}", "value": "x"} for n in range(13)],
+    [{"name": "a", "value": 3}],
+    [{"name": "a"}],
+    ["a"],
+    "shop=WA0",
+    ({"name": "a", "value": "x"},),
+])
+def test_bad_params_are_refused(params):
+    plan = StagePlan(LIMIT)
+
+    with pytest.raises(StageError) as raised:
+        plan.set(stages(2), params)
+
+    assert raised.value.code == "bad_params"
+    assert not plan.exists
+
+
+def test_twelve_params_with_long_names_are_accepted():
+    params = [{"name": f"p{n}" + "x" * 29, "value": "x"} for n in range(12)]
+
+    assert len(StagePlan(LIMIT).set(stages(1), params)["params"]) == 12
+
+
+def test_a_refused_revision_keeps_the_plan_in_place():
+    plan = planned(2)
+
+    with pytest.raises(StageError):
+        plan.set(stages(3), [{"name": "Bad", "value": "x"}])
+
+    assert [record["goal"] for record in plan.records()] == ["단계 1 결과", "단계 2 결과"]
+    assert plan.stats()["plan_revisions"] == 0
+
+
+def test_a_revision_may_change_params():
+    plan = StagePlan(LIMIT)
+    plan.set(stages(2), [SHOP])
+    plan.complete("text", "끝")
+
+    event = plan.set(stages(2), [{"name": "shop", "value": "조립"}, {"name": "day", "value": "어제"}])
+
+    assert event["params"] == [{"name": "shop", "value": "조립"}, {"name": "day", "value": "어제"}]
+    assert event["revision"] == 1
+
+
+def test_the_plan_event_holds_a_copy_of_the_params():
+    given = [dict(SHOP)]
+
+    event = StagePlan(LIMIT).set(stages(1), given)
+    given[0]["value"] = "바뀜"
+
+    assert event["params"] == [SHOP]

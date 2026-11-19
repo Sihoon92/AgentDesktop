@@ -639,3 +639,68 @@ def test_a_claimed_run_leaves_no_completion_event(tmp_path):
     log = []
     run_agent(ScriptedModel([finish()]), scene_toolbox(tmp_path, NoAsker()), free_task(), log=log.append)
     assert completions(log) == []
+
+
+def finish_notes(log):
+    return [event for event in log if event.get("type") == "finish_note"]
+
+
+def test_a_successful_finish_logs_the_saved_path(tmp_path):
+    saved = saved_file(tmp_path, "a.xlsx")
+    log = []
+
+    result = run_agent(ScriptedModel([finish(saved_path=saved)]),
+                       scene_toolbox(tmp_path, ScriptedAsker([Answer(text="", accepted=True)])), free_task(),
+                       log=log.append)
+
+    assert result.status == "confirmed"
+    assert finish_notes(log) == [{"type": "finish_note", "by": "human", "saved_path": saved}]
+
+
+def test_a_finish_note_without_a_saved_path_holds_null(tmp_path):
+    log = []
+
+    run_agent(ScriptedModel([finish()]), scene_toolbox(tmp_path, ScriptedAsker([Answer(accepted=True)])),
+              free_task(), log=log.append)
+
+    assert finish_notes(log) == [{"type": "finish_note", "by": "human", "saved_path": None}]
+
+
+def test_a_completion_entry_logs_the_finish_note_by_the_harness(tmp_path):
+    store, (entry,) = store_with(tmp_path, FILE_COMPLETION)
+    saved = saved_file(tmp_path)
+    log = []
+
+    run_agent(ScriptedModel([finish(saved_path=saved, completion_id=entry["id"])]),
+              scene_toolbox(tmp_path, ScriptedAsker([]), store), free_task(), log=log.append)
+
+    assert finish_notes(log) == [{"type": "finish_note", "by": "harness", "saved_path": saved}]
+
+
+def test_a_refused_finish_logs_no_finish_note(tmp_path):
+    log = []
+    model = ScriptedModel([finish(saved_path=r"C:\out\a.xlsx"), GIVE_UP])
+
+    result = run_agent(model, scene_toolbox(tmp_path, ScriptedAsker([Answer(text="아님", accepted=False)])),
+                       free_task(), log=log.append)
+
+    assert result.status == "gave_up"
+    assert finish_notes(log) == []
+
+
+def test_giving_up_logs_no_finish_note(tmp_path):
+    log = []
+
+    run_agent(ScriptedModel([GIVE_UP]), scene_toolbox(tmp_path, ScriptedAsker([])), free_task(), log=log.append)
+
+    assert finish_notes(log) == []
+
+
+def test_a_claimed_finish_logs_the_finish_note_by_the_harness(tmp_path):
+    log = []
+
+    result = run_agent(ScriptedModel([finish(saved_path=r"C:\out\a.xlsx")]), scene_toolbox(tmp_path, NoAsker()),
+                       free_task(), log=log.append)
+
+    assert result.status == "claimed"
+    assert finish_notes(log) == [{"type": "finish_note", "by": "harness", "saved_path": r"C:\out\a.xlsx"}]

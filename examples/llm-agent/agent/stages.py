@@ -8,9 +8,14 @@ A record's actions hold the tool name, the model's intent, and numbers, never te
 the screen: window titles and element names in a result's effects stay out.
 """
 
+import re
+
 from agent.tool_schemas import READ_ONLY_TOOLS
 
 MIN_STAGES, MAX_STAGES, MAX_REVISIONS = 1, 12, 3
+MAX_PARAMS = 12
+PARAM_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
+"""A parameter name as a command line takes it (`--param shop=...`)."""
 SIGNALS = ("mismatch", "abandoned_window", "looked_twice", "limit_question")
 EVIDENCE_KINDS = ("text", "picture")
 LOOKING_TOOLS = frozenset({"observe", "look", "find_cells", "wait_for_text"})
@@ -72,14 +77,19 @@ class StagePlan:
     def exists(self):
         return bool(self._stages)
 
-    def set(self, stages):
+    def set(self, stages, params=None):
         """Sets the first plan or revises it, and returns the plan event.
 
         `stages` is the whole list. A revision must repeat every done stage word for word at
         its place; the stages after them are replaced. The calls, limit and record of the
         stage in progress carry over to the stage that takes its place, so a revision does
-        not reset the call count."""
+        not reset the call count.
+
+        `params` are the goal's values that may differ in a later run, as
+        [{"name", "value"}]; None is an empty list. A revision gives them anew, with no rule
+        about earlier ones. The event carries a copy."""
         parsed = _parsed(stages)
+        checked_params = _checked_params(params)
         if self.exists:
             if self._revision >= self._allowed_revisions:
                 raise StageError("too_many_revisions",
@@ -105,6 +115,7 @@ class StagePlan:
             "revision": self._revision,
             "stages": [{"n": n, "goal": stage.goal, "done_when": stage.done_when, "status": stage.status}
                        for n, stage in enumerate(self._stages, 1)],
+            "params": checked_params,
         }
 
     def allow_revisions(self):
@@ -257,6 +268,31 @@ def _parsed(stages):
             raise StageError("bad_plan", f"Stage {n} needs both goal and done_when")
         parsed.append(tuple(texts))
     return parsed
+
+
+def _checked_params(params):
+    """The params as a new list of {"name", "value"}, or StageError("bad_params"): each name
+    matches PARAM_NAME and differs from the others, each value is non-blank text, and there are
+    at most MAX_PARAMS."""
+    if params is None:
+        return []
+    if not isinstance(params, list):
+        raise StageError("bad_params", "params must be a list of {name, value}")
+    if len(params) > MAX_PARAMS:
+        raise StageError("bad_params", f"At most {MAX_PARAMS} params, not {len(params)}")
+    checked = []
+    for n, param in enumerate(params, 1):
+        name = param.get("name") if isinstance(param, dict) else None
+        value = param.get("value") if isinstance(param, dict) else None
+        if not isinstance(name, str) or not PARAM_NAME.fullmatch(name):
+            raise StageError("bad_params", f"Param {n} needs a name of lowercase letters, digits and _, "
+                                           "starting with a letter, at most 32 characters")
+        if not isinstance(value, str) or not value.strip():
+            raise StageError("bad_params", f"Param {name} needs a value as the goal gives it")
+        if any(item["name"] == name for item in checked):
+            raise StageError("bad_params", f"Param name {name} is given twice")
+        checked.append({"name": name, "value": value})
+    return checked
 
 
 def _window_ids(windows):

@@ -518,3 +518,45 @@ def test_the_prompt_teaches_plans_and_stages():
     for word in ("plan", "stage_done", "done_when", "marks", "capture"):
         assert word in SYSTEM_PROMPT
     assert "latest observation stays" in SYSTEM_PROMPT
+
+
+PARAMS = [{"name": "shop", "value": "WA0, WA1"}, {"name": "period", "value": "전일"}]
+
+
+def test_plan_tool_schema_requires_params():
+    from agent.tool_schemas import SCHEMAS
+
+    [definition] = [tool["definition"] for tool in SCHEMAS if tool["definition"]["name"] == "plan"]
+    parameters = definition["parameters"]
+    params = parameters["properties"]["params"]
+    assert "params" in parameters["required"]
+    assert params["type"] == "array"
+    assert params["items"]["required"] == ["name", "value"]
+    assert params["items"]["additionalProperties"] is False
+    assert set(params["items"]["properties"]) == {"name", "value"}
+
+
+def test_the_loop_passes_params_to_the_plan():
+    _, model, _, log, _ = run([LAUNCH, OBSERVE, turn("plan", {"stages": STAGES, "params": PARAMS}), GIVE_UP])
+
+    [event] = events(log, "plan")
+    assert event["params"] == PARAMS
+    assert output_of(model, 2)["ok"] is True
+
+
+def test_a_plan_without_params_logs_an_empty_list():
+    _, _, _, log, _ = run([LAUNCH, OBSERVE, plan(), GIVE_UP])
+
+    assert events(log, "plan")[0]["params"] == []
+
+
+def test_bad_params_refuse_the_plan_with_their_code():
+    bad = [{"name": "Shop", "value": "WA0"}]
+    _, model, _, log, _ = run([LAUNCH, OBSERVE, turn("plan", {"stages": STAGES, "params": bad}), GIVE_UP])
+
+    assert output_of(model, 2)["refused_code"] == "bad_params"
+    assert events(log, "plan") == []
+
+
+def test_the_prompt_asks_for_params():
+    assert "params" in SYSTEM_PROMPT

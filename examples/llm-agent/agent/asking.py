@@ -50,7 +50,7 @@ REFUSAL_REASONS = {
 
 
 class AskingTools:
-    def _init_asking(self, asker, knowledge, wall, task):
+    def _init_asking(self, asker, knowledge, wall, task, gated=True):
         self.asker = asker
         self.knowledge = knowledge
         self.step = None
@@ -58,6 +58,7 @@ class AskingTools:
         self.stage_records = []
         self._wall = wall
         self._started_at = wall()
+        self._gated = gated
         self._policy = AskPolicy(mismatch_limit=getattr(task, "mismatch_limit", 2))
         self._question_count = 0
         self._question_changes = None
@@ -341,7 +342,9 @@ class AskingTools:
 
     def _gate(self, name, arguments, consume):
         """The refusal for an app-changing call before it runs, or None. Checks knowledge_id,
-        then asks the policy."""
+        then asks the policy. An ungated toolbox refuses nothing here."""
+        if not self._gated:
+            return None
         knowledge_id = arguments.get("knowledge_id")
         if knowledge_id is not None and self._active_entry(knowledge_id) is None:
             return refused(
@@ -404,7 +407,7 @@ class AskingTools:
         self._note_delivery(result)
         expected_met = result.get("expected_met")
         knowledge_id = arguments.get("knowledge_id")
-        if "expected_met" in result:
+        if "expected_met" in result and self._gated:
             self._policy.note_result(expected_met, knowledge_id is not None)
             if expected_met is False and knowledge_id is not None:
                 self.knowledge.count_failure(knowledge_id)

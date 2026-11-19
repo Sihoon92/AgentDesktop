@@ -14,7 +14,7 @@ const STATUS_LABELS = {
   unreadable: "읽을 수 없음",
   legacy: "옛 로그",
 };
-const STARTED_BY_LABELS = { "run.py": "run.py", "run.py --view": "run.py --view", viewer: "뷰어", baseline: "baseline" };
+const STARTED_BY_LABELS = { "run.py": "run.py", "run.py --view": "run.py --view", viewer: "뷰어", baseline: "baseline", workflow: "workflow 재실행" };
 const KEEP_FILTER = "keep";
 const KNOWN_EXPORT = 1;
 const EXPORT_WARNING = "이 파일에는 앱 화면과 UI 텍스트가 들어 있습니다. 공유하기 전에 내용을 확인하세요.";
@@ -435,6 +435,7 @@ function runSummary(run, events) {
     visionReads ? `비전 ${visionReads}회` : null,
     approvals ? `승인 ${approvals.approved} · 거부 ${approvals.rejected}${approvals.unanswered ? ` · 답 없음 ${approvals.unanswered}` : ""}` : null,
     run.started_by ? `시작 ${STARTED_BY_LABELS[run.started_by] || run.started_by}` : null,
+    workflowSummaryPart(run, events),
     run.exe_name || null,
   ].filter(Boolean);
   return {
@@ -949,7 +950,7 @@ function render() {
 }
 
 function timelineLabel(entry) {
-  if (entry.kind === "action") return entry.action.tool;
+  if (entry.kind === "action") return workflowTag(entry) + entry.action.tool;
   if (entry.kind === "proposal") return `제안 ${entry.proposal.tool}${proposalState(entry).suffix}`;
   if (entry.kind === "question") return questionTimelineLabel(entry);
   if (entry.kind === "finish") return STATUS_LABELS[entry.finish.status] || entry.finish.status;
@@ -1074,6 +1075,7 @@ function actionDetails(entry) {
     action.intent ? el("p", { className: "intent", text: action.intent }) : null,
     factList([
       ["모델 스텝", action.step],
+      ["workflow 단계", workflowStepText(entry)],
       ["승인", entry.approval ? `승인함${entry.approval.comment ? ` · ${entry.approval.comment}` : ""}` : null, "ok-text"],
       ["대상", describeTarget(action.target)],
       ["결과", result.ok ? "성공" : "실패", result.ok ? "ok-text" : "bad-text"],
@@ -2212,7 +2214,7 @@ function start() {
   }
   watchViewerControls();
   initKnowledge();
-  loadStatus();
+  loadStatus().then(initWorkflows);
   loadRuns();
   state.timers.live = setInterval(pollLive, POLL_MS);
   state.timers.ready = setInterval(renderReadyBanner, POLL_MS);

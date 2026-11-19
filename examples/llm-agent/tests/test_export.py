@@ -2,6 +2,7 @@ import base64
 import json
 import re
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -245,7 +246,7 @@ def test_export_inlines_every_viewer_script_in_page_order_after_the_record(tmp_p
     html = build_export(copy_questions(tmp_path), REAL_STATIC, NOW)
 
     code = [text for attrs, text in parsed(html).scripts if not attrs]
-    names = ["chat.js", "knowledge.js", "stages.js", "app.js"]
+    names = ["chat.js", "knowledge.js", "workflows.js", "stages.js", "app.js"]
     assert [text.strip() for text in code] == [(REAL_STATIC / name).read_text(encoding="utf-8").strip() for name in names]
     record = html.index('<script id="run-export" type="application/json">')
     assert record < html.index("function renderChat") < html.index("function start()")
@@ -463,3 +464,107 @@ def test_timeline_cells_are_called_steps_and_plan_parts_stages():
         assert old not in page and old not in app
     assert "← → 스텝 이동" in page and "<h2>스텝 정보</h2>" in page and 'aria-label="스텝 타임라인"' in page
     assert 'details: "스텝 정보"' in app
+
+
+# --- workflows in an export (plan task 9) ------------------------------------------------------
+
+REPLAY_EVENTS = [
+    {"type": "observation", "id": 1, "source": "ready"},
+    {"type": "action", "step": None, "tool": "click", "intent": "메뉴 목록이 열림", "before": 1},
+    {"type": "observation", "id": 2, "source": "action"},
+    {"type": "workflow_step", "n": 1, "kind": "act", "ok": True, "code": None, "ms": 120, "goal": "메뉴 목록이 열림"},
+    {"type": "action", "step": None, "tool": "click_part", "intent": "Shop이 고른 값만 선택됨", "before": 2},
+    {"type": "workflow_step", "n": 2, "kind": "select_only", "ok": False, "code": "EXPECT_UNMET", "ms": 15000,
+     "goal": "Shop이 고른 값만 선택됨"},
+    {"type": "finish", "status": "stopped", "steps": 1, "reason": "EXPECT_UNMET", "tokens": 0},
+]
+
+
+def replay_run(tmp_path, events=REPLAY_EVENTS):
+    run_dir = copy_sample(tmp_path)
+    meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    meta.update(started_by="workflow", model="workflow", status="stopped")
+    (run_dir / "run.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    (run_dir / "events.jsonl").write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events),
+                                          encoding="utf-8")
+    return run_dir
+
+
+def exported_script(html, marker):
+    return next(text for attrs, text in parsed(html).scripts if not attrs and marker in text)
+
+
+def run_marks(script, run, events, calls):
+    """Runs the exported workflows.js in node with `state` set to the run and returns what `calls` give."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    program = (f"const state = {{ run: {json.dumps(run)}, events: {json.dumps(events, ensure_ascii=False)} }};\n"
+               f"{script}\nprocess.stdout.write(JSON.stringify([{', '.join(calls)}]));\n")
+    out = subprocess.run([node, "-e", program], capture_output=True, timeout=30)
+    assert out.returncode == 0, out.stderr.decode("utf-8", "replace")
+    return json.loads(out.stdout.decode("utf-8"))
+
+
+def test_the_export_hides_the_workflow_list_and_never_starts_it(tmp_path):
+    html = build_export(replay_run(tmp_path), REAL_STATIC, NOW)
+    elements = {attrs.get("id"): attrs for _, attrs, _ in page_elements(page_skeleton(html)) if attrs.get("id")}
+    app = (REAL_STATIC / "app.js").read_text(encoding="utf-8")
+    workflows = (REAL_STATIC / "workflows.js").read_text(encoding="utf-8")
+
+    assert "hidden" in elements["show-workflows"] and "hidden" in elements["workflow-view"]
+    assert "hidden" in elements["view-switch"]
+    start = app[app.index("function start()"):]
+    assert start.index("startExport(exported);\n    return;") < start.index("initWorkflows")
+    init = workflows[workflows.index("async function initWorkflows()"):]
+    assert init.index("state.exportMode") < init.index("knowledgeRequest(")
+    assert "innerHTML" not in workflows and "insertAdjacentHTML" not in workflows
+
+
+def test_the_export_shows_a_replays_steps_and_where_it_stopped(tmp_path):
+    html = build_export(replay_run(tmp_path), REAL_STATIC, NOW)
+    record = payload(html)
+    script = exported_script(html, "function workflowTag")
+
+    tags, first, second, summary = run_marks(script, record["run"], record["events"], [
+        "[1, 4, 6].map((at) => workflowTag({ at }))",
+        "workflowStepText({ at: 1 })",
+        "workflowStepText({ at: 4 })",
+        "workflowSummaryPart(state.run, state.events)",
+    ])
+
+    assert [event["type"] for event in record["events"]].count("workflow_step") == 2
+    assert tags == ["W1 ", "W2 ", ""]
+    assert first == "1. 메뉴 목록이 열림 (동작 · 통과)"
+    assert second == "2. Shop이 고른 값만 선택됨 (이것만 선택 · 멈춤 EXPECT_UNMET)"
+    assert summary == "workflow 멈춘 단계 2 · EXPECT_UNMET"
+    app = exported_script(html, "function start()")
+    assert "workflowTag(entry) + entry.action.tool" in app and '["workflow 단계", workflowStepText(entry)]' in app
+    assert "workflowSummaryPart(run, events)" in app
+
+
+@pytest.mark.parametrize(("events", "expected"), [
+    ([{"type": "workflow", "created": True, "id": "w-20261119-001", "code": None, "steps": 9, "params": 2}],
+     "workflow w-20261119-001 미확인 · 단계 9 · 파라미터 2"),
+    ([{"type": "workflow", "created": False, "id": None, "code": "LOCATOR_NOT_UNIQUE", "steps": 0, "params": 0}],
+     "workflow 못 만듦 · LOCATOR_NOT_UNIQUE"),
+    ([{"type": "finish", "status": "verified", "steps": 3, "reason": "done", "tokens": 9}], None),
+])
+def test_the_run_summary_says_what_making_a_workflow_gave(tmp_path, events, expected):
+    html = build_export(replay_run(tmp_path, events), REAL_STATIC, NOW)
+    script = exported_script(html, "function workflowTag")
+
+    [summary] = run_marks(script, {"started_by": "run.py"}, events, ["workflowSummaryPart(state.run, state.events)"])
+
+    assert summary == expected
+
+
+def test_a_replay_that_stopped_before_any_step_says_its_code(tmp_path):
+    events = [{"type": "finish", "status": "stopped", "steps": 0, "reason": "READY_ALREADY_RUNNING", "tokens": 0}]
+    html = build_export(replay_run(tmp_path, events), REAL_STATIC, NOW)
+    record = payload(html)
+
+    [summary] = run_marks(exported_script(html, "function workflowTag"), record["run"], record["events"],
+                          ["workflowSummaryPart(state.run, state.events)"])
+
+    assert summary == "workflow 멈춤 · READY_ALREADY_RUNNING"

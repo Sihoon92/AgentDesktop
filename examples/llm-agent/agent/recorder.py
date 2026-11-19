@@ -8,7 +8,11 @@ warning on the event, or an entry in `errors` printed to stderr.
 
 run.json holds numbers only about stages (`stages`, written at finish); the plan's texts and the
 stage notes are kept in events.jsonl alone. Of a ready wait it holds the status, the seconds and
-whether the target process changed (`ready`, written when the wait ends), never the signal.
+whether the target process changed (`ready`, written when the wait ends), never the signal. Of a
+workflow it holds whether one was made, its id and its code (`workflow`, from the workflow event),
+and of a replay the workflow's id, step counts and code (`workflow_run`, from the finish stats);
+a value that is not a plain id, code or count keeps the whole entry out. Step goals, parameter
+names and values and saved paths stay in events.jsonl.
 
 run.json is format 2: it names the recording process (pid and its start time) and carries a
 heartbeat_at that moves with every event and, from a daemon thread, at least every
@@ -30,6 +34,7 @@ from agent.frames import frame_origin, to_image_rect
 from agent.observe import visible_elements
 from agent.process_identity import process_started_at
 from agent.ready import READY_STATUSES
+from agent.summary import CODE, WORKFLOW_ID
 from agent.survey import kinds
 
 RUN_FORMAT = 2
@@ -47,7 +52,7 @@ RESULT_FIELDS = (
     "expect", "effects", "expected_met", "verdict", "knowledge_id", "refused_code", "capture",
 )
 KEPT_EVENTS = ("knowledge_loaded", "knowledge_used", "knowledge_failed", "completion", "registration", "warning",
-               "plan", "stage", "stop_requested")
+               "plan", "stage", "stop_requested", "finish_note", "workflow", "workflow_step")
 MODEL_FIELDS = ("call_tokens", "stage", "stage_calls", "stage_limit")
 """Counts a model event may carry besides step and tokens; each is kept only when present."""
 STAGE_COUNTS = ("stage_count", "stages_done", "limit_questions", "plan_revisions", "max_call_tokens")
@@ -56,6 +61,8 @@ STAGE_LISTS = ("stage_calls",)
 VISION_COUNTS = ("vision_calls", "vision_tokens")
 """The vision counts of a split-mode run that run.json keeps at its top level. The vision
 model's questions and answers stay in events.jsonl."""
+WORKFLOW_RUN_FIELDS = ("id", "steps", "steps_done", "code")
+"""The keys of a replay's workflow_run, all of which run.json keeps or none."""
 STEP_FILLED_EVENTS = ("capture", "vision")
 """Toolbox events that get the current step when they come without one."""
 
@@ -167,6 +174,8 @@ class RunRecorder:
         if kind == "stop_requested":
             self._note_stop_requested(event)
             return
+        if kind == "workflow":
+            self._note_workflow(event)
         if kind in KEPT_EVENTS:
             self._append(event)
             return
@@ -212,6 +221,9 @@ class RunRecorder:
             if isinstance(stats, dict):
                 self._run["stages"] = _stage_numbers(stats)
                 self._run.update({key: stats[key] for key in VISION_COUNTS if _whole(stats.get(key))})
+                replay = _workflow_run(stats.get("workflow_run"))
+                if replay is not None:
+                    self._run["workflow_run"] = replay
             self._write_run_locked()
         self._append(
             {
@@ -235,6 +247,19 @@ class RunRecorder:
             return
         with self._run_lock:
             self._run["ready"] = {"status": status, "waited_s": round(waited_ms / 1000), "switched": switched}
+            self._write_run_locked()
+
+    def _note_workflow(self, event):
+        """Writes {"created", "id", "code"} of a workflow event into run.json at once. An event
+        whose created is not true or false, whose id is not a workflow id or null, or whose code is
+        not a code or null, is kept in events.jsonl alone."""
+        created, workflow_id, code = event.get("created"), event.get("id"), event.get("code")
+        if not isinstance(created, bool) or not (workflow_id is None or _workflow_id(workflow_id)):
+            return
+        if not (code is None or _code_shaped(code)):
+            return
+        with self._run_lock:
+            self._run["workflow"] = {"created": created, "id": workflow_id, "code": code}
             self._write_run_locked()
 
     def _note_stop_requested(self, event):
@@ -407,6 +432,27 @@ def _stage_numbers(stats):
     return numbers
 
 
+def _workflow_run(replay):
+    """A replay's {"id", "steps", "steps_done", "code"} when it holds exactly those keys with a
+    workflow id, whole-number counts and a code or null; otherwise None."""
+    if not isinstance(replay, dict) or set(replay) != set(WORKFLOW_RUN_FIELDS):
+        return None
+    code = replay["code"]
+    if not _workflow_id(replay["id"]) or not (_whole(replay["steps"]) and _whole(replay["steps_done"])):
+        return None
+    if not (code is None or _code_shaped(code)):
+        return None
+    return {key: replay[key] for key in WORKFLOW_RUN_FIELDS}
+
+
+def _workflow_id(value):
+    return isinstance(value, str) and WORKFLOW_ID.fullmatch(value) is not None
+
+
+def _code_shaped(value):
+    return isinstance(value, str) and CODE.fullmatch(value) is not None
+
+
 def _meta_value(meta, key):
     value = meta.get(key)
     if key in BOOLEAN_META and not isinstance(value, bool):
@@ -419,7 +465,8 @@ def _whole(value):
 
 
 def _elements(tree, frame):
-    """Returns every control and at most MAX_TEXT_ELEMENTS text elements, and whether text was cut."""
+    """Returns every control and at most MAX_TEXT_ELEMENTS text elements, and whether text was cut.
+    Each element keeps its observation mark and scope, so a cut never renumbers the rest."""
     elements = []
     texts = 0
     for element in visible_elements(tree):

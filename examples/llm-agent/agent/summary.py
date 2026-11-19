@@ -9,7 +9,10 @@ counts, which come from run.json's `stages` (numbers only, written when the run 
 vision counts of a split-mode run, from run.json's `vision_calls` and `vision_tokens`, and the
 ready wait, from run.json's `ready` (a status, seconds and whether the target changed); a value
 the record does not hold is printed as UNKNOWN or its line is left out. The texts of a plan and
-its stages are never read.
+its stages are never read. A workflow line comes from the last `workflow` event (made or not,
+its id, code and counts) and a replay line from run.json's `workflow_run`; a workflow id is
+printed only in the WORKFLOW_ID form. Step goals, parameter names and values and saved paths are
+never read.
 
 The run's own folder gets the same lines as summary.txt when it ends (write_summary); the
 code line is the version recorded in run.json as `code` when the run started.
@@ -35,6 +38,9 @@ UNCONFIRMED_VERDICT = "unconfirmed"
 SEPARATOR = " · "
 CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,47}")
 VERSION = re.compile(r"[0-9a-f]{4,40}(\+수정)?")
+WORKFLOW_ID = re.compile(r"w-[0-9][0-9-]{0,31}")
+"""A workflow id as a store gives it (w-YYYYMMDD-NNN): never screen text."""
+MADE, NOT_MADE, PASSED = "만듦", "못 만듦", "통과"
 GIT_TIMEOUT_S = 5
 SUMMARY_FILE = "summary.txt"
 AGENT_HOME = Path(__file__).resolve().parent.parent
@@ -74,6 +80,12 @@ def summarize(run, events, code=None):
     vision_calls, vision_tokens = _count(run.get("vision_calls")), _count(run.get("vision_tokens"))
     if vision_calls is not None and vision_tokens is not None:
         lines.append(f"  비전 호출 {vision_calls}{SEPARATOR}비전 토큰 {vision_tokens}")
+    workflow = _workflow(events)
+    if workflow:
+        lines.append("  workflow: " + workflow)
+    replay = _replay(run.get("workflow_run"))
+    if replay:
+        lines.append("  재실행: " + replay)
     knowledge = _knowledge(events)
     if knowledge:
         lines.append("  지식: " + knowledge)
@@ -297,6 +309,40 @@ def _ready(ready):
     switched = ready.get("switched")
     moved = "대상 바뀜" if switched is True else "대상 그대로" if switched is False else f"대상 {UNKNOWN}"
     return SEPARATOR.join([ready["status"], f"{UNKNOWN if seconds is None else seconds}초", moved])
+
+
+def _workflow(events):
+    """`만듦 w-… · 단계 12 · 파라미터 2` or `못 만듦 · CODE` from the last workflow event, or None
+    when there is none or it does not say whether a workflow was made."""
+    last = next((event for event in reversed(events) if event.get("type") == "workflow"), None)
+    if last is None or not isinstance(last.get("created"), bool):
+        return None
+    if not last["created"]:
+        return SEPARATOR.join([NOT_MADE, NO_CODE if last.get("code") is None else _code(last.get("code"))])
+    return SEPARATOR.join([f"{MADE} {_workflow_id(last.get('id'))}", f"단계 {_counted(last.get('steps'))}",
+                           f"파라미터 {_counted(last.get('params'))}"])
+
+
+def _replay(replay):
+    """`w-… · 단계 5/12 · CODE` from run.json's workflow_run, with 통과 when it has no code, or None
+    when the run was no replay."""
+    if not isinstance(replay, dict):
+        return None
+    code = replay.get("code")
+    return SEPARATOR.join([
+        _workflow_id(replay.get("id")),
+        f"단계 {_counted(replay.get('steps_done'))}/{_counted(replay.get('steps'))}",
+        PASSED if code is None else _code(code),
+    ])
+
+
+def _workflow_id(value):
+    return value if isinstance(value, str) and WORKFLOW_ID.fullmatch(value) else OTHER
+
+
+def _counted(value):
+    count = _count(value)
+    return UNKNOWN if count is None else count
 
 
 def _last_observation(events):

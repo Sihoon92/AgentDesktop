@@ -34,6 +34,8 @@ Rules:
   stage is done (not what to press), done_when is what on the screen proves it. Put the values the
   goal gives (codes, names, dates) into the stage text as given. Tools that change the app, except
   launch_target, are refused until a plan exists.
+- In plan's params, list the goal's values that may differ in a later run, each with a short
+  lowercase name and the value exactly as the goal writes it. Give an empty list when there are none.
 - When the current stage is done, call stage_done with evidence from the latest observation: the
   marks of elements that show the result, or the capture id of a look when only the picture shows
   it, and a note on what you saw.
@@ -364,7 +366,7 @@ class _Run:
 
     def _set_plan(self, arguments):
         try:
-            event = self._plan.set(arguments.get("stages"))
+            event = self._plan.set(arguments.get("stages"), arguments.get("params"))
         except StageError as error:
             if error.code == "too_many_revisions":
                 return self._ask_for_revisions(error)
@@ -466,14 +468,14 @@ def _finish(toolbox, task, arguments, log):
         log({"type": "completion", "by": "task", "id": None, "met": check["met"], "detail": detail})
         if not check["met"]:
             return False, {"verified": False, "unmet": check["unmet"], "hint": "The goal is not met yet."}
-        return _ended(toolbox, task, arguments, "verified", "harness")
+        return _ended(toolbox, task, arguments, "verified", "harness", log)
     completion_id = arguments.get("completion_id")
     if completion_id:
         check = toolbox.check_completion(completion_id, saved_path)
         if not check["met"]:
             return False, {"verified": False, "unmet": check["detail"]}
         by = "human" if check["by"] == "human" else "harness"
-        return _ended(toolbox, task, arguments, "confirmed" if by == "human" else "verified", by)
+        return _ended(toolbox, task, arguments, "confirmed" if by == "human" else "verified", by, log)
     if toolbox.can_ask:
         text = f"{COMPLETION_QUESTION}\n{evidence}"
         if saved_path:
@@ -483,11 +485,14 @@ def _finish(toolbox, task, arguments, log):
              "detail": answer.text})
         if answer.accepted is not True:
             return False, {"confirmed": False, "comment": answer.text}
-        return _ended(toolbox, task, arguments, "confirmed", "human")
-    return _ended(toolbox, task, arguments, "claimed", "harness")
+        return _ended(toolbox, task, arguments, "confirmed", "human", log)
+    return _ended(toolbox, task, arguments, "claimed", "harness", log)
 
 
-def _ended(toolbox, task, arguments, status, by):
-    toolbox.finish_note = {"goal": task.goal, "evidence": arguments["evidence"],
-                           "saved_path": arguments.get("saved_path"), "by": by}
+def _ended(toolbox, task, arguments, status, by, log):
+    """Ends the run with a judged finish: keeps the finish note for registration and logs the
+    saved path as a finish_note event, the one place a later reader finds it."""
+    saved_path = arguments.get("saved_path")
+    toolbox.finish_note = {"goal": task.goal, "evidence": arguments["evidence"], "saved_path": saved_path, "by": by}
+    log({"type": "finish_note", "by": by, "saved_path": saved_path})
     return True, {"status": status, "reason": arguments["evidence"]}

@@ -9,6 +9,12 @@ knowledge store of its system, so a confirmed run can register what the person t
 Every run that ends leaves summary.txt in its folder, as a run.py run does.
 stop() asks the active run to stop at its next safe place (agent.loop): each run gets its own
 stop signal, so a stop never reaches the next run, and the target app is left open.
+
+A model run that succeeds is followed by making a workflow from its record, before the record is
+finished, as run.py does. workflows() lists a system's saved workflows and start_workflow()
+replays one with no model: an ungated toolbox, no one to ask and no knowledge, its values
+checked before a run folder exists and again with the real run id, and the outcome counted in
+the store when it ends. Replays share the one-run-at-a-time slot and the stop signal.
 """
 
 import functools
@@ -17,7 +23,7 @@ import time
 from pathlib import Path, PureWindowsPath
 
 from agent.approval import ApprovalGate, Decision
-from agent.ask import Answer, AskGate
+from agent.ask import Answer, AskGate, NoAsker
 from agent.desktop import DesktopClient, start_session
 from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, system_name
 from agent.llm import ModelSetupError, Models
@@ -29,6 +35,14 @@ from agent.systems import apply_ready, system_exe, system_names
 from agent.systems import default_choice as settings_default_choice
 from agent.task import Task, TaskError, task_from_args
 from agent.tools import Toolbox
+from agent.workflow_author import after_run
+from agent.workflow_format import WorkflowError, resolve_values
+from agent.workflow_run import record_outcome, run_workflow
+from agent.workflow_store import WorkflowStore, workflow_root
+
+WORKFLOW_RUN = "workflow"
+"""started_by and model of a replay in run.json: no model takes part."""
+VALUE_CHECK_RUN_ID = "check"
 
 
 class RunBusy(Exception):
@@ -52,6 +66,12 @@ def default_toolbox(desktop, task, confirm, observer, asker, knowledge, captures
                    captures_dir=captures_dir, vision=vision)
 
 
+def default_replay_toolbox(desktop, task, observer, captures_dir):
+    """The toolbox of a replay: no question policy or repeat guard, no one to ask, no knowledge."""
+    return Toolbox(desktop, task, confirm=decline, observer=observer, asker=NoAsker(), captures_dir=captures_dir,
+                   gated=False)
+
+
 def _split_models(built):
     """(text model, vision) from what the model factory returned: a Models, or a bare text model."""
     if isinstance(built, Models):
@@ -70,11 +90,13 @@ def _leave_summary(run_dir):
 class RunManager:
     def __init__(self, runs_dir, binary, default_exe, model_factory, toolbox_factory=default_toolbox,
                  desktop_factory=None, gate_factory=ApprovalGate, ask_gate_factory=AskGate, knowledge_dir=None,
-                 task_defaults=None, environ=None):
+                 task_defaults=None, environ=None, workflow_dir=None, replay_toolbox_factory=default_replay_toolbox):
         """task_defaults are the settings file's values that every new run's task starts from; their
         systems give the runs a target by name and their ready signal reaches only the exes they
         name. environ supplies OPENAI_MODEL below them (None reads no env). model_factory(task) returns
-        an agent.llm.Models, or a bare text model, and may raise ModelSetupError."""
+        an agent.llm.Models, or a bare text model, and may raise ModelSetupError. The workflow folder
+        is workflow_dir, else the settings' workflow_dir, else AGENT_WORKFLOW_DIR from environ, else
+        the default (agent.workflow_store.workflow_root)."""
         self.runs_dir = Path(runs_dir)
         self.binary = str(binary)
         self.default_exe = default_exe
@@ -93,6 +115,9 @@ class RunManager:
         self._thread = None
         self._stop = None
         self._recorder = None
+        self._replay_toolbox_factory = replay_toolbox_factory
+        self.workflow_root = workflow_root(workflow_dir, self._task_defaults.get("workflow_dir"),
+                                           {} if environ is None else environ)
 
     def active(self):
         with self._lock:
@@ -219,24 +244,94 @@ class RunManager:
             toolbox = self._toolbox_factory(desktop, task, decline, recorder, ask_gate, store, recorder.path / "captures",
                                             **extra)
             register = functools.partial(register_after_run, store=store, run_id=recorder.run_id)
+            workflows = WorkflowStore(self.workflow_root, system)
         except Exception as error:
             recorder.finish(RunResult("stopped", 0, f"실행을 시작하지 못했습니다: {error}"))
             _leave_summary(recorder.path)
             self._release()
             raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
         stop = threading.Event()
+        run = functools.partial(self._run, model, toolbox, task, recorder, (gate, register, stop), workflows)
+        return self._begin(recorder, run, stop, gate=gate, ask_gate=ask_gate)
+
+    def _begin(self, recorder, run, stop, gate=None, ask_gate=None):
+        """Makes the run active and starts `run` on its thread; returns the run id."""
         with self._lock:
             self._active = recorder.run_id
             self._gate = gate
             self._ask_gate = ask_gate
             self._stop = stop
             self._recorder = recorder
-            self._thread = threading.Thread(
-                target=self._run, args=(model, toolbox, task, recorder, gate, register, stop),
-                name=f"run-{recorder.run_id}", daemon=True,
-            )
+            self._thread = threading.Thread(target=run, name=f"run-{recorder.run_id}", daemon=True)
             self._thread.start()
         return recorder.run_id
+
+    def workflows(self, system=None):
+        """The readable workflows of `system` (else the system a form left empty falls back to), in
+        id order, each as {id, goal, status, passes, failures, verified_with_other_values, params:
+        [{name, kind, example}], fixed}. A file that does not pass the format check is left out."""
+        store = WorkflowStore(self.workflow_root, self._workflow_system(system))
+        return [_listed(workflow) for workflow in store.entries()]
+
+    def start_workflow(self, workflow_id, values, system=None):
+        """Replays a saved workflow of `system` with `values` ({name: text}) and returns the new run
+        id once its folder exists. Every value is checked before anything starts: a bad request
+        raises InvalidRun whose message starts with the code."""
+        if not isinstance(values, dict) or not all(
+                isinstance(name, str) and isinstance(value, str) for name, value in values.items()):
+            raise InvalidRun("values는 이름과 글 값을 담은 객체여야 합니다")
+        exe, system = self._target(None, system)
+        store = WorkflowStore(self.workflow_root, self._workflow_system(system))
+        workflow = self._stored_workflow(store, workflow_id)
+        try:
+            resolve_values(workflow, values, VALUE_CHECK_RUN_ID)
+        except WorkflowError as error:
+            raise InvalidRun(f"{error.code}: {error}") from error
+        task = apply_ready(self.build_task(workflow["goal"], exe, workflow["permission_level"]), self._task_defaults)
+        with self._lock:
+            if self._active is not None:
+                raise RunBusy(f"실행 중인 작업이 있습니다: {self._active}")
+            self._active = "starting"
+        try:
+            desktop = self._desktop_factory()
+            meta = {**self._meta(task, store.system), "model": WORKFLOW_RUN, "started_by": WORKFLOW_RUN}
+            recorder = RunRecorder(self.runs_dir, desktop, meta)
+        except RunStartFailed:
+            self._release()
+            raise
+        except Exception as error:
+            self._release()
+            raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
+        try:
+            toolbox = self._replay_toolbox_factory(desktop, task, recorder, recorder.path / "captures")
+        except Exception as error:
+            recorder.finish(RunResult("stopped", 0, f"실행을 시작하지 못했습니다: {error}"))
+            _leave_summary(recorder.path)
+            self._release()
+            raise RunStartFailed(f"실행을 시작하지 못했습니다: {error}") from error
+        stop = threading.Event()
+        run = functools.partial(self._replay, toolbox, task, (store, workflow, values), recorder, stop)
+        return self._begin(recorder, run, stop)
+
+    def _workflow_system(self, system):
+        """The workflow folder name of `system`, else of the settings' system, else of the default exe."""
+        if system is not None and not isinstance(system, str):
+            raise InvalidRun("시스템 이름은 글이어야 합니다")
+        name = (system or "").strip() or self.default_choice or self.default_system
+        try:
+            return system_name(name, self.default_exe or "")
+        except KnowledgeError as error:
+            raise InvalidRun("시스템 이름은 영문, 숫자, 한글, '.', '_', '-'로 64자까지 쓸 수 있습니다") from error
+
+    @staticmethod
+    def _stored_workflow(store, workflow_id):
+        try:
+            workflow = store.get(workflow_id)
+        except WorkflowError as error:
+            raise InvalidRun(f"{error.code}: 읽을 수 없거나 형식이 틀린 workflow입니다") from error
+        if workflow is None:
+            raise InvalidRun(f"WORKFLOW_NOT_FOUND: 그 id의 workflow가 없습니다 (시스템: {store.system})")
+        return workflow
 
     def join(self, timeout=None):
         """Waits for the current run's thread; for tests and shutdown."""
@@ -296,11 +391,36 @@ class RunManager:
         except KnowledgeError as error:
             raise InvalidRun("시스템 이름은 영문, 숫자, 한글, '.', '_', '-'로 64자까지 쓸 수 있습니다") from error
 
-    def _run(self, model, toolbox, task, recorder, gate, register, stop):
+    def _run(self, model, toolbox, task, recorder, hooks, workflows):
+        gate, register, stop = hooks
         try:
             result = run_agent(model, toolbox, task, recorder.on_event, gate=gate, register=register, stop=stop)
         except Exception as error:
             result = RunResult("stopped", 0, f"실행 중 오류: {type(error).__name__}: {error}")
+        try:
+            result = after_run(model, result, recorder.path, workflows, recorder.on_event)
+        except Exception:
+            pass
+        self._end(recorder, result)
+
+    def _replay(self, toolbox, task, chosen, recorder, stop):
+        store, workflow, given = chosen
+        try:
+            values = resolve_values(workflow, given, recorder.run_id)
+        except WorkflowError as error:
+            result = RunResult("stopped", 0, error.code)
+        else:
+            try:
+                result = run_workflow(toolbox, task, workflow, values, log=recorder.on_event, stop=stop)
+            except Exception as error:
+                result = RunResult("stopped", 0, f"실행 중 오류: {type(error).__name__}: {error}")
+            try:
+                record_outcome(store, workflow, values, result)
+            except Exception:
+                pass
+        self._end(recorder, result)
+
+    def _end(self, recorder, result):
         try:
             recorder.finish(result)
         finally:
@@ -332,3 +452,11 @@ class RunManager:
         if session is None:
             raise RunStartFailed("agent-desktop 세션을 시작하지 못했습니다")
         return DesktopClient(self.binary, session)
+
+
+def _listed(workflow):
+    """What the viewer shows of a workflow: no steps, and never a path of the system."""
+    params = [{"name": name, "kind": spec["kind"], "example": spec["example"]}
+              for name, spec in workflow["params"].items()]
+    keys = ("id", "goal", "status", "passes", "failures", "verified_with_other_values")
+    return {**{key: workflow[key] for key in keys}, "params": params, "fixed": list(workflow["fixed"])}

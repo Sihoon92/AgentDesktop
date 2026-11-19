@@ -875,3 +875,22 @@ def test_the_other_modes_write_no_instance_file(monkeypatch, tmp_path, capsys):
     view.main(["--runs", str(runs), "--export", "latest", str(tmp_path / "out.html")])
 
     assert not (runs / instance_module.INSTANCE_FILE).exists()
+
+
+def test_the_workflow_dir_argument_reaches_the_run_manager_only_when_given(monkeypatch, tmp_path):
+    _, _, given = served(monkeypatch, ["--workflow-dir", str(tmp_path / "wf")])
+    _, _, absent = served(monkeypatch, [])
+
+    assert given[0]["workflow_dir"] == tmp_path / "wf"
+    assert "workflow_dir" not in absent[0]
+
+
+def test_build_run_manager_hands_the_workflow_dir_to_the_manager(monkeypatch, tmp_path):
+    binary = tmp_path / "agent-desktop.exe"
+    binary.write_bytes(b"")
+    monkeypatch.setattr(view, "find_binary", lambda: binary)
+
+    manager, notice = view.build_run_manager(tmp_path / "runs", None, task_defaults={"workflow_dir": "ignored"},
+                                             workflow_dir=tmp_path / "wf")
+
+    assert notice is None and manager.workflow_root == (tmp_path / "wf").resolve()

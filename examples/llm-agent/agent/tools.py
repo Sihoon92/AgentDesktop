@@ -5,6 +5,7 @@ capture tools with the before/after comparison live in agent/screen_tools.py; as
 question policy and learned knowledge live in agent/asking.py. Both are mixins of Toolbox.
 """
 
+import copy
 import time
 from dataclasses import dataclass
 
@@ -87,7 +88,7 @@ def _summary(envelope):
 
 class Toolbox(AskingTools, ScreenTools):
     def __init__(self, desktop, task, confirm, sleep=time.sleep, clock=time.monotonic, observer=None,
-                 asker=None, knowledge=None, captures_dir=None, wall=time.time, vision=None):
+                 asker=None, knowledge=None, captures_dir=None, wall=time.time, vision=None, gated=True):
         """observer gets on_observation(window, envelope, text, source=..., wait=...) for each tree
         the agent reads, and on_action(tool, arguments, target, result) for each other tool call,
         before the re-read is reported. source names what made the observation ("observe", "action",
@@ -99,7 +100,12 @@ class Toolbox(AskingTools, ScreenTools):
         vision, when given, reads pictures for a text model that cannot (split mode): an object
         with read(capture, question, marks) returning an answer with as_result() and as_event(),
         as agent.vision.Vision does. look then asks it a question, captures are recorded but never
-        attached for the model, image_mode is ignored, and each read is sent as a vision event."""
+        attached for the model, image_mode is ignored, and each read is sent as a vision event.
+
+        gated=False is for a run that follows a fixed list of steps no one answers (a workflow
+        replay): no call is refused for a question, the policy hears no outcome, and the repeat
+        guard is off, since pressing the same element again is part of such a list. The
+        permission level, the target process and the before/after judgement stay as they are."""
         self._desktop = desktop
         self._observer = observer or _NoObserver()
         self._task = task
@@ -117,7 +123,16 @@ class Toolbox(AskingTools, ScreenTools):
         self._last_read = None
         self._levels = {s["definition"]["name"]: s["level"] for s in SCHEMAS}
         self._init_screen(captures_dir, vision)
-        self._init_asking(asker, knowledge, wall, task)
+        self._init_asking(asker, knowledge, wall, task, gated)
+
+    @property
+    def current_window(self):
+        """The id of the window the latest observation read or the latest action aimed at, or None."""
+        return self._current_window
+
+    def marked_elements(self):
+        """Copies of the latest observation's elements in mark order, each carrying its "mark"."""
+        return [copy.deepcopy(self._marks[number]) for number in sorted(self._marks)]
 
     def definitions(self):
         return definitions_for(self._task.permission_level, self.vision_enabled)
@@ -354,8 +369,11 @@ class Toolbox(AskingTools, ScreenTools):
         return {"windows": windows, **self._observe(window, source=source)}
 
     def _act(self, tool, element, identity, args, headed=False):
-        """Runs one app-changing CLI command under the guard. Refs and marks come from the
-        latest observation, so its window's top-left places a nameless element."""
+        """Runs one app-changing CLI command, under the guard unless the toolbox is ungated.
+        Refs and marks come from the latest observation, so its window's top-left places a
+        nameless element."""
+        if not self._gated:
+            return _summary(self._desktop.run(*args, headed=headed))
         sig = signature(tool, element, *identity, origin=self._view_origin)
         refusal = self._guard.check(sig)
         if refusal:

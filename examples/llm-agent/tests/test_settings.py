@@ -27,7 +27,7 @@ def test_contract_names():
     assert DEFAULT_PATH == HERE / "settings.local.yaml"
     assert KEYS == ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
                     "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side",
-                    "vision_points", "systems", "ready_text", "ready_timeout_s")
+                    "vision_points", "systems", "ready_text", "ready_timeout_s", "workflow_dir")
 
 
 def test_every_key_is_read(tmp_path):
@@ -426,3 +426,31 @@ def test_uncommented_example_systems_block_is_valid(tmp_path):
     loaded = load_settings(write(tmp_path, "\n".join(lines) + "\n"), environ={})
 
     assert "공장A" in loaded["systems"]
+
+
+
+
+def test_workflow_dir_is_a_path_key(tmp_path):
+    folder = tmp_path / "settings"
+    folder.mkdir()
+
+    assert "workflow_dir" in settings.PATH_KEYS
+    assert load_settings(write(folder, "workflow_dir: wf\n"), environ={}) == {
+        "workflow_dir": str((folder / "wf").resolve())}
+    assert load_settings(write(folder, f"workflow_dir: D:{B}team{B}workflows\n"), environ={}) == {
+        "workflow_dir": str(Path(f"D:{B}team{B}workflows").resolve())}
+
+
+def test_a_double_quoted_workflow_dir_read_as_control_characters_is_rejected(tmp_path):
+    error = reason_of(tmp_path, f'workflow_dir: "C:{B}tools{B}new"\n')
+
+    assert error.reason == f"workflow_dir 경로에 제어 문자 · {settings.QUOTE_HINT}"
+
+
+def test_example_file_tells_how_to_write_the_workflow_dir():
+    text = (HERE / "settings.example.yaml").read_text(encoding="utf-8")
+    block = text.split("# workflow_dir:")[0].rsplit("\n\n", 1)[-1]
+
+    assert "따옴표 없이 적습니다. 큰따옴표 안에서는 역슬래시가 특수 문자입니다" in block
+    assert "#   예) workflow_dir: " in block
+    assert "AGENT_WORKFLOW_DIR" in block

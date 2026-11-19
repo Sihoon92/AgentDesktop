@@ -214,6 +214,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_run_list(query)
         if segments == ["api", "knowledge"]:
             return self._send_systems()
+        if segments == ["api", "workflows"]:
+            return self._send_workflows(query)
         if len(segments) == 3 and segments[:2] == ["api", "knowledge"]:
             return self._send_knowledge(segments[2])
         if len(segments) == 3 and segments[:2] == ["api", "runs"]:
@@ -239,6 +241,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._start_run()
         if segments == ["api", "shutdown"]:
             return self._shutdown()
+        if len(segments) == 4 and segments[:2] == ["api", "workflows"] and segments[3] == "run":
+            return self._start_workflow(segments[2])
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "stop":
             return self._stop_run(segments[2])
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "decision":
@@ -454,6 +458,39 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 payload.get("goal"), payload.get("exe") or None, payload.get("level", 3), payload.get("approve", False),
                 system=payload.get("system"), stage_call_limit=payload.get("stage_call_limit"),
             )
+        except InvalidRun as error:
+            return self._send_json(400, {"error": str(error)})
+        except RunBusy as error:
+            return self._send_json(409, {"error": str(error)})
+        except RunStartFailed as error:
+            return self._send_json(503, {"error": str(error)})
+        self._send_json(201, {"run_id": run_id})
+
+    def _send_workflows(self, query):
+        """The chosen system's readable workflows (ids, goals, counts, parameters, fixed values), as
+        the run manager lists them: no steps and no path of the system's exe."""
+        manager = self.server.run_manager
+        if manager is None:
+            return self._send_json(503, {"error": "이 뷰어는 실행을 관리하지 않아 workflow를 보여 줄 수 없습니다"})
+        system = (query.get("system") or [None])[0]
+        try:
+            workflows = manager.workflows(system)
+        except InvalidRun as error:
+            return self._send_json(400, {"error": str(error)})
+        self._send_json(200, {"system": system, "workflows": workflows})
+
+    def _start_workflow(self, workflow_id):
+        """Starts a replay of a saved workflow with the values the form sent ({name: text})."""
+        manager = self.server.run_manager
+        if manager is None:
+            return self._send_json(503, {"error": "이 뷰어는 실행을 시작할 수 없습니다. 기록 보기 전용입니다"})
+        if self.server.shutting_down:
+            return self._send_json(503, {"error": "뷰어를 종료하는 중이라 새 실행을 시작할 수 없습니다"})
+        payload, problem = self._read_json()
+        if problem:
+            return self._send_json(*problem)
+        try:
+            run_id = manager.start_workflow(workflow_id, payload.get("values", {}), system=payload.get("system"))
         except InvalidRun as error:
             return self._send_json(400, {"error": str(error)})
         except RunBusy as error:

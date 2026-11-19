@@ -275,7 +275,9 @@ def test_open_panel_text_is_recorded_as_text_elements(tmp_path):
     observation = events(recorder)[1]
     label = next(e for e in observation["elements"] if e["name"] == "지표")
     assert label == {"kind": "text", "ref": None, "role": "statictext", "name": "지표",
-                     "description": label["description"], "states": [], "value": None, "rect": None}
+                     "description": label["description"], "states": [], "value": None, "rect": None,
+                     "mark": label["mark"], "scope": None}
+    assert isinstance(label["mark"], int)
     controls = [e for e in observation["elements"] if e["kind"] == "control"]
     assert len(controls) == 43
     assert all(e["ref"] for e in controls)
@@ -1098,3 +1100,138 @@ def test_stop_requested_after_the_finish_is_not_recorded(tmp_path):
 
     assert [event["type"] for event in events(recorder)][-1] == "finish"
     assert all(event["type"] != "stop_requested" for event in events(recorder))
+
+
+def popup_in_tree():
+    children = [
+        {"role": "window", "name": "목록", "children": [
+            {"role": "statictext", "name": "All"},
+            {"role": "checkbox", "name": "WA0", "ref_id": "@s9:e2"}]},
+        {"role": "button", "name": "조회", "ref_id": "@s9:e1"},
+    ]
+    return {"version": "2.6", "ok": True, "command": "snapshot",
+            "data": {"tree": {"role": "window", "name": "창", "children": children}}}
+
+
+def test_observation_elements_keep_mark_and_scope(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_observation(window_row(), popup_in_tree(), "t")
+
+    elements = events(recorder)[0]["elements"]
+    assert [(e["name"], e["mark"], e["scope"]) for e in elements] == [
+        ("목록", 1, None), ("All", 2, 1), ("WA0", 3, 1), ("조회", 4, None)]
+
+
+def test_marks_survive_the_text_cut(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_observation(window_row(), labels_tree(401), "t")
+
+    elements = events(recorder)[0]["elements"]
+    assert [e["mark"] for e in elements[:400]] == list(range(1, 401))
+    assert elements[-1]["ref"] == "@s9:e1"
+    assert elements[-1]["mark"] == 402
+    assert elements[-1]["scope"] is None
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "finish_note", "by": "human", "saved_path": r"C:\out\a.xlsx"},
+    {"type": "workflow", "created": True, "id": "w-20261119-001", "code": None, "steps": 12, "params": 2},
+    {"type": "workflow_step", "n": 3, "kind": "act", "ok": False, "code": "EXPECT_UNMET", "ms": 15000,
+     "goal": "목록 창이 열려 있다"},
+])
+def test_finish_note_workflow_and_workflow_step_events_are_kept(tmp_path, event):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_event(event)
+
+    assert events(recorder)[-1] == event
+
+
+WORKFLOW_MADE = {"type": "workflow", "created": True, "id": "w-20261119-001", "code": None, "steps": 12, "params": 2}
+WORKFLOW_RUN = {"id": "w-20261119-001", "steps": 12, "steps_done": 5, "code": "EXPECT_UNMET"}
+
+
+def test_a_workflow_event_reaches_run_json_as_three_fields(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_event(WORKFLOW_MADE)
+
+    assert run_json(recorder)["workflow"] == {"created": True, "id": "w-20261119-001", "code": None}
+    assert events(recorder)[-1] == WORKFLOW_MADE
+
+
+def test_a_failed_workflow_event_keeps_its_code(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_event({"type": "workflow", "created": False, "id": None, "code": "LOCATOR_NOT_UNIQUE", "steps": 0,
+                       "params": 0})
+    recorder.finish(RunResult("confirmed", 4, "done", 400))
+
+    assert run_json(recorder)["workflow"] == {"created": False, "id": None, "code": "LOCATOR_NOT_UNIQUE"}
+    assert run_json(recorder)["status"] == "confirmed"
+
+
+def test_finish_stats_with_workflow_run_reach_run_json(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.finish(RunResult("stopped", 5, "EXPECT_UNMET", 0, stats={"workflow_run": dict(WORKFLOW_RUN)}))
+
+    assert run_json(recorder)["workflow_run"] == WORKFLOW_RUN
+
+
+def test_a_passed_workflow_run_has_no_code(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    passed = {**WORKFLOW_RUN, "steps_done": 12, "code": None}
+
+    recorder.finish(RunResult("verified", 12, "workflow 통과", 0, stats={"workflow_run": passed}))
+
+    assert run_json(recorder)["workflow_run"] == passed
+
+
+@pytest.mark.parametrize("change", [{"code": "화면 글 C:\\out"}, {"code": 3}, {"id": "보고서 이름"},
+                                    {"id": "w-2026/../x"}, {"created": "yes"}])
+def test_malformed_workflow_events_are_left_out(tmp_path, change):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_event({**WORKFLOW_MADE, **change})
+
+    assert "workflow" not in run_json(recorder)
+    assert events(recorder)[-1]["type"] == "workflow"
+
+
+@pytest.mark.parametrize("change", [{"steps": -1}, {"steps_done": "5"}, {"steps_done": True}, {"code": "화면의 글"},
+                                    {"id": None}, {"id": "w-abc"}, {"extra": "C:\\out\\a.xlsx"}])
+def test_malformed_workflow_numbers_are_left_out(tmp_path, change):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.finish(RunResult("stopped", 5, "x", 0, stats={"workflow_run": {**WORKFLOW_RUN, **change}}))
+
+    run = run_json(recorder)
+    assert "workflow_run" not in run
+    assert recorder.errors == []
+
+
+def test_a_workflow_run_that_is_not_a_dict_is_left_out(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.finish(RunResult("stopped", 5, "x", 0, stats={"workflow_run": ["w-20261119-001"]}))
+
+    assert "workflow_run" not in run_json(recorder)
+
+
+def test_run_json_holds_no_workflow_goal_param_or_path_text(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.on_event({"type": "plan", "revision": 0, "stages": [{"n": 1, "goal": f"{MARK} 목표", "done_when": "d",
+                                                                  "status": "active"}],
+                       "params": [{"name": "shop", "value": f"{MARK} 값"}], "step": 1})
+    recorder.on_event({"type": "finish_note", "by": "human", "saved_path": f"C:\\{MARK}\\a.xlsx"})
+    recorder.on_event(WORKFLOW_MADE)
+    recorder.on_event({"type": "workflow_step", "n": 1, "kind": "act", "ok": True, "code": None, "ms": 10,
+                       "goal": f"{MARK} 단계"})
+
+    recorder.finish(RunResult("verified", 1, "workflow 통과", 0, stats={"workflow_run": dict(WORKFLOW_RUN)}))
+
+    text = (recorder.path / "run.json").read_text(encoding="utf-8")
+    assert MARK not in text and "shop" not in text

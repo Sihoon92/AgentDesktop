@@ -85,6 +85,9 @@ python view.py --open latest                                # 지난 실행 바�
 python view.py --prune --older-than 30d [--yes]              # 오래된 기록 정리, --yes 없으면 출력만
 python view.py --export <run_id|latest> <out.html>           # 실행 하나를 서버 없이 열리는 HTML로
 python view.py --summary <run_id|latest>                     # 화면 내용 없는 실행 요약(수와 코드만)
+python run.py --workflows [--system <이름>]                   # 저장된 workflow 목록
+python run.py --workflow <ID> --param <이름>=<값> ...          # workflow를 모델 없이 재실행. 창을 띄움
+python run.py --make-workflow <run_id|latest>                # 지난 실행에서 workflow를 다시 만듦(LLM 호출)
 python check.py [--exe "<절대경로>"] [--skip llm|app]         # 바이너리, 설정, LLM, 대상 앱 점검. app은 창을 띄움
 ```
 
@@ -105,5 +108,7 @@ python check.py [--exe "<절대경로>"] [--skip llm|app]         # 바이너리
 **텍스트·비전 모델 나눠 쓰기:** env `VISION_MODEL`(또는 설정 `vision_model`)이 있으면 텍스트 모델에게 그림을 보내지 않고, `look`과 동작 뒤 자동 캡처에서 하니스가 비전 모델에게 질문 하나와 그림 한 장을 보내 답을 도구 결과의 `vision`에 넣습니다(`agent/vision.py`, 연결은 `agent/llm.py`의 `build_models`). 없으면 지금의 한 모델 방식 그대로입니다. env 여섯 개는 `.env.example`에 있습니다. 시작 줄, `check.py`, `run.json`, 요약에는 모델 이름·주소·키 대신 출처와 수만 넣고, 비전의 질문과 답은 `events.jsonl`의 `vision` 이벤트에만 둡니다. 설계는 `examples/llm-agent/docs/specs/2026-11-16-text-and-vision-models-design.md`에 있습니다.
 
 **프로필과 시스템 골라 띄우기:** `--profile <이름>`(또는 `AGENT_PROFILE`)은 `.env.<이름>`을 `.env`보다 먼저 읽습니다(`agent/envfiles.py`, 집과 회사 연결을 오갈 때). 설정의 `systems`(이름 → exe)로 시스템을 고르고(`agent/systems.py`), `ready_text`가 있으면 하니스가 모델 호출 전에 앱을 띄워 이름이 그 글과 똑같은 요소가 보이는 창을 찾을 때까지 기다립니다(`agent/ready.py`, 팝업 뒤 다른 프로세스의 메인 화면도 따라감, 같은 시스템이 이미 떠 있으면 멈춤). 앱의 글은 설정 파일에만 둡니다. 설계는 `examples/llm-agent/docs/specs/2026-11-18-system-launch-ready-design.md`에 있습니다.
+
+**workflow 만들기와 재실행:** 성공한 모델 실행(`verified`, `confirmed`)의 끝에 그 기록에서 workflow를 만들어 `workflows\<시스템>\`에 YAML로 저장합니다(Git 제외). 모델은 남길 동작과 파라미터를 기록의 번호로만 가리키고(`agent/workflow_author.py`), 하니스가 대상을 좌표 없이 범위·역할·이름·가까운 글자로 적어(`agent/locator.py`) 그 관찰에 다시 대 본 뒤 저장합니다(`agent/workflow_format.py`, `agent/workflow_store.py`). 재실행(`agent/workflow_run.py`)은 모델을 부르지 않고, 대상이 없거나 여럿이거나 확인 조건이 깨지면 그 단계에서 코드와 함께 멈춥니다. 재실행의 `Toolbox`는 `gated=False`로 질문 정책과 반복 동작 가드를 끕니다. 만들기는 실행을 닫기 전에 불리므로(`after_run` 다음에 `recorder.finish`) 그때 `run.json`은 아직 `running`이고, 실행의 결과 상태를 직접 넘깁니다. 트리에 요소가 없는 그림뿐인 대상은 옮기지 못합니다(`PICTURE_TARGET`). 요약과 `run.json`에는 workflow의 ID, 수, 코드만 넣고 단계의 목표, 파라미터의 이름과 값, 저장 경로는 넣지 않습니다. 설계는 `examples/llm-agent/docs/specs/2026-11-19-workflow-design.md`에 있습니다.
 
 **멈추기와 끄기:** 뷰어의 "실행 멈춤"은 실행마다 둔 멈춤 신호(`RunManager.stop`)로 다음 안전한 자리에서 멈추고 대상 앱은 닫지 않습니다. "뷰어 종료"와 Ctrl+C는 실행을 마무리한 뒤 서버를 닫습니다. 뷰어 서버는 Windows에서 포트를 독점하고(`SO_EXCLUSIVEADDRUSE`), `view.py`는 기록 폴더의 `.viewer.json`으로 남은 옛 뷰어를 알아봐 끄거나 다음 포트로 엽니다(`viewer/instance.py`, `view.py --stop`). 설계는 `examples/llm-agent/docs/specs/2026-11-18-viewer-stop-and-shutdown-design.md`에 있습니다.

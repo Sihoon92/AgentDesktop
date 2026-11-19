@@ -2237,3 +2237,120 @@ def test_a_viewer_from_before_this_change_still_blocks_the_port(tmp_path):
             second.server_close()
     finally:
         old_viewer.close()
+
+
+# --- workflows (plan task 9) ------------------------------------------------------------------
+
+from test_run_manager import given as workflow_values  # noqa: E402
+from test_run_manager import no_real_workflow_folder  # noqa: E402,F401
+from test_run_manager import stored as stored_workflow  # noqa: E402
+from test_run_manager import workflow_manager  # noqa: E402
+
+from viewer.run_manager import InvalidRun, RunBusy, RunStartFailed  # noqa: E402
+
+
+class WorkflowManagerStub:
+    """Answers the workflow calls the way a RunManager would, or raises `error`."""
+
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+
+    def workflows(self, system=None):
+        self.calls.append(("workflows", system))
+        if self.error:
+            raise self.error
+        return [{"id": "w-20261119-001", "goal": "g", "status": "unverified", "passes": 0, "failures": 0,
+                 "verified_with_other_values": False, "params": [], "fixed": []}]
+
+    def start_workflow(self, workflow_id, values, system=None):
+        self.calls.append(("start_workflow", workflow_id, values, system))
+        if self.error:
+            raise self.error
+        return "20261119-101500"
+
+
+def test_workflow_list_endpoint_needs_the_token_and_sends_no_paths_of_the_system(tmp_path):
+    workflow = stored_workflow(tmp_path)
+    manager, _ = workflow_manager(tmp_path)
+    with serving(tmp_path / "served-runs", manager) as instance:
+        refused, _, _ = request(instance, "/api/workflows?system=mes", {"X-Agent-Token": None})
+        status, content_type, raw = request(instance, "/api/workflows?system=mes")
+
+    assert refused == 403
+    assert status == 200 and content_type.startswith("application/json")
+    body = json.loads(raw)
+    assert body["system"] == "mes" and [item["id"] for item in body["workflows"]] == [workflow["id"]]
+    assert body["workflows"][0]["params"][0] == {"name": "shop", "kind": "list", "example": ["WA0", "WA1"]}
+    text = raw.decode("utf-8")
+    assert "Mes.exe" not in text and "steps" not in body["workflows"][0]
+
+
+def test_workflow_list_endpoint_without_a_system_uses_the_managers_default(tmp_path):
+    stub = WorkflowManagerStub()
+    with serving(tmp_path, stub) as instance:
+        status, _, raw = request(instance, "/api/workflows")
+
+    assert status == 200 and stub.calls == [("workflows", None)]
+    assert json.loads(raw)["system"] is None
+
+
+def test_workflow_run_endpoint_starts_a_replay(tmp_path):
+    workflow = stored_workflow(tmp_path)
+    manager, app = workflow_manager(tmp_path)
+    with serving(tmp_path / "runs", manager) as instance:
+        status, body = post_json(instance, f"/api/workflows/{workflow['id']}/run",
+                                 {"values": workflow_values(tmp_path, shop="WA1"), "system": "mes"})
+        manager.join(timeout=10)
+
+    assert status == 201
+    meta = json.loads((tmp_path / "runs" / body["run_id"] / "run.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "verified" and meta["started_by"] == "workflow" and app.applied == {"WA1"}
+
+
+@pytest.mark.parametrize(("error", "code"), [
+    (InvalidRun("PARAM_UNKNOWN: 모르는 이름"), 400),
+    (RunBusy("실행 중"), 409),
+    (RunStartFailed("세션 없음"), 503),
+])
+def test_workflow_run_endpoint_maps_the_managers_refusals(tmp_path, error, code):
+    stub = WorkflowManagerStub(error)
+    with serving(tmp_path, stub) as instance:
+        status, body = post_json(instance, "/api/workflows/w-20261119-001/run", {"values": {"shop": "WA0"}})
+
+    assert status == code and body["error"] == str(error)
+    assert stub.calls == [("start_workflow", "w-20261119-001", {"shop": "WA0"}, None)]
+
+
+def test_workflow_run_endpoint_reports_invalid_input_as_400(tmp_path):
+    workflow = stored_workflow(tmp_path)
+    manager, app = workflow_manager(tmp_path)
+    with serving(tmp_path / "runs", manager) as instance:
+        unknown, unknown_body = post_json(instance, f"/api/workflows/{workflow['id']}/run",
+                                          {"values": {"nope": "1"}, "system": "mes"})
+        missing, missing_body = post_json(instance, "/api/workflows/w-20991231-001/run", {"values": {}, "system": "mes"})
+        shapeless, _ = post_json(instance, f"/api/workflows/{workflow['id']}/run", {"values": ["shop"]})
+        bad_system, _ = post_json(instance, f"/api/workflows/{workflow['id']}/run", {"values": {}, "system": 3})
+        listing, _, _ = request(instance, "/api/workflows?system=..%2Fescape")
+
+    assert (unknown, missing, shapeless, bad_system, listing) == (400, 400, 400, 400, 400)
+    assert unknown_body["error"].startswith("PARAM_UNKNOWN") and missing_body["error"].startswith("WORKFLOW_NOT_FOUND")
+    assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())
+    assert app.calls == []
+
+
+def test_workflow_endpoints_without_a_run_manager_are_503(server):
+    instance, _ = server
+
+    listing, _, _ = request(instance, "/api/workflows")
+    run, _ = post_json(instance, "/api/workflows/w-20261119-001/run", {"values": {}})
+
+    assert (listing, run) == (503, 503)
+
+
+def test_workflow_run_endpoint_needs_the_token(tmp_path):
+    stub = WorkflowManagerStub()
+    with serving(tmp_path, stub) as instance:
+        status, _ = post_json(instance, "/api/workflows/w-20261119-001/run", {"values": {}}, {"X-Agent-Token": None})
+
+    assert status == 403 and stub.calls == []
