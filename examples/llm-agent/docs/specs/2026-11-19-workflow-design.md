@@ -1,7 +1,7 @@
 # workflow 만들기와 파라미터 재실행 설계
 
 - 날짜: 2026-11-19
-- 상태: 사용자 승인(2026-11-19), 구현됨(커밋 전, 실제 창 확인 전). 구현 계획: [2026-11-19-workflow](../plans/2026-11-19-workflow.md)
+- 상태: 사용자 승인(2026-11-19), 구현됨(실제 창 확인 전). 구현 계획: [2026-11-19-workflow](../plans/2026-11-19-workflow.md)
 - 대상: `examples/llm-agent`의 계획 도구(`agent/tool_schemas.py`, `agent/loop.py`), 기록(`agent/recorder.py`), 실행 시작(`run.py`, `viewer/run_manager.py`, `viewer/server.py`, `viewer/static/`), 요약(`agent/summary.py`), 그리고 새로 만드는 workflow 모듈들. `agent-desktop` CLI는 고치지 않습니다.
 - 앞선 설계: [관찰, 묻기, 배우기](2026-11-13-observe-ask-learn-design.md), [단계로 나눠 실행하기](2026-11-14-staged-run-design.md), [시스템 골라 띄우고 준비될 때까지 기다리기](2026-11-18-system-launch-ready-design.md). 배경은 [CUA 배경과 설계 기준](../cua-background.md)의 서비스 흐름 6과 7입니다.
 
