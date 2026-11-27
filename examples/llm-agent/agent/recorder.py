@@ -34,6 +34,7 @@ from agent.capture import add_windows, stacked
 from agent.frames import frame_origin, to_image_rect
 from agent.observe import visible_elements
 from agent.process_identity import process_started_at
+from agent.progress import ProgressLog
 from agent.profile import READ_MODES
 from agent.ready import READY_STATUSES
 from agent.summary import CODE, WORKFLOW_ID
@@ -101,6 +102,10 @@ class RunRecorder:
         self._run_lock = threading.Lock()
         self._finished = False
         self._stop = threading.Event()
+        self.events_written = 0
+        self.progress = ProgressLog(self.path / "progress.jsonl", events_seen=lambda: self.events_written)
+        if hasattr(desktop, "set_progress"):
+            desktop.set_progress(self.progress)
         pid = os.getpid()
         self._run = {
             "format": RUN_FORMAT,
@@ -170,6 +175,7 @@ class RunRecorder:
         events are recorded; tool calls are not, because on_action already recorded each one. A
         capture, a vision read or a question without a step gets the current one. A question is tied to the latest observation
         and its screen boxes and points get image coordinates; so does an answer's pin."""
+        self.progress.note_event(event)
         kind = event.get("type")
         if kind == "question":
             self._append(self._mapped_question(event))
@@ -216,8 +222,11 @@ class RunRecorder:
         """Writes the final status and finished_at, then stops the heartbeat for good. A result
         with stats (the loop's stage counts) adds their numbers to run.json as `stages`, and the
         whole-number vision counts of a split-mode run (VISION_COUNTS) at its top level; a result
-        without them, such as one from a run that made no plan, adds nothing."""
+        without them, such as one from a run that made no plan, adds nothing. Progress items still
+        open are closed as STOPPED and the progress sinks are flushed."""
         self.close()
+        self.progress.close_open("STOPPED")
+        self.progress.flush_sinks()
         stats = getattr(result, "stats", None)
         with self._run_lock:
             self._finished = True
@@ -387,6 +396,7 @@ class RunRecorder:
         line = json.dumps(event, ensure_ascii=False, default=str) + "\n"
         with (self.path / "events.jsonl").open("a", encoding="utf-8") as file:
             file.write(line)
+        self.events_written += 1
 
     def _write_run(self):
         with self._run_lock:

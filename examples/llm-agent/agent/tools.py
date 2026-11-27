@@ -14,6 +14,7 @@ from agent.effects import EXPECTATIONS
 from agent.guard import ActionGuard, signature
 from agent.hand_click import NO_CLICK_ACTION, NO_PHYSICAL_HINT, mark_of, refs_without_click
 from agent.observe import render_marked
+from agent.progress import NULL_PROGRESS, result_fields, tool_item_fields
 from agent.ready import ready_message, signals, wait_until_ready
 from agent.results import refused as _refused
 from agent.screen_tools import UNCONFIRMED, ScreenTools
@@ -162,7 +163,24 @@ class Toolbox(AskingTools, ScreenTools):
     def definitions(self):
         return definitions_for(self._task.permission_level, self.vision_enabled)
 
+    @property
+    def progress(self):
+        """The run's progress log (agent.progress), taken from the observer; a no-op one when the
+        observer keeps none."""
+        return getattr(self._observer, "progress", None) or NULL_PROGRESS
+
     def call(self, name, arguments):
+        """Runs one tool call as a tool item of the progress log, unless the loop already opened
+        that item for this call."""
+        innermost = self.progress.innermost()
+        if innermost is not None and innermost["kind"] == "tool" and innermost.get("name") == name:
+            return self._call(name, arguments)
+        with self.progress.span("tool", **tool_item_fields(self.step, name, arguments)) as span:
+            result = self._call(name, arguments)
+            span.finish(**result_fields(result))
+        return result
+
+    def _call(self, name, arguments):
         if name in READ_ONLY_TOOLS:
             return self._dispatch(name, arguments)
         expect = arguments.get("expect")
@@ -312,6 +330,12 @@ class Toolbox(AskingTools, ScreenTools):
         "READY_<STATUS>", "message"} with the
         reason in the words of READY_MESSAGES. No approval is asked: starting the run asked for it.
         `cancelled()` true ends the wait as READY_CANCELLED; a restart_target waits with the same one."""
+        with self.progress.span("ready") as span:
+            result = self._launch_ready(cancelled)
+            span.finish(ok=result["ok"], code=result.get("code"))
+        return result
+
+    def _launch_ready(self, cancelled):
         if cancelled is not None:
             self._ready_cancelled = cancelled
         self._emit({"type": "ready", "phase": "start"})

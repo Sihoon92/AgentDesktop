@@ -55,6 +55,9 @@ const state = {
   renderSeq: 0,
   events: [],
   next: 0,
+  progress: [],
+  progressNext: 0,
+  progressAt: 0,
   finished: false,
   polling: false,
   idlePolls: 0,
@@ -723,13 +726,16 @@ async function selectRun(runId, kind = "run") {
   if (kind === "legacy") return openLegacy(runId);
   let page;
   let summary;
+  let progressPage;
   try {
-    const [events, run] = await Promise.all([
+    const [events, run, progress] = await Promise.all([
       api(`/api/runs/${encodeURIComponent(runId)}/events?since=0`).then((response) => response.json()),
       fetchRunSummary(runId),
+      fetchProgress(runId, 0),
     ]);
     page = events;
     summary = run;
+    progressPage = progress;
   } catch (error) {
     if (runId === state.runId) showBanner([`실행 ${runId}을(를) 열지 못했습니다. ${error.message}`]);
     return;
@@ -738,12 +744,116 @@ async function selectRun(runId, kind = "run") {
   state.run = summary;
   state.events = page.events || [];
   state.next = page.next || 0;
+  state.progress = progressPage.records;
+  state.progressNext = progressPage.next;
+  state.progressAt = Date.now();
   state.finished = state.events.some((event) => event.type === "finish");
   rebuildEntries();
   state.view = "before";
   if (!isLive()) select(0);
   else if (!followPendingQuestion()) followLatest();
   loadRunSummaryText(runId);
+}
+
+/* The run's progress records after `since` as {records, next}; an old server or a failed read
+   gives none, so the run still opens without the progress view. */
+async function fetchProgress(runId, since) {
+  try {
+    const response = await api(`/api/runs/${encodeURIComponent(runId)}/progress?since=${since}`);
+    const page = await response.json();
+    return { records: Array.isArray(page.records) ? page.records : [], next: Number.isInteger(page.next) ? page.next : since };
+  } catch (_) {
+    return { records: [], next: since };
+  }
+}
+
+async function pollProgress(runId) {
+  const page = await fetchProgress(runId, state.progressNext);
+  if (runId !== state.runId) return;
+  if (page.records.length > 0) {
+    state.progress = state.progress.concat(page.records);
+    state.progressAt = Date.now();
+  }
+  state.progressNext = page.next;
+}
+
+/* Milliseconds since the run's progress log started: from run.json's started_at (the log starts
+   with the recorder, on this PC's clock), else the newest record plus the time since it came. */
+function progressNowMs(progress) {
+  const started = Date.parse((state.run && state.run.started_at) || "");
+  if (!Number.isNaN(started)) return Math.max(progress.lastMs, Date.now() - started);
+  return progress.lastMs + (Date.now() - state.progressAt);
+}
+
+function progressLine(group) {
+  const item = group.item;
+  const failed = group.failures === group.count;
+  const mark = failed ? "×" : group.count === 1 && item.mismatch ? "△" : "○";
+  const label = item.kind === "model" ? `${item.name ? `모델(${item.name})` : "모델"} 응답`
+    : item.kind === "ready" ? "대상 앱 준비" : String(item.name);
+  const parts = [`${mark} ${label}${group.count > 1 ? ` ×${group.count}` : ""}`];
+  if (group.ms !== null) parts.push(window.AgentProgress.formatSeconds(group.ms));
+  if (group.count > 1 && group.failures) parts.push(`실패 ${group.failures}`);
+  if (group.count === 1 && failed && item.code) parts.push(item.code);
+  return parts.join(" · ");
+}
+
+function nowHeading(progress) {
+  const plans = state.events.filter((event) => event.type === "plan" && Array.isArray(event.stages));
+  const started = state.events.filter((event) => event.type === "stage" && event.status === "started");
+  const parts = [];
+  if (started.length > 0) {
+    const total = plans.length > 0 ? `/${plans[plans.length - 1].stages.length}` : "";
+    parts.push(`단계 ${started[started.length - 1].n}${total}`);
+  }
+  let step = null;
+  for (const item of progress.items.values()) if (item.kind === "model" && item.step !== null) step = item.step;
+  if (step !== null) parts.push(`스텝 ${step}`);
+  return parts.length > 0 ? parts.join(" · ") : "진행 중";
+}
+
+/* "지금" above the timeline while a run is live: the stage and step, the open items outermost
+   first with their running time, and the last five finished ones, repeated reads folded. */
+function renderNowPanel() {
+  const panel = $("now-panel");
+  if (!panel) return;
+  const P = window.AgentProgress;
+  if (!P || state.runKind !== "run" || !isLive() || state.progress.length === 0) {
+    panel.hidden = true;
+    panel.replaceChildren();
+    return;
+  }
+  const progress = P.buildProgress(state.progress);
+  const now = progressNowMs(progress);
+  const rows = [el("div", { className: "now-head", text: `지금 · ${nowHeading(progress)}` })];
+  P.openChain(progress).forEach((item, depth) => {
+    rows.push(el("div", {
+      className: `now-open depth-${Math.min(depth, 4)}`,
+      text: `▶ ${P.itemLabel(item)} · ${P.formatSeconds(Math.max(0, now - item.startMs))}`,
+    }));
+  });
+  for (const group of P.recentDone(progress, 5)) rows.push(el("div", { className: "now-done", text: progressLine(group) }));
+  panel.replaceChildren(...rows);
+  panel.hidden = false;
+}
+
+/* The tool behind a timeline entry, matched by the entry's events.jsonl line: how long it took
+   and, folded, the commands it sent. Nothing when the run kept no progress. */
+function progressDetails(entry) {
+  const P = window.AgentProgress;
+  if (!P || !entry || typeof entry.at !== "number" || state.progress.length === 0) return [];
+  const progress = P.buildProgress(state.progress);
+  const tool = P.toolForEventLine(progress, entry.at + 1);
+  if (!tool || tool.endMs === null) return [];
+  const groups = P.groupSiblings(progress, tool.children);
+  const shown = [factList([["걸린 시간", P.formatSeconds(tool.endMs - tool.startMs)]])];
+  if (groups.length > 0) {
+    shown.push(el("details", { className: "progress-commands" }, [
+      el("summary", { text: `보낸 명령 ${groups.reduce((sum, group) => sum + group.count, 0)}개` }),
+      el("ol", {}, groups.map((group) => el("li", { text: progressLine(group) }))),
+    ]));
+  }
+  return shown;
 }
 
 async function loadRunSummaryText(runId) {
@@ -816,6 +926,8 @@ async function openLegacy(runId) {
   if (runId !== state.runId || state.runKind !== "legacy") return;
   state.run = opened.run;
   state.events = [];
+  state.progress = [];
+  state.progressNext = 0;
   state.next = 0;
   state.finished = true;
   state.entries = legacyEntries(opened.steps || []);
@@ -853,6 +965,9 @@ async function pollLive() {
   state.polling = true;
   const runId = state.runId;
   try {
+    await pollProgress(runId);
+    if (runId !== state.runId) return;
+    renderNowPanel();
     const response = await api(`/api/runs/${encodeURIComponent(runId)}/events?since=${state.next}`);
     const page = await response.json();
     if (runId !== state.runId) return;
@@ -939,6 +1054,7 @@ function readySeconds() {
 
 function render() {
   renderReadyBanner();
+  renderNowPanel();
   renderRunSummary();
   renderTimeline();
   renderToggles();
@@ -1054,6 +1170,7 @@ function renderDetails() {
   else if (entry.kind === "legacy") info.replaceChildren(...legacyDetails(entry.step));
   else if (entry.kind === "look") info.replaceChildren(...lookDetails(entry));
   else info.replaceChildren(...observationDetails(entry.observation));
+  info.append(...progressDetails(entry));
   renderObservationText(entry.kind === "legacy" ? legacyObservation(entry.step) : shownObservation(entry));
 }
 
@@ -2180,6 +2297,7 @@ function startExport(data) {
   state.runId = state.run.run_id;
   state.runKind = "run";
   state.events = Array.isArray(data.events) ? data.events : [];
+  state.progress = Array.isArray(data.progress) ? data.progress : [];
   state.next = state.events.length;
   state.finished = true;
   document.title = `${state.run.goal || state.run.run_id} · 내보낸 실행`;
@@ -2228,6 +2346,7 @@ function start() {
   loadRuns();
   state.timers.live = setInterval(pollLive, POLL_MS);
   state.timers.ready = setInterval(renderReadyBanner, POLL_MS);
+  state.timers.now = setInterval(renderNowPanel, POLL_MS);
 }
 
 start();

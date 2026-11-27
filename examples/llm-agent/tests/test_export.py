@@ -87,6 +87,21 @@ def sample_events(run_dir):
     return [json.loads(line) for line in lines if line.strip()]
 
 
+def test_export_carries_progress(tmp_path):
+    run_dir = copy_sample(tmp_path)
+    records = [{"id": 1, "phase": "start", "kind": "model", "t_ms": 0, "step": 1},
+               {"id": 1, "phase": "end", "kind": "model", "t_ms": 900, "ok": True}]
+    (run_dir / "progress.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+    assert payload(build_export(run_dir, REAL_STATIC, NOW))["progress"] == records
+
+
+def test_export_without_progress_has_an_empty_list(tmp_path):
+    run_dir = copy_sample(tmp_path)
+
+    assert payload(build_export(run_dir, REAL_STATIC, NOW))["progress"] == []
+
+
 def test_payload_round_trips_run_events_and_frames(tmp_path):
     run_dir = copy_sample(tmp_path)
 
@@ -246,7 +261,7 @@ def test_export_inlines_every_viewer_script_in_page_order_after_the_record(tmp_p
     html = build_export(copy_questions(tmp_path), REAL_STATIC, NOW)
 
     code = [text for attrs, text in parsed(html).scripts if not attrs]
-    names = ["chat.js", "knowledge.js", "workflows.js", "profiles.js", "stages.js", "app.js"]
+    names = ["chat.js", "knowledge.js", "workflows.js", "profiles.js", "stages.js", "progress.js", "app.js"]
     assert [text.strip() for text in code] == [(REAL_STATIC / name).read_text(encoding="utf-8").strip() for name in names]
     record = html.index('<script id="run-export" type="application/json">')
     assert record < html.index("function renderChat") < html.index("function start()")

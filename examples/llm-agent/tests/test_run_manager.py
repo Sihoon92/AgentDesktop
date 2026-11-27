@@ -1461,7 +1461,7 @@ def test_a_model_run_started_here_makes_a_workflow(tmp_path, monkeypatch):
 
     assert len(spy.calls) == 1
     seen = spy.calls[0]
-    assert seen["model"] is model and seen["run_dir"] == tmp_path / "runs" / run_id
+    assert getattr(seen["model"], "_model", None) is model and seen["run_dir"] == tmp_path / "runs" / run_id
     assert seen["folder"] == (tmp_path / "workflows").resolve() / "mes"
     assert seen["finished"] == "running"
     meta = run_json(tmp_path, run_id)
@@ -1792,3 +1792,17 @@ def test_a_replay_cannot_start_while_exclusive_is_held(tmp_path):
             manager.start_workflow(workflow["id"], given(tmp_path), system="mes")
 
     assert app.calls == [] and manager.active() is None
+
+
+def test_a_manager_that_prints_progress_writes_the_run_to_the_terminal(tmp_path, capsys):
+    manager, _ = make_manager(tmp_path, launch_then_finish(), print_progress=True)
+    manager.start("설정을 열어줘", None, 2)
+    manager.join(timeout=10)
+    assert "▶ 모델 생각 중 · 스텝 1" in capsys.readouterr().out
+
+
+def test_a_manager_prints_nothing_by_default(tmp_path, capsys):
+    manager, _ = make_manager(tmp_path, launch_then_finish())
+    manager.start("설정을 열어줘", None, 2)
+    manager.join(timeout=10)
+    assert "▶ 모델" not in capsys.readouterr().out

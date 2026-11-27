@@ -56,7 +56,9 @@ class ScreenTools:
     def _ask_vision(self, shot, question, asked_by):
         """Asks the vision model `question` about capture `shot` and counts the read. Returns
         (the tool result's vision value, the vision event); the event is not sent."""
-        answer = self._vision.read(shot, question, _drawn_marks(shot, self._capture_marks.get(shot.id)))
+        with self.progress.span("model", name="vision") as span:
+            answer = self._vision.read(shot, question, _drawn_marks(shot, self._capture_marks.get(shot.id)))
+            span.finish(ok=True, tokens=answer.tokens or None)
         self._vision_calls += 1
         self._vision_tokens += answer.tokens
         event = {"type": "vision", "step": None, "capture": shot.id, "asked_by": asked_by,

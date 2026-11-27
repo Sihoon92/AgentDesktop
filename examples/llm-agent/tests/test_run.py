@@ -264,8 +264,10 @@ def test_agent_run_is_recorded_in_its_own_folder(monkeypatch, tmp_path, capsys):
     isolate(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "test")
 
-    def agent(_model, _toolbox, _task, log, gate=None, register=None):
+    def agent(_model, toolbox, _task, log, gate=None, register=None):
         log({"type": "model", "step": 1, "tokens": 7})
+        with toolbox.progress.span("tool", step=1, name="launch_target", intent="앱을 연다"):
+            pass
         log({"type": "tool", "step": 1, "tool": "launch_target", "arguments": "{}", "result": {"ok": True}})
         return run.RunResult("claimed", 1, "done", 7)
 
@@ -278,7 +280,9 @@ def test_agent_run_is_recorded_in_its_own_folder(monkeypatch, tmp_path, capsys):
     assert meta["goal"] == "g"
     assert (meta["status"], meta["steps"], meta["tokens"]) == ("claimed", 1, 7)
     assert kinds == ["model", "finish"]
-    assert "[1] launch_target" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "▶ launch_target · 앱을 연다" in out and "○ launch_target · " in out
+    assert "[1] launch_target" not in out
 
 
 def test_baseline_run_is_recorded_too(monkeypatch, tmp_path):

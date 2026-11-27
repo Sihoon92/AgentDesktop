@@ -239,6 +239,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_legacy(segments[2])
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "events":
             return self._send_events(segments[2], query)
+        if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "progress":
+            return self._send_progress(segments[2], query)
         if len(segments) == 4 and segments[:2] == ["api", "runs"] and segments[3] == "summary":
             return self._send_summary(segments[2])
         if len(segments) == 5 and segments[:2] == ["api", "runs"] and segments[3] == "frames":
@@ -638,6 +640,17 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return self._send_json(400, {"error": "since는 0 이상의 정수여야 합니다"})
         events, cursor = read_events(run_dir / "events.jsonl", int(since_text))
         self._send_json(200, {"events": events, "next": cursor})
+
+    def _send_progress(self, run_id, query):
+        """The run's progress records (agent.progress) after the first `since`, read like events."""
+        run_dir = self._run_dir(run_id)
+        if run_dir is None:
+            return self._send_json(404, {"error": "없는 실행입니다"})
+        since_text = query.get("since", ["0"])[0]
+        if not since_text.isdigit():
+            return self._send_json(400, {"error": "since는 0 이상의 정수여야 합니다"})
+        records, cursor = read_events(run_dir / "progress.jsonl", int(since_text))
+        self._send_json(200, {"records": records, "next": cursor})
 
     def _send_summary(self, run_id):
         run_dir = self._run_dir(run_id)

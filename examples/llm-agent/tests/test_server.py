@@ -137,6 +137,49 @@ def test_events_since_returns_only_new_lines(server):
     assert payload["next"] == 3
 
 
+def test_progress_records_are_served_after_since(server):
+    instance, runs_dir = server
+    run = write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z")
+    records = [{"id": 1, "phase": "start", "kind": "tool", "t_ms": 0, "name": "observe"},
+               {"id": 2, "phase": "start", "kind": "cli", "t_ms": 5, "parent": 1, "name": "snapshot"},
+               {"id": 2, "phase": "end", "kind": "cli", "t_ms": 400, "ok": True}]
+    (run / "progress.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records) + '{"id": 1, "ph',
+                                         encoding="utf-8")
+
+    status, _, body = request(instance, "/api/runs/20261107-120000/progress?since=1")
+
+    assert status == 200
+    assert json.loads(body) == {"records": records[1:], "next": 3}
+
+
+def test_progress_of_a_run_without_the_file_is_empty(server):
+    instance, runs_dir = server
+    write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z")
+
+    status, _, body = request(instance, "/api/runs/20261107-120000/progress?since=0")
+
+    assert status == 200
+    assert json.loads(body) == {"records": [], "next": 0}
+
+
+def test_progress_needs_the_token(server):
+    instance, runs_dir = server
+    write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z")
+
+    status, _, _ = request(instance, "/api/runs/20261107-120000/progress", {"X-Agent-Token": None})
+
+    assert status == 403
+
+
+def test_progress_rejects_a_bad_since(server):
+    instance, runs_dir = server
+    write_run(runs_dir, "20261107-120000", "2026-11-07T12:00:00Z")
+
+    status, _, _ = request(instance, "/api/runs/20261107-120000/progress?since=-1")
+
+    assert status == 400
+
+
 VISION_EVENT = {
     "type": "vision", "step": 7, "capture": "c3", "asked_by": "look", "question": "<b>which</b> mark?",
     "answer": "mark 3 </script>", "marks": [3], "points": [{"label": "point <i>", "x": 412, "y": 88}],

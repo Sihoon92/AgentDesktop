@@ -476,3 +476,48 @@ def test_a_run_of_a_shortcut_records_the_shortcut_and_never_what_it_names(monkey
     assert record["exe"] == str(link)
     written = (run_dir / "run.json").read_text(encoding="utf-8") + (run_dir / "summary.txt").read_text(encoding="utf-8")
     assert not any(word in written for word in SECRET_WORDS)
+
+
+def progress_lines(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_cli_records_carry_only_the_command_name(tmp_path):
+    from agent.progress import ProgressLog
+
+    run, _ = runner_returning('{"ok": true}')
+    client = DesktopClient("ad.exe", "s", runner=run)
+    client.set_progress(ProgressLog(tmp_path / "p.jsonl"))
+    client.run("type", "@s1:e2", "--", "비밀 글", headed=True)
+    start, end = progress_lines(tmp_path / "p.jsonl")
+    assert start == {"id": 1, "phase": "start", "kind": "cli", "t_ms": start["t_ms"], "name": "type", "headed": True}
+    assert end["ok"] is True and "비밀" not in json.dumps(end, ensure_ascii=False)
+
+
+def test_a_failed_command_ends_with_its_code(tmp_path):
+    from agent.progress import ProgressLog
+
+    run, _ = runner_returning('{"ok": false, "error": {"code": "STALE_REF", "message": "gone"}}', code=1)
+    client = DesktopClient("ad.exe", "s", runner=run)
+    client.set_progress(ProgressLog(tmp_path / "p.jsonl"))
+    client.run("click", "@s1:e2")
+    end = progress_lines(tmp_path / "p.jsonl")[-1]
+    assert (end["ok"], end["code"]) == (False, "STALE_REF")
+
+
+def test_a_timed_out_command_ends_with_the_harness_code(tmp_path):
+    from agent.progress import ProgressLog
+
+    def run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    client = DesktopClient("ad.exe", "s", runner=run)
+    client.set_progress(ProgressLog(tmp_path / "p.jsonl"))
+    client.run("snapshot", "--window-id", "w-1")
+    end = progress_lines(tmp_path / "p.jsonl")[-1]
+    assert (end["ok"], end["code"]) == (False, "HARNESS_TIMEOUT")
+
+
+def test_a_client_without_progress_records_nothing():
+    run, _ = runner_returning('{"ok": true}')
+    assert DesktopClient("ad.exe", "s", runner=run).run("version") == {"ok": True}

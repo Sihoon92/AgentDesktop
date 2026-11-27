@@ -873,6 +873,48 @@ def test_plan_and_stage_events_are_kept(tmp_path):
     assert kept[1]["note"] == f"{MARK} 메모"
 
 
+def progress_records(recorder):
+    path = recorder.path / "progress.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_cli_commands_are_recorded_in_progress(tmp_path):
+    recorder, toolbox, _ = recorded(tmp_path)
+    toolbox.call("launch_target", {"intent": "앱을 연다"})
+    names = [r["name"] for r in progress_records(recorder) if r["kind"] == "cli" and r["phase"] == "start"]
+    assert names[0] == "launch"
+
+
+def test_events_written_counts_event_lines(tmp_path):
+    recorder, toolbox, _ = recorded(tmp_path)
+    toolbox.call("launch_target", {"intent": "앱을 연다"})
+    toolbox.call("observe", OBSERVE)
+    assert recorder.events_written == len(events(recorder, focus=True)) > 0
+
+
+def test_finish_closes_open_items(tmp_path):
+    recorder, _, _ = recorded(tmp_path)
+    recorder.progress.start("tool", name="click")
+    recorder.finish(RunResult("stopped", 0, "x"))
+    last = progress_records(recorder)[-1]
+    assert (last["phase"], last["ok"], last["code"]) == ("end", False, "STOPPED")
+
+
+def test_run_events_reach_the_progress_sinks(tmp_path):
+    seen = []
+
+    class Listener:
+        def on_event(self, event):
+            seen.append(event["type"])
+
+    recorder, _, _ = recorded(tmp_path)
+    recorder.progress.add_sink(Listener())
+    recorder.on_event({"type": "stage", "n": 1, "status": "started", "calls": 0, "limit": 8})
+    assert seen == ["stage"]
+
+
 def test_a_failed_start_focus_reaches_the_summary(tmp_path):
     from agent.summary import summary_of
 

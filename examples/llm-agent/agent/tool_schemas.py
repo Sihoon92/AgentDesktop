@@ -295,7 +295,15 @@ VISION_LOOK = _tool(
 
 def definitions_for(level, vision):
     """The definitions a model at permission `level` sees. With `vision`, look asks the vision
-    model a question; without it every definition is SCHEMAS' own."""
+    model a question; without it every definition is SCHEMAS' own. Where click_part is offered,
+    click is not: a ref click reported success on the company system while nothing happened, so
+    the model presses by mark. A workflow replay still runs a saved click step."""
     replaced = {"look": VISION_LOOK} if vision else {}
     chosen = [replaced.get(s["definition"]["name"], s) for s in SCHEMAS]
-    return [s["definition"] for s in chosen if s["level"] <= level]
+    hidden = HIDDEN_BY_CLICK_PART if level >= CLICK_PART_LEVEL else frozenset()
+    return [s["definition"] for s in chosen if s["level"] <= level and s["definition"]["name"] not in hidden]
+
+
+CLICK_PART_LEVEL = next(s["level"] for s in SCHEMAS if s["definition"]["name"] == "click_part")
+HIDDEN_BY_CLICK_PART = frozenset({"click"})
+"""Tools the model does not see once click_part is offered."""

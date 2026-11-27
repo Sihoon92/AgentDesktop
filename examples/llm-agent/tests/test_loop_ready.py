@@ -136,6 +136,37 @@ def test_launch_ready_records_events_and_one_ready_observation():
     assert SIGNAL not in json.dumps(observer.ready_events(), ensure_ascii=False)
 
 
+def test_the_ready_wait_is_one_item_holding_its_reads(tmp_path):
+    from agent.progress import ProgressLog
+
+    clock = FakeClock()
+    desktop = splash_then_main(clock)
+    observer = RecordingObserver()
+    observer.progress = ProgressLog(tmp_path / "p.jsonl")
+    toolbox = Toolbox(desktop, task(), confirm=lambda _p: True, sleep=clock.sleep, clock=clock, observer=observer)
+
+    toolbox.launch_ready()
+
+    records = [json.loads(line) for line in (tmp_path / "p.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert records[0]["kind"] == "ready"
+    assert records[-1] == {**records[-1], "id": records[0]["id"], "phase": "end", "ok": True}
+
+
+def test_a_ready_wait_that_fails_ends_with_its_code(tmp_path):
+    from agent.progress import ProgressLog
+
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [], launch_pid=100)
+    observer = RecordingObserver()
+    observer.progress = ProgressLog(tmp_path / "p.jsonl")
+    toolbox = Toolbox(desktop, task(), confirm=lambda _p: True, sleep=clock.sleep, clock=clock, observer=observer)
+
+    toolbox.launch_ready()
+
+    last = json.loads((tmp_path / "p.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert last["ok"] is False and last["code"].startswith("READY_")
+
+
 def test_the_ready_window_is_the_current_window():
     clock = FakeClock()
     desktop = splash_then_main(clock)

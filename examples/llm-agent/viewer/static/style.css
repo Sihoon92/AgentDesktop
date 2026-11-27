@@ -1016,3 +1016,36 @@ pre {
 .profile-signals li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 2px 4px; border-radius: 4px; }
 .profile-check { display: flex; gap: 6px; align-items: center; margin: 8px 0; }
 .profile-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+.now-panel {
+  position: sticky;
+  left: 0;
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--line, #d0d4da);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.now-panel .now-head {
+  font-weight: 600;
+}
+
+.now-panel .now-open.depth-1 { padding-left: 1.2em; }
+.now-panel .now-open.depth-2 { padding-left: 2.4em; }
+.now-panel .now-open.depth-3 { padding-left: 3.6em; }
+.now-panel .now-open.depth-4 { padding-left: 4.8em; }
+
+.now-panel .now-done {
+  opacity: 0.75;
+}
+
+.progress-commands {
+  margin: 6px 0;
+}
+
+.progress-commands ol {
+  margin: 4px 0 0;
+  padding-left: 1.4em;
+}

@@ -720,3 +720,40 @@ def test_the_system_prompt_explains_id_and_alias():
     for word in ("name", "look", "ask", "click_part", "ref"):
         assert word in about_alias, word
     assert re.search(r'(id|alias)="[^".…]', SYSTEM_PROMPT) is None, "the prompt quotes no example value"
+
+
+class ProgressObserver:
+    def __init__(self, path):
+        from agent.progress import ProgressLog
+
+        self.progress = ProgressLog(path)
+
+    def on_observation(self, *args, **kwargs):
+        pass
+
+    def on_action(self, *args, **kwargs):
+        pass
+
+
+def test_model_calls_and_tool_calls_are_items_with_steps(tmp_path):
+    cli = FakeCli()
+    task = Task("설정 패널을 연다", r"C:\apps\FootprintChart.exe", 3, REQUIRE)
+    observer = ProgressObserver(tmp_path / "p.jsonl")
+    desktop = DesktopClient("ad.exe", "run1", runner=cli)
+    desktop.set_progress(observer.progress)
+    toolbox = Toolbox(desktop, task, confirm=lambda _p: False, sleep=lambda _s: None, observer=observer)
+    model = ScriptedModel([[call("launch_target", {"intent": "연다"})], [GIVE_UP[0]]])
+
+    run_agent(model, toolbox, task)
+
+    records = [json.loads(line) for line in (tmp_path / "p.jsonl").read_text(encoding="utf-8").splitlines()]
+    starts = [r for r in records if r["phase"] == "start" and r["kind"] in ("model", "tool")]
+    assert [(r["kind"], r.get("name"), r.get("step")) for r in starts] == [
+        ("model", None, 1), ("tool", "launch_target", 1), ("model", None, 2), ("tool", "finish", 2)]
+    launch = starts[1]
+    assert launch["intent"] == "연다" and "parent" not in launch
+    assert [r for r in records if r["kind"] == "cli" and r["phase"] == "start"][0]["parent"] == launch["id"]
+    model_end = next(r for r in records if r["phase"] == "end" and r["id"] == starts[0]["id"])
+    assert model_end["tokens"] == 100
+    tools = [r for r in records if r["phase"] == "start" and r["kind"] == "tool"]
+    assert len(tools) == 2, "Toolbox.call does not open a second item inside the loop's"

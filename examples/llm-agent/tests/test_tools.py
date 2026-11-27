@@ -1,3 +1,4 @@
+import json
 import re
 
 import pytest
@@ -316,6 +317,22 @@ def test_launch_target_raises_the_launched_window():
     assert names.index("launch") < names.index("focus-window")
 
 
+def offered(level):
+    from agent.tool_schemas import definitions_for
+
+    return [definition["name"] for definition in definitions_for(level, False)]
+
+
+def test_click_is_not_offered_where_click_part_is():
+    for level in (2, 3):
+        assert "click" not in offered(level) and "click_part" in offered(level)
+
+
+def test_click_stays_offered_below_the_physical_level():
+    for level in (0, 1):
+        assert "click" in offered(level) and "click_part" not in offered(level)
+
+
 def test_focus_window_is_offered_at_level_zero():
     from agent.tool_schemas import definitions_for
 
@@ -533,7 +550,7 @@ def test_action_tools_require_intent():
 
     required = {tool["name"]: tool["parameters"]["required"] for tool in toolbox.definitions()}
 
-    for name in ("click", "press", "mouse_click"):
+    for name in ("click_part", "press", "mouse_click"):
         assert "intent" in required[name]
     for name in ("observe", "list_windows", "wait_for_text", "finish"):
         assert "intent" not in required[name]
@@ -1344,3 +1361,91 @@ def test_a_ref_preview_shows_the_alias_of_its_element(tmp_path):
 
     assert (target["role"], target["alias"]) == ("button", "Run")
     assert not {"native_id", "in"} & set(target)
+
+
+class ProgressObserver:
+    def __init__(self, path):
+        from agent.progress import ProgressLog
+
+        self.progress = ProgressLog(path)
+
+    def on_observation(self, *args, **kwargs):
+        pass
+
+    def on_action(self, *args, **kwargs):
+        pass
+
+
+def progress_toolbox(tmp_path):
+    cli = FakeCli()
+    observer = ProgressObserver(tmp_path / "p.jsonl")
+    clock = iter(range(0, 10_000))
+    desktop = DesktopClient("ad.exe", "run1", runner=cli)
+    desktop.set_progress(observer.progress)
+    toolbox = Toolbox(desktop, Task("goal", EXE, 3, REQUIRE), confirm=lambda _p: True, sleep=lambda _s: None,
+                      clock=lambda: next(clock), observer=observer)
+    return toolbox, tmp_path / "p.jsonl"
+
+
+def progress_of(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_a_tool_call_is_one_item_with_its_cli_commands_inside(tmp_path):
+    toolbox, path = progress_toolbox(tmp_path)
+    toolbox.call("launch_target", {"intent": "앱을\n연다"})
+    records = progress_of(path)
+    tool = records[0]
+    assert (tool["kind"], tool["name"], tool["intent"]) == ("tool", "launch_target", "앱을 연다")
+    assert all(r.get("parent") == tool["id"] for r in records if r["kind"] == "cli" and r["phase"] == "start")
+    assert (records[-1]["id"], records[-1]["phase"], records[-1]["ok"]) == (tool["id"], "end", True)
+
+
+def test_a_read_only_tool_is_marked(tmp_path):
+    toolbox, path = progress_toolbox(tmp_path)
+    toolbox.call("launch_target", {"intent": "x"})
+    toolbox.call("list_windows", {})
+    tools = [r for r in progress_of(path) if r["phase"] == "start" and r["kind"] == "tool"]
+    assert [r.get("read_only") for r in tools] == [None, True]
+
+
+def test_a_tool_already_open_with_the_same_name_is_not_opened_twice(tmp_path):
+    toolbox, path = progress_toolbox(tmp_path)
+    with toolbox.progress.span("tool", name="launch_target"):
+        toolbox.call("launch_target", {"intent": "x"})
+    assert len([r for r in progress_of(path) if r["kind"] == "tool" and r["phase"] == "start"]) == 1
+
+
+def test_a_refused_tool_ends_with_its_refused_code(tmp_path):
+    toolbox, path = progress_toolbox(tmp_path)
+    toolbox.call("launch_target", {"intent": "x"})
+    toolbox.call("focus_window", {"window_id": WINDOW_OTHER_INSTANCE, "intent": "x"})
+    last = progress_of(path)[-1]
+    assert (last["phase"], last["kind"], last["ok"]) == ("end", "tool", False)
+
+
+def test_a_toolbox_without_a_progress_observer_records_nothing():
+    toolbox, _ = launched()
+    assert toolbox.progress.innermost() is None
+
+
+def test_a_vision_read_is_a_model_item_inside_the_tool(tmp_path):
+    from types import SimpleNamespace
+
+    class Answer:
+        tokens = 77
+
+        def as_result(self):
+            return {"answer": "x"}
+
+        def as_event(self):
+            return {"answer": "x"}
+
+    toolbox, path = progress_toolbox(tmp_path)
+    toolbox._vision = SimpleNamespace(read=lambda shot, question, marks: Answer())
+    with toolbox.progress.span("tool", name="look"):
+        toolbox._ask_vision(SimpleNamespace(id="c1", drawn=False), "무엇이 보이나", "look")
+    records = progress_of(path)
+    model = next(r for r in records if r["kind"] == "model" and r["phase"] == "start")
+    assert (model["name"], model["parent"]) == ("vision", records[0]["id"])
+    assert next(r for r in records if r["kind"] == "model" and r["phase"] == "end")["tokens"] == 77

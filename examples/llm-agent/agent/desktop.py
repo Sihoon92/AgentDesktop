@@ -16,6 +16,7 @@ import json
 import subprocess
 
 from agent.handles import window_number, without_handle_ids
+from agent.progress import NULL_PROGRESS, envelope_fields
 from agent.shortcut import MESSAGES, guarded, is_shortcut, launch_args
 
 
@@ -45,9 +46,23 @@ class DesktopClient:
         self._timeout_s = timeout_s
         self._window_handles = window_handles
         self._read_shortcut = read_shortcut
+        self._progress = NULL_PROGRESS
+
+    def set_progress(self, progress):
+        """Records every command from now on as a cli item of `progress` (its name only)."""
+        self._progress = progress
 
     def run(self, *args, headed=False):
         args = [str(arg) for arg in args]
+        item = self._progress.start("cli", name=_command_name(args), headed=True if headed else None)
+        envelope = {"ok": False, "error": {"code": "HARNESS_ERROR"}}
+        try:
+            envelope = self._run(args, headed)
+        finally:
+            self._progress.end(item, **envelope_fields(envelope))
+        return envelope
+
+    def _run(self, args, headed):
         if self._read_shortcut is not None and len(args) > 1 and args[0] == "launch" and is_shortcut(args[1]):
             found, code = guarded(args[1], self._read_shortcut)
             if code is not None:
@@ -99,6 +114,11 @@ class DesktopClient:
             stdin=subprocess.DEVNULL,
             timeout=self._timeout_s,
         )
+
+
+def _command_name(args):
+    """The command word a progress record names; a shortcut launch is still a launch."""
+    return args[0] if args else "?"
 
 
 def _window_id(args, data):

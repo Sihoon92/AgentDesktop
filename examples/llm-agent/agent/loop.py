@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 
 from agent.guard import AgentStopped
 from agent.history import Transcript
+from agent.progress import NULL_PROGRESS, result_fields, tool_item_fields
 from agent.ready import signals
 from agent.results import refused
 from agent.stages import StageError, StagePlan
@@ -52,13 +53,14 @@ Rules:
 - Earlier observations are left out of what you are sent; observe again when you need something
   you no longer see. The latest observation stays even after you finish a stage, so when the
   screen has not changed you do not need to observe again.
-- Prefer semantic tools (toggle, check, uncheck, select, set_value, click). Use press next. Use
+- Prefer semantic tools (toggle, check, uncheck, select, set_value). Use press next. Use
   physical tools (type, double_click, right_click, click_part, mouse_*, drag) only when no semantic
   path exists. Use click_part for an element without a ref, or for one end of an element.
 - When an action is refused with focus_failed or focus_not_confirmed, call focus_window on that
   window and retry once; if focus_error.code is PERM_DENIED, ask the user.
 - For a switch or checkbox whose actions include Toggle, use check or uncheck when available,
-  otherwise toggle, never click. Use click for buttons, links and menu items.
+  otherwise toggle, never click. Press buttons, links and menu items with click_part on their
+  number (part center); use click only when click_part is not offered.
 - Every action takes an intent: one sentence on why you take it. A person reads it beside the
   screenshot, so name the element and the effect you expect.
 - Every action also takes expect: the change you honestly expect (a window opens or closes, the
@@ -176,7 +178,8 @@ def run_agent(model, toolbox, task, log=lambda _event: None, gate=None, register
     result = _Run(model, toolbox, task, log, gate, stop).run()
     if result.status in SUCCESS_STATUSES and register is not None:
         try:
-            spent = register(model, toolbox, log)
+            progress = getattr(toolbox, "progress", None) or NULL_PROGRESS
+            spent = register(progress.timed_model(model, "registration"), toolbox, log)
         except Exception as error:
             log({"type": "warning", "message": f"등록 중 오류: {type(error).__name__}: {error}"})
         else:
@@ -262,7 +265,7 @@ class _Run:
                 return self._result("stopped", "The model replied without calling a tool")
             for call in calls:
                 self._check_stop()
-                ended, output = self._execute(call)
+                ended, output = self._execute_recorded(call)
                 self._count_vision()
                 self._log_tool(call, output)
                 if ended:
@@ -299,19 +302,37 @@ class _Run:
         if call is None:
             return self._result("stopped", reason)
         self._check_stop()
-        ended, output = self._execute(call, at_ceiling=True)
+        ended, output = self._execute_recorded(call, at_ceiling=True)
         self._count_vision()
         self._log_tool(call, output)
         if ended:
             return self._result(output["status"], output["reason"])
         return self._result("stopped", reason)
 
+    @property
+    def _progress(self):
+        return getattr(self._toolbox, "progress", None) or NULL_PROGRESS
+
+    def _execute_recorded(self, call, at_ceiling=False):
+        """_execute as one tool item of the progress log, so finish, approvals and refusals made
+        outside the toolbox show as the call they answer."""
+        try:
+            arguments = json.loads(call.arguments)
+        except ValueError:
+            arguments = {}
+        with self._progress.span("tool", **tool_item_fields(self._turn, call.name, arguments)) as span:
+            ended, output = self._execute(call, at_ceiling=at_ceiling)
+            span.finish(**result_fields(output))
+        return ended, output
+
     def _respond(self, tools, items=None):
         self._turn += 1
         self._toolbox.step = self._turn
         effort = None if self._plan.exists else self._task.plan_reasoning_effort
-        response = self._model.respond(self._instructions, self._transcript.view() if items is None else items,
-                                       tools, effort=effort)
+        with self._progress.span("model", step=self._turn) as span:
+            response = self._model.respond(self._instructions,
+                                           self._transcript.view() if items is None else items, tools, effort=effort)
+            span.finish(ok=True, tokens=response.usage.total_tokens if response.usage else None)
         self._call_tokens = response.usage.total_tokens if response.usage else 0
         self._tokens += self._call_tokens
         self._max_call_tokens = max(self._max_call_tokens, self._call_tokens)

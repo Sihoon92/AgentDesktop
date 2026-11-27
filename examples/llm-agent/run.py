@@ -35,6 +35,7 @@ from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, syst
 from agent.loop import RunResult, run_agent
 from agent.profile import ProfileError as SystemProfileError
 from agent.profile import load_profile, profile_root
+from agent.progress_printer import ProgressPrinter
 from agent.recorder import RunRecorder
 from agent.registration import register_after_run
 from agent.settings import SettingsError, load_settings, settings_path
@@ -91,21 +92,16 @@ def confirm(prompt):
 
 
 def make_logger(recorder):
-    def log(event):
-        recorder.on_event(event)
-        if event.get("type") != "tool":
-            return
-        print(f"[{event['step']}] {event['tool']} {event['arguments']} -> {_outcome(event['result'])}")
-
-    return log
+    """The loop's log: the recorder keeps each event, and the terminal shows the run through the
+    progress printer that make_recorder attached."""
+    return recorder.on_event
 
 
-def _outcome(result):
-    for key in ("status", "code", "refused"):
-        if result.get(key):
-            return f"{key}={result[key]}"
-    delivery = (result.get("disposition") or {}).get("delivery")
-    return f"ok={result.get('ok')}" + (f" delivery={delivery}" if delivery else "")
+def make_recorder(desktop, meta, profile):
+    """A RunRecorder whose progress prints to this terminal as the run goes."""
+    recorder = RunRecorder(RUNS_DIR, desktop, meta, profile=profile)
+    recorder.progress.add_sink(ProgressPrinter())
+    return recorder
 
 
 def _fail(message):
@@ -306,7 +302,7 @@ def _run_recorded(run, binary, session, viewer):
     if models is not None:
         meta["vision"] = models.vision is not None
     try:
-        recorder = RunRecorder(RUNS_DIR, desktop, meta, profile=profile)
+        recorder = make_recorder(desktop, meta, profile)
     except OSError as error:
         return _fail(f"실행 기록 폴더를 만들지 못했습니다: {error}")
     if viewer is not None:
@@ -326,7 +322,8 @@ def _run_recorded(run, binary, session, viewer):
         log = make_logger(recorder)
         result = run_agent(models.text, toolbox, task, log, gate=gate, register=register)
         workflows = WorkflowStore(run.workflows_root, system)
-        result = after_run(models.text, result, recorder.path, workflows, _keeping_workflows(log, made),
+        result = after_run(recorder.progress.timed_model(models.text, "workflow"), result, recorder.path, workflows,
+                           _keeping_workflows(log, made),
                            use_ids=profile.stable_ids)
     return _finish_recorded(recorder, result, (binary, session), viewer, made)
 
@@ -534,7 +531,7 @@ def _replay_recorded(replay, binary, session, viewer):
     meta = {"goal": task.goal, "exe": task.exe, "model": WORKFLOW_RUN, "permission_level": task.permission_level,
             "max_steps": task.max_steps, "started_by": WORKFLOW_RUN, "system": replay.system, "code": current_code()}
     try:
-        recorder = RunRecorder(RUNS_DIR, desktop, meta, profile=replay.profile)
+        recorder = make_recorder(desktop, meta, replay.profile)
     except OSError as error:
         return _fail(f"실행 기록 폴더를 만들지 못했습니다: {error}")
     if viewer is not None:

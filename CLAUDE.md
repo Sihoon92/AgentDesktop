@@ -100,6 +100,10 @@ python survey.py --read-block <파일>                           # 집에서 옮
 
 실행마다 `runs\<id>\`에 스크린샷과 요소 박스가 기록되고(`agent/recorder.py`), 뷰어(`viewer/`)가 표준 라이브러리 서버로 127.0.0.1에서 토큰을 받아 보여 줍니다.
 
+**진행 표시:** 모델 호출, 도구 호출, CLI 명령의 시작과 끝은 `runs\<id>\progress.jsonl`에 따로 쌓입니다(`agent/progress.py`, 기록기가 만들어 `DesktopClient`에 붙임). 터미널(`run.py`, `view.py`)은 `agent/progress_printer.py`가, 웹의 "지금" 패널과 스텝 상세는 `viewer/static/progress.js`(Node 테스트 `tests/js/`)가 그립니다. CLI는 명령 이름만 적고 인자는 적지 않습니다. intent가 들어가므로 `events.jsonl`처럼 회사 PC 전용이고, 요약과 `run.json`에는 넣지 않습니다. `events.jsonl`은 바꾸지 않습니다. 설계는 `examples/llm-agent/docs/specs/2026-11-27-live-progress-design.md`에 있습니다.
+
+**`click` 숨기기:** `click_part`를 쓸 수 있는 레벨(2 이상)에서는 모델에게 `click`을 주지 않습니다(`tool_schemas.definitions_for`). 회사 MES에서 ref 클릭이 성공으로 답하고도 화면이 그대로였기 때문입니다. workflow 재실행은 저장된 `click` 단계를 그대로 씁니다.
+
 `run.py`가 작업 파일과 CLI 바이너리를 찾아 `agent/loop.py`의 루프를 돌립니다. 모델은 `agent/tools.py`의 도구로만 앱을 조작하고, 쓸 수 있는 도구는 작업 파일의 `permission_level`로 제한되며, `agent/guard.py`가 반복 동작을 막습니다. 성공 여부는 모델이 아니라 하니스(`agent/verify.py`)가 작업 파일의 `success` 조건으로 판단합니다. 조건이 없으면 지식의 완료 조건(`agent/completion.py`)이나 사람의 확인으로 판정합니다. 바이너리는 `AGENT_DESKTOP_BIN`, `target/release`, `target/debug` 순으로 찾습니다.
 
 **묻기와 배우기:** 좌표를 직접 고른 클릭, 표에서 후보가 여럿인 셀, 기대와 다른 결과가 이어진 뒤에는 하니스(`agent/policy.py`)가 사람에게 묻게 합니다. 승인한 답은 `knowledge\<시스템>\`에 YAML로 쌓이고(`agent/knowledge.py`, Git 제외) 다음 실행의 모델에게 주어집니다. 앱마다 다른 것은 이 지식 파일에만 둡니다. `agent/`와 `viewer/`의 코드에 앱 이름이나 화면의 글을 넣으면 `tests\test_application_agnostic.py`가 실패합니다. 설계는 `examples/llm-agent/docs/specs/2026-11-13-observe-ask-learn-design.md`에 있습니다.

@@ -71,7 +71,7 @@ def build_run_manager(runs_dir, default_exe, knowledge_dir=None, task_defaults=N
     model_factory = functools.partial(openai_model, settings=task_defaults)
     return RunManager(runs_dir, binary, default_exe, model_factory, knowledge_dir=knowledge_dir,
                       task_defaults=task_defaults, environ=os.environ, workflow_dir=workflow_dir,
-                      profile_dir=profile_dir), None
+                      profile_dir=profile_dir, print_progress=True), None
 
 
 def open_fragment(runs_dir, value):
@@ -371,4 +371,6 @@ def close_registration(run_manager):
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
     sys.exit(main())

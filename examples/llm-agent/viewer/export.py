@@ -79,6 +79,7 @@ def _record(run_dir, now):
         "exported_at": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "run": run,
         "events": events,
+        "progress": _events(run_dir / "progress.jsonl"),
         "frames": _frames(run_dir / "frames"),
     }
     captures = _vision_captures(run_dir / "captures", events)

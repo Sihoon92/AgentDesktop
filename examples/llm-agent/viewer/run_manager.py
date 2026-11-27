@@ -39,6 +39,7 @@ from agent.knowledge import KnowledgeError, KnowledgeStore, knowledge_root, syst
 from agent.llm import ModelSetupError, Models
 from agent.loop import RunResult, run_agent
 from agent.profile import Profile, ProfileError, load_profile, profile_root
+from agent.progress_printer import ProgressPrinter
 from agent.recorder import RunRecorder
 from agent.shortcut import resolve_shortcut
 from agent.registration import register_after_run
@@ -110,7 +111,7 @@ class RunManager:
     def __init__(self, runs_dir, binary, default_exe, model_factory, toolbox_factory=default_toolbox,
                  desktop_factory=None, gate_factory=ApprovalGate, ask_gate_factory=AskGate, knowledge_dir=None,
                  task_defaults=None, environ=None, workflow_dir=None, replay_toolbox_factory=default_replay_toolbox,
-                 profile_dir=None):
+                 profile_dir=None, print_progress=False):
         """task_defaults are the settings file's values that every new run's task starts from; their
         systems give the runs a target by name and their ready signal reaches only the exes they
         name. environ supplies OPENAI_MODEL below them (None reads no env). model_factory(task) returns
@@ -137,6 +138,7 @@ class RunManager:
         self._stop = None
         self._recorder = None
         self._replay_toolbox_factory = replay_toolbox_factory
+        self._print_progress = print_progress
         self.workflow_root = workflow_root(workflow_dir, self._task_defaults.get("workflow_dir"),
                                            {} if environ is None else environ)
         self.profile_root = profile_root(profile_dir, self._task_defaults.get("profile_dir"),
@@ -282,6 +284,8 @@ class RunManager:
                 meta["vision"] = vision is not None
             desktop = self._desktop_factory()
             recorder = RunRecorder(self.runs_dir, desktop, meta, profile=profile)
+            if self._print_progress:
+                recorder.progress.add_sink(ProgressPrinter())
         except RunStartFailed:
             self._release()
             raise
@@ -352,6 +356,8 @@ class RunManager:
             desktop = self._desktop_factory()
             meta = {**self._meta(task, store.system), "model": WORKFLOW_RUN, "started_by": WORKFLOW_RUN}
             recorder = RunRecorder(self.runs_dir, desktop, meta, profile=profile)
+            if self._print_progress:
+                recorder.progress.add_sink(ProgressPrinter())
         except RunStartFailed:
             self._release()
             raise
@@ -456,7 +462,8 @@ class RunManager:
         except Exception as error:
             result = RunResult("stopped", 0, f"실행 중 오류: {type(error).__name__}: {error}")
         try:
-            result = after_run(model, result, recorder.path, workflows, recorder.on_event,
+            result = after_run(recorder.progress.timed_model(model, "workflow"), result, recorder.path, workflows,
+                               recorder.on_event,
                                **({"use_ids": True} if use_ids else {}))
         except Exception:
             pass
