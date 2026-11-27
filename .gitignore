@@ -59,6 +59,8 @@ logs/
 
 # Local agent tooling
 .claude/
+!examples/llm-agent/company/.claude/
+!examples/llm-agent/company/.claude/settings.json
 .coordination/
 .cursor/
 .context/

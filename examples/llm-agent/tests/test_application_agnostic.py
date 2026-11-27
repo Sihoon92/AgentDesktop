@@ -20,7 +20,7 @@ import pytest
 HERE = Path(__file__).resolve().parent.parent
 PYTHON_SOURCES = sorted(
     [*(HERE / "agent").glob("*.py"), *(HERE / "viewer").glob("*.py"), HERE / "run.py", HERE / "view.py",
-     HERE / "check.py"]
+     HERE / "check.py", HERE / "survey.py"]
 )
 PAGE_SOURCES = sorted((HERE / "viewer" / "static").glob("*.*"))
 

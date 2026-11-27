@@ -101,7 +101,7 @@
 - **회사에서 환경부터 점검할 수 있게 합니다.** 바이너리, LLM 엔드포인트(Responses API 지원), 대상 앱 관찰 가능 여부를 한 번에 확인하는 점검 명령을 둡니다.
 - **현상을 받으면 질문으로 좁힙니다.** 사용자가 현상을 전하면, 위 요약의 어느 값을 확인하면 원인이 갈리는지 구체적으로 묻습니다.
 
-가상 앱은 만들었습니다(`examples/llm-agent/virtual-mes/`, 사용법은 그 폴더의 README). 실행 요약(`agent/summary.py`), 설정 파일(`settings.local.yaml`), 점검 명령(`check.py`)도 만들었습니다(사용법은 `examples/llm-agent/README.md`의 "설정 파일", "점검", "실행 요약"). 회사에서 현상을 전할 때는 실행 요약과 점검 출력을 그대로 불러 주면 됩니다.
+가상 앱은 만들었습니다(`examples/llm-agent/virtual-mes/`, 사용법은 그 폴더의 README). 실행 요약(`agent/summary.py`), 설정 파일(`settings.local.yaml`), 점검 명령(`check.py`)도 만들었습니다(사용법은 `examples/llm-agent/README.md`의 "설정 파일", "점검", "실행 요약"). 회사에서 현상을 전할 때는 실행 요약과 점검 출력을 그대로 불러 주면 됩니다. 새 시스템의 구조와 쓰는 중에 뜨는 창은 캡처 세션(`survey.py`)의 전달 블록으로 옮겨 오고, 집에서 `survey.py --read-block`으로 풉니다(README의 "회사 시스템 캡처 세션").
 
 ## 가상 앱에서 확인한 것
 

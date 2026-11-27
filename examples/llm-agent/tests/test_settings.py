@@ -27,7 +27,8 @@ def test_contract_names():
     assert DEFAULT_PATH == HERE / "settings.local.yaml"
     assert KEYS == ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
                     "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side",
-                    "vision_points", "systems", "ready_text", "ready_timeout_s", "workflow_dir", "profile_dir")
+                    "vision_points", "systems", "ready_text", "ready_timeout_s", "workflow_dir", "profile_dir",
+                    "survey_capture_hotkey", "survey_end_hotkey", "survey_app_exes")
 
 
 def test_every_key_is_read(tmp_path):
@@ -481,3 +482,28 @@ def test_example_file_tells_how_to_write_the_profile_dir():
     assert "#   예) profile_dir: " in block
     assert "AGENT_PROFILE_DIR" in block
     assert "--profile-dir" in block
+
+
+def test_settings_reads_survey_keys(tmp_path):
+    text = ("survey_capture_hotkey: Ctrl+Shift+F8\nsurvey_end_hotkey: ctrl+alt+0\n"
+            "survey_app_exes:\n  - C:\\Apps\\Copy\\Real.exe\n  - 'D:\\Other\\App.exe'\n")
+    assert load_settings(write(tmp_path, text), environ={}) == {
+        "survey_capture_hotkey": "Ctrl+Shift+F8", "survey_end_hotkey": "ctrl+alt+0",
+        "survey_app_exes": ["C:\\Apps\\Copy\\Real.exe", "D:\\Other\\App.exe"]}
+
+
+@pytest.mark.parametrize("text, reason", [
+    ("survey_capture_hotkey: SECRET_KEY\n", "survey_capture_hotkey 값이 단축키 형식이 아님"),
+    ("survey_end_hotkey: printscreen\n", "survey_end_hotkey 값이 단축키 형식이 아님"),
+    ("survey_app_exes: C:\\SECRET\\App.exe\n", "survey_app_exes 값이 경로 목록이 아님"),
+    ("survey_app_exes: []\n", "survey_app_exes 값이 경로 목록이 아님"),
+    ("survey_app_exes:\n  - C:\\Apps\\A.exe\n  - SECRET\\App.exe\n",
+     "survey_app_exes 2번째 항목: 경로가 절대 경로가 아님"),
+    ("survey_app_exes:\n  - 3\n", "survey_app_exes 1번째 항목: 경로가 글이 아님"),
+])
+def test_bad_survey_keys_are_refused_without_values(tmp_path, text, reason):
+    with pytest.raises(SettingsError) as raised:
+        load_settings(write(tmp_path, text), environ={})
+    assert raised.value.reason == reason
+    assert "SECRET" not in str(raised.value)
+

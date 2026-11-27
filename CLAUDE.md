@@ -61,6 +61,7 @@ $env:AGENT_DESKTOP_HOME = '<임시폴더>\state'
 - **독립 검증:** .NET 관리형 UIA는 이 픽스처의 `AutomationId`를 숫자로 돌려줘 찾을 수 없고, `BM_GETCHECK`는 체크박스에서 항상 0입니다. 상태 표시를 `WM_GETTEXT`로 읽습니다.
 - **PowerShell 5.1:** ref는 따옴표로 감싸고(`'@s8f3k2p9:e8'`), `batch` JSON은 큰따옴표를 `\"`로 이스케이프합니다. 파이프 입력에는 줄바꿈이 붙습니다.
 - **MCP 테스트:** .NET Framework의 `Process.StandardInput`으로 붙이면 첫 줄이 파싱 오류가 납니다(BOM으로 추정). Node 클라이언트는 정상입니다.
+- **임시 상태 폴더:** `AGENT_DESKTOP_HOME`으로 준 `%TEMP%` 아래 새 폴더를 CLI가 `private file DACL grants an untrusted principal`(`INTERNAL`)로 거부할 수 있습니다(2026-11-27). 그러면 `session start`가 실패하고 하니스는 창을 읽지 못합니다. `icacls <폴더> /inheritance:r /grant:r "<사용자>:(OI)(CI)F"`로 상속을 끊고 본인만 허용합니다.
 - **DPI 175%:** 폼이 창보다 커져 아래쪽 컨트롤이 `offscreen`입니다. 먼저 `scroll-to`를 합니다.
 - **콤보박스:** `select`가 아니라 `set-value`를 씁니다. 값은 바뀌지만 앱의 변경 이벤트는 발생하지 않습니다(`application_commit: not_verified`).
 
@@ -90,6 +91,9 @@ python run.py --workflow <ID> --param <이름>=<값> ...          # workflow를 
 python run.py --make-workflow <run_id|latest>                # 지난 실행에서 workflow를 다시 만듦(LLM 호출)
 python check.py [--exe "<절대경로>"] [--skip llm|app]         # 바이너리, 설정, LLM, 대상 앱 점검. app은 창을 띄움
 python run.py|view.py|check.py ... --profile-dir <폴더>       # 시스템 프로파일 폴더(.env를 고르는 --profile과 다름)
+python survey.py --system <이름> [--exe "<절대경로>"]          # 회사 캡처 세션: 단축키·버튼으로 캡처, 끝에 전달 블록. 읽기만 함
+python survey.py --block <세션|latest>                        # labels.yaml 검사 뒤 블록 다시 만들기
+python survey.py --read-block <파일>                           # 집에서 옮겨 온 블록 풀이(확인 문자로 오타 찾기)
 ```
 
 **가상 MES 앱:** `examples/llm-agent/virtual-mes/`는 CUA 개발용 연습 앱입니다(`virtual-mes/README.md`). `powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1`로 빌드합니다. `tests\test_virtual_mes.py`는 창을 띄우지 않습니다. `tests\test_virtual_mes_live.py`와 `tests\test_scenes_live.py`는 `VIRTUAL_MES_LIVE=1`일 때만 돌고 실제 창을 띄우며 커서를 움직이므로, 돌리기 전에 사용자에게 확인받습니다.
@@ -103,6 +107,8 @@ python run.py|view.py|check.py ... --profile-dir <폴더>       # 시스템 프�
 **단계 실행:** 모델이 첫 관찰 뒤 지시를 단계로 나누고(`plan`) 단계마다 화면의 근거와 함께 끝냅니다(`stage_done`). 하니스는 단계마다 모델 호출 수를 세고(`agent/stages.py`, 기본 8번) 한도에 닿으면 사람의 답 없이 계속하지 않습니다. 모델에게 다시 보내는 기록은 줄이고(`agent/history.py`), 헛걸음이 있었던 단계는 등록 때 지식 후보가 됩니다. 단계의 글은 `events.jsonl`에만 두고 `run.json`과 요약에는 수만 넣습니다. 뷰어에서 "스텝"은 타임라인의 한 칸이고 "단계"는 계획의 한 덩어리입니다. 설계는 `examples/llm-agent/docs/specs/2026-11-14-staged-run-design.md`에 있습니다.
 
 **회사 반입 도구:** PC마다 다른 값(모델 이름, `image_mode`, 지식 폴더, 대상 앱 경로)은 Git에서 제외된 `settings.local.yaml`에 둡니다(`agent/settings.py`, 예시는 `settings.example.yaml`). `check.py`는 실행 전 환경을 점검하고, 실행 끝의 요약(`agent/summary.py`)은 수와 코드만 담아 회사 실행 결과를 말로 전할 때 씁니다. 요약과 점검 출력에 화면의 글, 요소 이름, 경로, 설정 값을 넣지 않습니다. `check.py`의 앱 관찰은 창을 띄우므로 돌리기 전에 사용자에게 확인받습니다.
+
+**회사 캡처 세션:** `survey.py`는 회사 PC에서 앱을 쓰는 동안 열어 두는 세션입니다. 전역 단축키와 포커스를 가져가지 않는 떠 있는 버튼(`WS_EX_NOACTIVATE`)으로 캡처하고, 0.5초마다 창이 뜨고 사라지는 것을 글 없이 기록하며, 끝에 가설 H01–H18의 판정과 캡처의 구조 코드를 손으로 옮겨 적을 15줄 이하의 전달 블록(줄마다 확인 문자)으로 냅니다. 블록은 스크립트(`agent/survey_block.py`)만 만들고, 회사 Claude Code는 `company/`에서 시작해 장면 코드만 `labels.yaml`에 적습니다(`agent/labels.py`가 코드표 밖 값을 값 없이 거부, `company/hooks/guard.py`가 추적 파일 수정과 저장소를 바꾸는 git을 막음). 두 쪽은 `agent/survey_facts.py`의 자료형과 `agent/survey_codes.py`의 코드로만 만납니다. 콘솔, 블록, `session.json`, `events.jsonl`, `facts.json`에는 화면 글, 창 제목(읽지도 않음), 요소 이름, 경로, 원래 클래스·DLL 이름을 넣지 않고, 화면 그림·트리·`notes.md`는 회사 PC 전용입니다. 세션은 CLI에 `session`, `list-windows`, `snapshot`, `version`만 보냅니다. 실제 단축키·버튼·화면 캡처를 쓰므로 집에서 돌리기 전에 사용자에게 확인받습니다. 설계는 `examples/llm-agent/docs/specs/2026-11-27-company-capture-session-design.md`에 있습니다.
 
 **사내 배포:** 내부 OpenAI 호환 LLM을 `OPENAI_BASE_URL`로 쓸 계획입니다. 이 예제는 Chat Completions가 아니라 **Responses API**를 호출하며(`agent/llm.py`), 내부 API도 이를 지원한다고 사용자가 확인했습니다. `scripts/jev/`는 외부 결정 API로 화면 내용을 보내고 OpenAI 형식도 아니므로 사내에서 쓰지 않습니다.
 

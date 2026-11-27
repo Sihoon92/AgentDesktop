@@ -35,12 +35,12 @@ def kinds(tree):
         found["nodes"] += 1
         found["depth"] = max(found["depth"], level)
         if not is_root:
-            kind = _kind(node)
+            kind = node_kind(node)
             if kind:
                 found[kind] += 1
             if kind == "unnamed_ref" and _native_id(node):
                 found["unnamed_ref_with_id"] += 1
-            if _id_only(node):
+            if is_id_only(node):
                 found["id_only"] += 1
         stack.extend((child, level + 1, False) for child in node.get("children") or [])
     return found
@@ -64,12 +64,12 @@ def id_keys(tree):
     return keys
 
 
-def _id_only(node):
+def is_id_only(node):
     named = bool(str(node.get("name") or "").strip())
     return not node.get("ref_id") and not named and bool(_native_id(node)) and has_area(node.get("bounds"))
 
 
-def _kind(node):
+def node_kind(node):
     named = bool(str(node.get("name") or "").strip())
     if node.get("ref_id"):
         return "named_ref" if named else "unnamed_ref"

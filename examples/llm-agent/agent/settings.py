@@ -11,6 +11,8 @@ vision_model beats VISION_MODEL. VISION_POINT_MODES repeats agent.vision.POINT_M
 modules load independently; a test keeps them equal.
 
 `systems` is the one key whose value is a mapping (name -> exe path); agent.systems picks from it.
+`survey_app_exes` is the one list (absolute exe paths the capture session also counts as the
+application's); the two survey hotkeys must be ones agent.hotkey.parse_hotkey accepts.
 ready_text and ready_timeout_s reach a task only through agent.systems.apply_ready, for an exe the
 settings name, never as task defaults.
 """
@@ -21,6 +23,7 @@ from pathlib import Path, PureWindowsPath
 
 import yaml
 
+from agent.hotkey import parse_hotkey
 from agent.images import IMAGE_MODES
 from agent.knowledge import KnowledgeError, system_name
 
@@ -29,8 +32,10 @@ SETTINGS_ENV = "AGENT_SETTINGS"
 DEFAULT_PATH = HERE / "settings.local.yaml"
 KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
         "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side", "vision_points",
-        "systems", "ready_text", "ready_timeout_s", "workflow_dir", "profile_dir")
+        "systems", "ready_text", "ready_timeout_s", "workflow_dir", "profile_dir", "survey_capture_hotkey",
+        "survey_end_hotkey", "survey_app_exes")
 NUMBER_KEYS = ("stage_call_limit", "vision_max_side", "ready_timeout_s")
+HOTKEY_KEYS = ("survey_capture_hotkey", "survey_end_hotkey")
 VISION_POINT_MODES = ("pixel", "normalized_1000")
 PATH_KEYS = ("knowledge_dir", "exe", "workflow_dir", "profile_dir")
 FOLDER_KEYS = ("knowledge_dir", "workflow_dir", "profile_dir")
@@ -124,6 +129,9 @@ def _parse(raw, target):
         if key == "systems":
             loaded[key] = _systems(raw[key])
             continue
+        if key == "survey_app_exes":
+            loaded[key] = _app_exes(raw[key])
+            continue
         value = "off" if key == "image_mode" and raw[key] is False else raw[key]
         if not isinstance(value, str) or not value.strip():
             raise SettingsError(f"{key} 값은 비어 있지 않은 글이어야 합니다", f"{key} 값이 글이 아님")
@@ -141,6 +149,26 @@ def _systems(value):
         raise SettingsError("systems 값이 비어 있습니다. 시스템을 하나 이상 적거나 systems 줄을 지우세요",
                             "systems 값이 비어 있음")
     return {name: _system_path(place, name, path) for place, (name, path) in enumerate(value.items(), start=1)}
+
+
+def _app_exes(value):
+    """The extra application executables as a list of absolute paths. Errors name the entry's
+    place, never its path."""
+    if not isinstance(value, list) or not value:
+        raise SettingsError("survey_app_exes 값은 실행 파일 절대 경로의 목록('- 경로' 줄)이어야 합니다",
+                            "survey_app_exes 값이 경로 목록이 아님")
+    paths = []
+    for place, path in enumerate(value, start=1):
+        entry = f"survey_app_exes {place}번째 항목"
+        if not isinstance(path, str) or not path.strip():
+            raise SettingsError(f"{entry}: 경로는 비어 있지 않은 글이어야 합니다", f"{entry}: 경로가 글이 아님")
+        path = path.strip()
+        if CONTROL_CHARACTERS.search(path):
+            raise SettingsError(f"{entry}: 경로에 제어 문자가 있습니다. {QUOTE_HINT}", f"{entry}: 경로에 제어 문자 · {QUOTE_HINT}")
+        if not PureWindowsPath(path).is_absolute():
+            raise SettingsError(f"{entry}: 경로는 절대 경로여야 합니다", f"{entry}: 경로가 절대 경로가 아님")
+        paths.append(path)
+    return paths
 
 
 def _system_path(place, name, path):
@@ -177,6 +205,12 @@ def _checked(key, value, target):
     if key == "vision_points" and value not in VISION_POINT_MODES:
         raise SettingsError(f"vision_points는 {', '.join(VISION_POINT_MODES)} 중 하나여야 합니다",
                             f"vision_points 값이 {', '.join(VISION_POINT_MODES)} 중 하나가 아님")
+    if key in HOTKEY_KEYS:
+        try:
+            parse_hotkey(value)
+        except ValueError as error:
+            raise SettingsError(f"{key}는 'ctrl+alt+f9'처럼 수식키와 키 하나(f1-f24, a-z, 0-9)여야 합니다",
+                                f"{key} 값이 단축키 형식이 아님") from error
     if key == "exe" and not PureWindowsPath(value).is_absolute():
         raise SettingsError("exe는 절대 경로여야 합니다", "exe가 절대 경로가 아님")
     if key == "system":

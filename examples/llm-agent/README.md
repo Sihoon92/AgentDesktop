@@ -284,6 +284,37 @@ elements:
 | 후보 창이 많음 | 관계없는 새 창까지 읽음 |
 | `find`의 시간 초과가 많음 | 신호가 아직 없을 때 `find`가 트리를 끝까지 읽느라 제한 시간(3초)에 걸림. `snapshot`이 나을 수 있음 |
 
+## 회사 시스템 캡처 세션
+
+회사 시스템이 어떤 툴킷과 부품으로 만들어졌는지, 쓰는 동안 어떤 창이 뜨는지를 모아 손으로 옮겨 적을 수 있는 몇 줄(전달 블록)로 만듭니다. 세션은 앱을 띄우거나 누르지 않고 읽기만 합니다. 설계는 `docs/specs/2026-11-27-company-capture-session-design.md`에 있습니다.
+
+```powershell
+python survey.py --system <이름> [--exe "<절대경로>"] [--skip llm] [--show-names]   # 세션 열기
+python survey.py --block <세션 폴더 이름|latest>                               # labels.yaml 검사 후 블록 다시 만들기
+python survey.py --read-block <파일>                                           # 집에서: 옮겨 온 블록 풀이
+python survey.py --write-docs                                                 # docs/company-survey/의 두 문서 다시 만들기
+```
+
+세션을 열어 둔 채 앱을 켜고 평소처럼 씁니다. 팝업, 오류 창, 로그인 화면처럼 남길 순간마다 캡처합니다.
+
+- **캡처:** `Ctrl+Alt+F9` 또는 화면 오른쪽에 떠 있는 버튼을 왼쪽 클릭. 버튼은 눌러도 포커스를 가져가지 않으므로 포커스를 잃으면 닫히는 팝업도 찍힙니다. 찍으면 짧은 소리가 납니다. 버튼의 숫자는 캡처 수이고 주황색이면 아직 읽는 중입니다.
+- **끝내기:** `Ctrl+Alt+F10`, 버튼 오른쪽 클릭의 "종료", 또는 Ctrl+C. 단축키는 설정 파일의 `survey_capture_hotkey`, `survey_end_hotkey`로 바꿉니다. 다른 프로그램이 이미 쓰면 콘솔에 `HOTKEY_TAKEN`이 나오고 버튼으로 계속합니다.
+- **앱 프로세스:** 대상 exe의 폴더(바로가기면 그 대상의 폴더)에 있는 실행 파일이 앱입니다. 진짜 앱이 다른 폴더에 있으면 `survey_app_exes`에 그 절대 경로를 적습니다.
+
+결과는 `captures\<시각>-<시스템>\`에 쌓입니다(Git 제외).
+
+| 파일 | 담는 것 | 화면 내용 |
+| --- | --- | --- |
+| `session.json`, `events.jsonl`, `capture-NN\facts.json` | 세션 사실, 창이 뜨고 사라진 기록, 캡처의 구조 코드 | 없음(코드와 수만) |
+| `summary.md` | 사람이 읽는 정리, 사람이 답할 가설과 답하는 방법 | `--show-names`면 마지막 절에 원래 클래스·모듈 이름 |
+| `labels.yaml` | 회사 Claude Code가 고른 장면 코드와 사람의 답 | 없음(스크립트가 코드표 밖 값을 거부) |
+| `block.txt` | 마지막 전달 블록 | 없음 |
+| `notes.md`, `capture-NN\screen.png`·`window.png`·`overlay.png`·`trees\` | 정리 메모, 화면 그림, 박스 그림, 원래 트리 | **있음. 회사 PC 전용** |
+
+세션이 끝나면 장면이 `?`인 블록이 콘솔에 나옵니다. 장면을 채우려면 회사 Claude Code를 이 폴더의 `company\`에서 시작해 "정리해줘"라고 합니다. 그 Claude Code는 `company\CLAUDE.md`의 절차대로 캡처를 정리해 `labels.yaml`에 장면 코드만 적고 `--block`으로 블록을 다시 만들며, 추적 파일 수정과 저장소를 바꾸는 git 명령은 훅(`company\hooks\guard.py`)이 막습니다.
+
+블록은 줄 끝의 ` ·`와 두 글자(확인 문자)까지 손으로 옮겨 적어 집의 `docs\company-survey\feedback\<날짜>-<시스템>.md`에 둡니다. 집에서 `python survey.py --read-block <그 파일>`을 돌리면 줄마다 코드의 뜻과 다음 할 일을 풀고, 옮기다 틀린 줄에는 `오타?`를 붙입니다. 코드표와 가설은 `docs\company-survey\codes.md`, `hypotheses.md`(생성 문서)에 있습니다.
+
 ## 단계로 나눠 실행하기
 
 모델은 첫 화면을 관찰한 뒤 지시를 단계로 나누고(`plan`), 단계를 하나씩 끝냅니다(`stage_done`). 단계는 화면에서 확인할 수 있는 결과 하나입니다. "화면이 열려 있다", "선택 칸에 두 값이 선택되어 있다", "조회 결과가 표에 나와 있다"가 각각 한 단계입니다.

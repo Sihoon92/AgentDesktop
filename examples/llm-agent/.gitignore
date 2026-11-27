@@ -6,3 +6,4 @@ __pycache__/
 /profiles/
 /settings.local.yaml
 /.check/
+/captures/

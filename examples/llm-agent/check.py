@@ -209,7 +209,7 @@ def run_checks(args, deps):
     binary, kind = checks.binary_location(deps.environ, deps.binaries)
     results = [_guarded([BINARY], lambda: [check_binary(binary, kind, deps.runner)])[0]]
     settings_result, settings = check_settings(args.settings, deps.environ)
-    target = _with_shortcut(pick_target(args.exe, args.system, settings, args.profile_dir, deps.environ),
+    target = with_shortcut(pick_target(args.exe, args.system, settings, args.profile_dir, deps.environ),
                             deps.read_shortcut)
     results.append(_shortcut_noted(_with_profile(settings_result, target), target))
     split = _vision_named(settings, deps.environ)
@@ -241,7 +241,7 @@ def _with_profile(result, target):
     return replace(result, notes=(checks.profile_detail(target.profile),))
 
 
-def _with_shortcut(target, read):
+def with_shortcut(target, read):
     """`target` with what its shortcut names, or the code it cannot be launched with; as it was
     when its exe is not a shortcut. `read` is resolve_shortcut or a stand-in for it, and it is the
     one the check's client launches with (agent.shortcut.guarded)."""

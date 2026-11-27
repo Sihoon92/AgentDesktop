@@ -1,0 +1,218 @@
+"""The questions home wants answered about a company system, kept in one place.
+
+Each hypothesis has its codes and, for each code, what to do at home. The session judge, the
+summary, the transmission block, the home reader and the generated documents all read this
+registry, so they never disagree. Judges live in `agent.hypothesis_rules`. A closed hypothesis
+is still judged but leaves the block, and an id is never reused.
+"""
+
+from dataclasses import dataclass, replace
+from typing import Callable
+
+from agent.hypothesis_rules import (Verdict, app_skip, judge_h01, judge_h02, judge_h03, judge_h04, judge_h05,
+                                    judge_h06, judge_h07, judge_h08, judge_h09, judge_h10, judge_h11, judge_h15,
+                                    judge_h16, judge_h17, judge_h18, main_windows)
+
+__all__ = ["HYPOTHESES", "Hypothesis", "Verdict", "judge_all", "main_windows", "manual_codes", "replace"]
+
+APP_IDS = frozenset(("H01", "H02", "H03", "H04", "H05", "H07", "H08", "H09", "H11"))
+WATCH_APP_IDS = frozenset(("H15", "H17", "H18"))
+OVERLAY_HELP = ("어느 캡처든 주 창이 앱 화면인 캡처의 overlay.png를 window.png와 나란히 봅니다. "
+                "박스 색은 그림 오른쪽 아래 범례와 같습니다(파랑: 이름 있는 ref, 보라: 이름 없는 ref, "
+                "초록: 글자, 빨강: 빈 요소, 주황: ID만 있는 요소).")
+
+
+@dataclass(frozen=True)
+class Hypothesis:
+    id: str
+    title: str
+    why: str
+    kind: str
+    codes: tuple
+    next: dict
+    judge: Callable | None = None
+    how_to_answer: str | None = None
+    status: str = "open"
+    closed_note: str | None = None
+
+
+def _auto(hid, title, why, judge, nexts):
+    return Hypothesis(hid, title, why, "auto", tuple(nexts), dict(nexts), judge=judge)
+
+
+def _manual(hid, title, why, how, nexts):
+    return Hypothesis(hid, title, why, "manual", tuple(nexts), dict(nexts), how_to_answer=how)
+
+
+HYPOTHESES = (
+    _auto("H01", "무엇으로 만들었나(UI 툴킷)",
+          "툴킷이 같으면 접근성 트리의 모양도 같으므로, 연습 앱을 같은 툴킷으로 다시 만들어 집에서 검증할 수 있습니다.",
+          judge_h01, {
+              "WINFORMS": "WinForms 앱. 지금 연습 앱과 같은 툴킷이므로 다른 가설(H02, H03)에 집중합니다.",
+              "WPF": "WPF 앱. 연습 앱의 WPF판을 만들어 트리 모양을 비교합니다.",
+              "WIN32": "순수 Win32 앱. 표준 컨트롤로 만든 연습 화면을 더합니다.",
+              "MFC": "MFC 앱. MFC 표본 앱으로 트리 모양을 확인합니다.",
+              "DELPHI": "Delphi(VCL) 앱. Delphi 표본 앱이나 VCL 체험판으로 연습 화면을 만듭니다.",
+              "JAVA": "Java 앱. Java Access Bridge가 필요한지 확인하고 Swing 표본으로 시험합니다.",
+              "QT": "Qt 앱. Qt 표본 앱으로 트리 모양을 확인합니다.",
+              "NEXACRO": "Nexacro 계열 앱. 체험판 런타임으로 연습 화면을 만들 수 있는지 알아봅니다.",
+              "WEB": "웹 화면을 품은 앱. 브라우저 경로를 먼저 시험합니다.",
+              "MIXED": "여러 툴킷이 섞임. 근거의 수를 보고 주된 화면의 툴킷을 다음 방문에서 다시 봅니다.",
+              "UNKNOWN": "계열을 알 수 없음. 다음 방문에서 --show-names로 원래 이름을 확인해 계열 표를 넓힙니다.",
+          }),
+    _auto("H02", "표는 어떤 부품인가",
+          "표 부품마다 칸이 트리에 드러나는 방식이 다르므로, 같은 부품의 체험판으로 연습 앱의 표를 다시 만듭니다.",
+          judge_h02, {
+              "DEVEXPRESS": "DevExpress 표. 체험판으로 연습 앱의 표를 바꿉니다.",
+              "INFRAGISTICS": "Infragistics 표. 체험판으로 연습 앱의 표를 바꿉니다.",
+              "FARPOINT": "FarPoint(Spread) 표. 체험판으로 연습 앱의 표를 바꿉니다.",
+              "COMPONENTONE": "ComponentOne 표. 체험판으로 연습 앱의 표를 바꿉니다.",
+              "SYNCFUSION": "Syncfusion 표. 체험판으로 연습 앱의 표를 바꿉니다.",
+              "TELERIK": "Telerik 표. 체험판으로 연습 앱의 표를 바꿉니다.",
+              "ACTIVEX_OTHER": "알려지지 않은 ActiveX 표. --show-names로 모듈 이름을 확인합니다.",
+              "NATIVE": "툴킷 기본 표. 연습 앱의 기본 표로 충분합니다.",
+              "NONE_SEEN": "표를 보지 못함. 표가 있는 화면을 캡처하도록 다음 방문에서 요청합니다.",
+          }),
+    _auto("H03", "화면 요소가 트리에 얼마나 보이나",
+          "트리에 보이는 요소가 적으면 그림 인식(비전, 좌표) 쪽이 기본이 되어야 합니다.",
+          judge_h03, {
+              "RICH": "대부분 보임. ref 중심의 동작을 유지합니다.",
+              "PARTIAL": "일부만 보임. 비전 질문을 늘리고 빈 요소가 많은 화면을 연습 앱에 재현합니다.",
+              "LOW": "거의 안 보임. 그림 인식과 좌표 클릭을 기본 경로로 시험합니다.",
+          }),
+    _auto("H04", "요소가 동작 패턴을 지원하나",
+          "동작 패턴이 없으면 ref 동작 대신 실제 마우스 경로가 기본이 되어야 합니다.",
+          judge_h04, {
+              "PATTERNS_OK": "누르기와 값 바꾸기가 됨. ref 동작을 그대로 씁니다.",
+              "INVOKE_ONLY": "누르기만 됨. 값 입력과 선택은 키 입력 경로로 시험합니다.",
+              "NONE": "패턴 없음. 실제 마우스·키 경로가 기본이 되도록 정책을 조정합니다.",
+          }),
+    _auto("H05", "요소 ID가 껐다 켜도 같은가",
+          "ID가 유지되면 프로파일의 stable_ids를 켜고 workflow가 ID로 대상을 찾을 수 있습니다.",
+          judge_h05, {
+              "STABLE": "같은 화면의 ID가 같음. 그 시스템 프로파일에서 stable_ids를 켭니다.",
+              "CHANGES": "ID가 바뀜. stable_ids를 끄고 이름과 위치로 대상을 적습니다.",
+              "NO_IDS": "ID가 없음. 이름과 가까운 글자로 대상을 적습니다.",
+              "PENDING": "비교할 같은 화면 짝이 없음. 다음 방문에서 앱을 껐다 켜고 같은 화면을 캡처합니다.",
+          }),
+    _auto("H06", "어떻게 실행되나",
+          "런처를 거치면 준비 확인이 다른 프로세스의 창을 따라가야 합니다.",
+          judge_h06, {
+              "ALREADY_RUNNING": "세션 전에 이미 켜져 있었음. 다음 방문에서 앱을 끈 채로 세션을 시작합니다.",
+              "EXE": "대상 exe가 직접 창을 띄움. 지금의 띄우기로 충분합니다.",
+              "LAUNCHER": "다른 exe가 창을 띄움. 준비 확인의 프로세스 추적을 연습 앱의 런처로 시험합니다.",
+              "PICKED_BY_CAPTURE": "앱 프로세스를 캡처로 골랐음. 판정을 감안해 읽고 survey_app_exes를 설정합니다.",
+              "NOT_SEEN": "앱 프로세스를 보지 못함. 대상 exe와 survey_app_exes를 확인합니다.",
+          }),
+    _auto("H07", "창 구조는 어떤가",
+          "MDI면 관찰 범위와 연습 앱의 창 구조가 달라집니다.",
+          judge_h07, {
+              "SINGLE": "창 하나. 지금 구조를 유지합니다.",
+              "MDI": "MDI 앱. 연습 앱을 MDI로 바꾸고 MDI 자식 창 기준 관찰을 점검합니다.",
+              "MULTI_TOP": "최상위 창 여러 개. 창 고르기 규칙을 연습 앱의 여러 창으로 시험합니다.",
+          }),
+    _auto("H08", "안에 웹 화면이 있나",
+          "웹 화면이 있으면 브라우저 경로를 먼저 시험해야 합니다.",
+          judge_h08, {
+              "NONE": "웹 화면 없음.",
+              "WEBVIEW2": "WebView2가 들어 있음. 그 부분의 트리를 연습 앱의 WebView2로 확인합니다.",
+              "CEF": "CEF가 들어 있음. CEF 표본으로 트리 모양을 확인합니다.",
+              "IE": "IE 컨트롤이 들어 있음. IE 컨트롤 표본으로 트리 모양을 확인합니다.",
+          }),
+    _auto("H09", "화면 크기와 배율",
+          "배율이 다르면 좌표와 그림 크기가 달라지므로 연습 앱 시험을 같은 배율로 맞춥니다.",
+          judge_h09, {
+              "WxH@S": "주 창 모니터의 해상도와 배율(괄호 안은 모니터 수). 집 시험을 같은 배율로 맞춥니다.",
+          }),
+    _auto("H10", "사내 LLM이 무엇을 하나",
+          "도구 호출과 그림 입력을 할 수 있는지에 따라 모델 설정이 달라집니다.",
+          judge_h10, {
+              "TOOLS_IMAGE": "도구 호출과 그림 입력이 됨(괄호에 비전이면 비전 모델로). 지금 설정을 씁니다.",
+              "TOOLS_ONLY": "도구 호출만 됨. 비전 모델을 나눠 쓰는 설정(VISION_MODEL)을 안내합니다.",
+              "FAIL": "도구 호출 실패(괄호는 실패 코드). 연결 설정과 Responses API 지원을 확인합니다.",
+              "SKIPPED": "LLM 점검을 건너뜀. 다음 방문에서 --skip 없이 실행합니다.",
+          }),
+    _auto("H11", "화면 읽기가 얼마나 걸리나",
+          "읽기 시간이 시간 한도와 --timeout-ms 기본값을 정합니다.",
+          judge_h11, {
+              "COMPLETE": "주 창 트리를 끝까지 읽음(괄호는 초와 시간 초과 수). 시간 한도를 이에 맞춥니다.",
+              "TRUNCATED": "주 창 트리가 잘림. 관찰 예산과 --timeout-ms를 늘려 집에서 비슷한 크기로 시험합니다.",
+          }),
+    _manual("H12", "화면에 보이는 글자에 박스가 있나",
+            "글자에 박스가 없으면 글자 찾기를 비전으로 넘겨야 합니다.", OVERLAY_HELP +
+            " 화면 그림에 보이는 글자 대부분이 박스 안에 있으면 ALL, 일부면 SOME, 거의 없으면 NONE입니다.", {
+                "ALL": "글자가 트리에 있음. 이름으로 찾기를 유지합니다.",
+                "SOME": "일부 글자만 있음. 비전으로 글자를 찾는 비중을 올립니다.",
+                "NONE": "글자가 트리에 없음. 글자 찾기를 비전으로 넘깁니다.",
+            }),
+    _manual("H13", "그림 버튼(아이콘)에 박스가 있나",
+            "아이콘에 박스가 없으면 그림 대상(PICTURE_TARGET) 처리가 먼저입니다.", OVERLAY_HELP +
+            " 아이콘 버튼마다 박스가 있으면 ALL, 일부면 SOME, 없으면 NONE, 아이콘이 없으면 NO_ICONS입니다.", {
+                "ALL": "아이콘이 모두 요소. 지금 처리로 충분합니다.",
+                "SOME": "일부 아이콘만 요소. 그림 대상 처리를 연습 앱으로 시험합니다.",
+                "NONE": "아이콘이 요소가 아님. 그림 대상 처리를 먼저 만듭니다.",
+                "NO_ICONS": "아이콘 없음.",
+            }),
+    _manual("H14", "표의 칸마다 박스가 있나",
+            "칸마다 박스가 있어야 표 찾기(agent/table.py)를 쓸 수 있습니다.", OVERLAY_HELP +
+            " 표의 칸마다 박스가 있으면 CELLS, 표 전체에 하나뿐이면 TABLE_ONLY, 없으면 NONE, 표가 없으면 NO_TABLE입니다.", {
+                "CELLS": "칸이 요소. 표 찾기를 그대로 씁니다.",
+                "TABLE_ONLY": "표 전체만 요소. 칸 위치를 그림으로 찾는 방법을 시험합니다.",
+                "NONE": "표가 요소가 아님. 표를 그림으로 읽는 방법을 시험합니다.",
+                "NO_TABLE": "표를 보지 못함. 표가 있는 화면을 캡처하도록 요청합니다.",
+            }),
+    _auto("H15", "켜자마자 팝업이 뜨나",
+          "켤 때 뜨는 창이 CUA의 첫 관찰을 막으므로, 준비 확인과 연습 앱에 같은 팝업을 넣어야 합니다.",
+          judge_h15, {
+              "NONE": "시작 팝업 없음.",
+              "SAME_PROC": "앱이 시작 팝업을 띄움. 연습 앱에 같은 종류의 시작 팝업을 넣고 준비 확인을 시험합니다.",
+              "OTHER_PROC": "다른 프로세스가 시작 때 창을 띄움. 다른 프로세스의 창을 따라가는 관찰을 시험합니다.",
+              "BOTH": "앱과 다른 프로세스 모두 시작 팝업을 띄움. 둘 다 연습 앱에 재현합니다.",
+              "NOT_SEEN": "앱이 켜지는 것을 보지 못함. 다음 방문에서 앱을 끈 채로 세션을 시작합니다.",
+          }),
+    _auto("H16", "다른 프로세스가 앱 사용 중에 창을 띄우나",
+          "사용 중 갑자기 뜨는 다른 프로세스의 창은 동작을 엉뚱한 곳으로 보냅니다.",
+          judge_h16, {
+              "NONE": "사용 중 다른 프로세스 팝업 없음.",
+              "SYSTEM": "Windows 프로그램이 창을 띄움. 그 창을 알아보고 닫을지 묻는 정책을 시험합니다.",
+              "OTHER": "다른 프로그램이 창을 띄움. 해당 장면의 캡처를 보고 연습 앱에 재현합니다.",
+              "BOTH": "Windows와 다른 프로그램 모두 창을 띄움. 둘 다 재현합니다.",
+          }),
+    _auto("H17", "앱이 응답 없음에 빠지나",
+          "응답 없음이 잦으면 기다리기와 다시 시도 정책이 필요합니다.",
+          judge_h17, {
+              "NONE": "응답 없음 없음.",
+              "SEEN": "응답 없음을 봄(괄호는 횟수와 가장 긴 초). 연습 앱에 멈춤을 넣어 기다리기를 시험합니다.",
+          }),
+    _auto("H18", "대화 상자는 어떤 구조인가",
+          "대화 상자의 구조에 따라 팝업을 알아보는 규칙이 달라집니다.",
+          judge_h18, {
+              "WIN32_DIALOG": "Win32 대화상자(#32770). 연습 앱의 메시지 상자로 충분합니다.",
+              "OWNED_FORM": "앱이 만든 소유 창. 연습 앱에 소유된 폼 대화 상자를 넣습니다.",
+              "MIXED": "두 가지가 섞임. 둘 다 연습 앱에 넣습니다.",
+              "NONE_SEEN": "대화 상자를 보지 못함. 대화 상자가 뜨는 장면을 캡처하도록 요청합니다.",
+          }),
+)
+
+
+def manual_codes() -> dict:
+    """Manual hypothesis id -> its codes, for the labels check."""
+    return {h.id: h.codes for h in HYPOTHESES if h.kind == "manual"}
+
+
+def _judge(hypothesis, loaded, labels):
+    if hypothesis.kind == "manual":
+        answer = labels.manual.get(hypothesis.id, "?")
+        return Verdict(answer, "", "사람의 답" if answer != "?" else "")
+    reason = app_skip(loaded)
+    if reason is not None and (hypothesis.id in APP_IDS or (hypothesis.id in WATCH_APP_IDS and reason == "NO_APP")):
+        return Verdict("SKIPPED", reason, "")
+    try:
+        return hypothesis.judge(loaded)
+    except Exception as error:
+        return Verdict("ERROR", type(error).__name__, "")
+
+
+def judge_all(loaded, labels) -> list:
+    """Every hypothesis with its verdict, in registry order."""
+    return [(h, _judge(h, loaded, labels)) for h in HYPOTHESES]
