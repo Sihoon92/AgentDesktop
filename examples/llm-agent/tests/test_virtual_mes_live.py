@@ -1053,3 +1053,93 @@ def test_ref_menu_keeps_its_names_and_ids_and_its_bar_gets_a_container_id(tmp_pa
         bar = [n for n in app.placed_nodes(app.main()) if (n.get("id") or "").startswith("menu-")]
         assert [n["name"] for n in bar] == ["기준정보", "생산운영", "품질관리", "설비관리", "자재관리"]
         assert all(n.get("ref") and n["in"] == MENU_BAR for n in bar)
+
+
+def window_classes(pid):
+    """The class and title of every visible top-level window of the process, read with Win32."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    found = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def visit(hwnd, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            name = ctypes.create_unicode_buffer(256)
+            title = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, name, 256)
+            user32.GetWindowTextW(hwnd, title, 256)
+            found.append((name.value, title.value))
+        return True
+
+    user32.EnumWindows(callback_type(visit), 0)
+    return found
+
+
+def test_startup_notices_open_one_after_another_over_the_main_window(tmp_path):
+    with LiveApp(tmp_path, "--startup-notices", "2", "--profile", "easy") as app:
+        app.wait_for_event("notice_shown")
+        assert "공지 1" in [w["title"] for w in app.windows()]
+        menu = next(n for n in app.nodes(app.main()) if n.get("id") == "menu-1")
+        assert "disabled" in (menu.get("states") or [])
+        app.click(next(n for n in app.nodes(app.window_titled("공지 1")) if n.get("name") == "확인")["ref"])
+        app.wait_for_event("notice_shown", count=2)
+        assert "공지 2" in [w["title"] for w in app.windows()]
+        app.click(next(n for n in app.nodes(app.window_titled("공지 2")) if n.get("name") == "확인")["ref"])
+        app.wait_for_event("notice_closed", count=2)
+        names_in_order = [e["event"] for e in app.events() if e["event"].startswith("notice_")]
+        assert names_in_order == ["notice_shown", "notice_closed", "notice_shown", "notice_closed"]
+        assert [e.get("index") for e in app.events() if e["event"] == "notice_shown"] == [1, 2]
+        app.click(app.find("생산운영", role="button")["ref"])
+        app.wait_for_event("menu_opened")
+
+
+def test_startup_notices_wait_for_a_late_menu(tmp_path):
+    with LiveApp(tmp_path, "--startup-notices", "1", "--menu-delay-ms", "1500") as app:
+        app.wait_for_event("notice_shown")
+        order = [e["event"] for e in app.events()]
+        assert order.index("menu_ready") < order.index("notice_shown")
+
+
+def test_form_dialogs_are_owned_app_forms_not_message_boxes(tmp_path):
+    with LiveApp(tmp_path, "--dialogs", "form", "--profile", "easy") as app:
+        open_front(app)
+        app.click(app.by_id("excel-icon")["ref"])
+        app.wait_for_event("export_rejected")
+        assert app.wait_for_node(lambda n: n.get("name") == "조회된 데이터가 없습니다", "the no-data notice")
+        classes = dict((title, name) for name, title in window_classes(app.pid))
+        assert "엑셀 저장" in classes and classes["엑셀 저장"] != "#32770"
+        assert "#32770" not in classes.values()
+
+
+def test_message_box_dialogs_stay_win32_by_default(tmp_path):
+    with LiveApp(tmp_path, "--profile", "easy") as app:
+        open_front(app)
+        app.click(app.by_id("excel-icon")["ref"])
+        app.wait_for_event("export_rejected")
+        app.wait_for_node(lambda n: n.get("name") == "조회된 데이터가 없습니다", "the no-data notice")
+        assert ("#32770", "엑셀 저장") in window_classes(app.pid)
+
+
+def test_noaction_menu_click_is_reported_through_legacy_but_only_a_real_click_presses(tmp_path):
+    """Measured 2026-11-27: UIA gives an Invoke-less Button a Legacy default action of its own,
+    so the CLI lists Click and its click 'succeeds' through LegacyIAccessible while the app does
+    nothing. Only a real click opens the menu."""
+    with LiveApp(tmp_path, "--expose", "menu=noaction") as app:
+        item = app.find("생산운영", role="button")
+        assert item.get("ref") and item.get("id") == "menu-1"
+        done = subprocess.run(
+            [str(app._binary), "click", item["ref"]], capture_output=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=90, env=app._env)
+        data = json.loads(done.stdout).get("data") or {}
+        steps = {step["label"]: step["outcome"] for step in data.get("steps") or []}
+        assert steps.get("InvokePattern.Invoke") == "skipped", data
+        assert steps.get("LegacyIAccessible.DoDefaultAction") == "succeeded", data
+        assert data["disposition"]["delivery"] == "delivered_unverified", data
+        time.sleep(1)
+        assert not [e for e in app.events() if e["event"] == "menu_opened"]
+        app.click_at_center(item)
+        assert app.wait_for_event("menu_opened")["category"] == "생산운영"

@@ -115,7 +115,7 @@ namespace VirtualMesApp
             if (!this.session.Filters.TryResolvePeriod(out from, out to, out error))
             {
                 this.session.RejectQuery("invalid_period");
-                MessageBox.Show(this.frame, error, "조회", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Alerts.Show(this.frame, this.session.Options, error, "조회", MessageBoxIcon.Warning);
                 return;
             }
 

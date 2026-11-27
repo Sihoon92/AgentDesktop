@@ -23,7 +23,7 @@ powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1
 | 옵션 | 뜻 |
 | --- | --- |
 | `--profile mes-like\|easy\|hard` | 영역별 노출 방식 묶음. 기본 `mes-like` |
-| `--expose <영역>=<방식>[,...]` | 프로파일 위에 영역별로 덮어씀. 영역은 `menu`, `filters`, `grid`, `icon`, `radial`, `arrow`, 방식은 `ref`, `text`, `bare`, `idonly`, `pixel`. `icon`은 `text`를 받지 않음. `arrow`는 `ref`, `bare`, `pixel`만 받음. `bare`는 `menu`와 `arrow`만, `idonly`는 `menu`만 받음 |
+| `--expose <영역>=<방식>[,...]` | 프로파일 위에 영역별로 덮어씀. 영역은 `menu`, `filters`, `grid`, `icon`, `radial`, `arrow`, 방식은 `ref`, `text`, `bare`, `idonly`, `noaction`, `pixel`. `icon`은 `text`를 받지 않음. `arrow`는 `ref`, `bare`, `pixel`만 받음. `bare`는 `menu`와 `arrow`만, `idonly`와 `noaction`은 `menu`만 받음 |
 | `--menu-container-id on\|off` | 메뉴 항목을 담은 영역(메뉴 줄, 메뉴 목록, 아래 `other`의 띠)에 `AutomationId`를 둠. 기본 `on`. `off`면 그 영역에 ID가 없음. 아래 "메뉴의 ID" |
 | `--menu-dup-id none\|same\|other` | 첫째 메뉴 항목과 같은 `AutomationId`를 쓰는 요소를 하나 더 둠. 기본 `none`. `same`은 메뉴 줄의 둘째 항목, `other`는 메뉴 줄 아래 띠의 요소 하나. 아래 "메뉴의 ID" |
 | `--delay-ms <N>` | 조회 대기 시간을 N밀리초로 고정. 없으면 조회마다 1000~4000 |
@@ -34,8 +34,10 @@ powershell -NoProfile -File examples\llm-agent\virtual-mes\build.ps1
 | `--launcher` | `--splash-ms`와 함께. 팝업을 띄운 프로세스가 메인 화면을 다른 프로세스로 띄우고 끝남 |
 | `--single-instance` | `--launcher`와 함께. 같은 exe의 메인 화면이 이미 떠 있으면 실행기가 팝업도 새 창도 없이 끝남 |
 | `--menu-delay-ms <N>` | 메인 화면이 뜬 뒤 N밀리초 지나서 메뉴를 채움. 그동안 메뉴 줄은 비어 있음 |
+| `--startup-notices <N>` | 메인 화면이 보이고 메뉴가 채워진 뒤, 메인 화면이 소유한 모달 공지 창 N개(0~5)를 하나씩 띄움. 기본 `0`. 아래 "회사 화면의 모양" |
+| `--dialogs messagebox\|form` | 알림 창을 Win32 메시지 상자(`messagebox`, 기본)로 띄울지, 앱이 만든 소유 모달 폼(`form`)으로 띄울지. 아래 "회사 화면의 모양" |
 | `--export-headless <화면> <필터 JSON> <출력 .xlsx>` | 창 없이 그 화면의 조회 결과를 저장하고 끝남 |
-| `--parse-only` | 테스트용. 옵션을 해석한 결과를 JSON 한 줄로 출력하고 끝남(`menu_container_id`, `menu_dup_id` 포함). `--launcher`면 메인 화면을 띄울 인자(`main_command_line`)도 나옴 |
+| `--parse-only` | 테스트용. 옵션을 해석한 결과를 JSON 한 줄로 출력하고 끝남(`menu_container_id`, `menu_dup_id`, `startup_notices`, `dialogs` 포함). `--launcher`면 메인 화면을 띄울 인자(`main_command_line`)도 나옴 |
 
 종료 코드는 `0` 성공, `1` 파일을 쓰지 못함, `2` 옵션이나 필터가 틀림입니다. 틀린 이유는 표준 오류에 나옵니다.
 
@@ -56,7 +58,7 @@ Set-Content build\VirtualMes.args '--splash-ms 2000 --launcher --single-instance
 ```
 
 - **같은 프로세스(`--splash-ms`만):** 팝업이 닫히면 같은 프로세스가 메인 화면을 띄웁니다.
-- **다른 프로세스(`--launcher`):** 팝업이 닫히면 같은 exe를 숨은 옵션 `--main`과 나머지 인자로 띄우고 실행기는 끝납니다. 나머지 인자는 받은 인자(옵션 파일에서 읽었으면 그 줄)에서 `--splash-ms`, `--launcher`, `--single-instance`를 뺀 것이라 `--profile`, `--log`, `--menu-delay-ms`는 메인 화면에도 그대로 적용됩니다. `--main`을 받은 프로세스는 옵션 파일을 읽지 않고 그 세 옵션을 무시하므로 실행기가 다시 뜨지 않습니다. `agent-desktop launch`가 돌려주는 pid는 실행기(팝업)의 것이고, 메인 화면은 다른 pid입니다.
+- **다른 프로세스(`--launcher`):** 팝업이 닫히면 같은 exe를 숨은 옵션 `--main`과 나머지 인자로 띄우고 실행기는 끝납니다. 나머지 인자는 받은 인자(옵션 파일에서 읽었으면 그 줄)에서 `--splash-ms`, `--launcher`, `--single-instance`를 뺀 것이라 `--profile`, `--log`, `--menu-delay-ms`, `--startup-notices`, `--dialogs`는 메인 화면에도 그대로 적용됩니다. 공지 창은 메인 화면 프로세스에서 뜹니다. `--main`을 받은 프로세스는 옵션 파일을 읽지 않고 그 세 옵션을 무시하므로 실행기가 다시 뜨지 않습니다. `agent-desktop launch`가 돌려주는 pid는 실행기(팝업)의 것이고, 메인 화면은 다른 pid입니다.
 - **이미 떠 있을 때(`--single-instance`):** 메인 화면 프로세스는 언제나 exe 전체 경로의 해시를 이름에 넣은 Mutex를 잡습니다. `--single-instance` 실행기는 그 Mutex가 있으면 팝업 없이 곧바로 끝납니다(`launcher_skipped`). 다른 폴더에 복사한 exe는 경로가 달라 막지 않습니다.
 - **메뉴 늦게 채우기(`--menu-delay-ms`):** 메인 화면은 메뉴 줄이 빈 채로 뜨고, 창이 보인 뒤 N밀리초가 지나면 메뉴가 채워집니다. 창이 떴다고 준비된 것이 아님을 시험합니다.
 - 팝업의 제목(`VirtualMes`)과 글(`불러오는 중`)은 메뉴 이름과 겹치지 않습니다.
@@ -71,6 +73,7 @@ Set-Content build\VirtualMes.args '--splash-ms 2000 --launcher --single-instance
 | `text` | 이름과 위치가 있는 `statictext`. ref 없음. 체크박스의 체크 표시와 상태는 나오지 않음 |
 | `bare` | 이름 없는 `button`. ref와 숫자 `AutomationId`가 있음. `menu`와 `arrow` 영역만 받음 |
 | `idonly` | 이름 없는 `image`. 숫자 `AutomationId`만 있고 누르는 패턴(Invoke)이 없어 ref도 없음. 실제 클릭(좌표)에는 다른 방식과 똑같이 반응함. `menu` 영역만 받음 |
+| `noaction` | 이름과 `ref`의 `AutomationId`가 있는 `button`. Invoke 패턴을 알리지 않음(`IsInvokePatternAvailable` 거짓). UIA가 Legacy 기본 동작을 스스로 붙여 CLI는 `Click`을 보이고, `click @ref`는 성공(`delivered_unverified`)으로 답하지만 앱은 아무것도 하지 않음. 실제 클릭(좌표)에만 반응함. `menu` 영역만 받음 |
 | `pixel` | 이름 없는 `group` 하나. 안의 글자는 나오지 않음 |
 
 | 프로파일 | menu | filters | grid | icon | radial | arrow |
@@ -128,6 +131,17 @@ Set-Content build\VirtualMes.args '--splash-ms 2000 --launcher --single-instance
 
 `--combo-open anywhere`에서는 칸 어디를 눌러도 목록이 열리고, 화면 모양과 접근성 트리가 화살표가 기본이 되기 전과 같습니다. `arrow` 영역의 설정과 무관하게 화살표 요소가 없습니다.
 
+### 회사 화면의 모양
+
+회사의 첫 캡처 세션(2026-11-27)에서 본 구조를 흉내 내는 옵션 셋입니다. 셋 다 기본은 꺼져 있어, 주지 않으면 화면, 트리, 이벤트 기록이 예전과 같습니다.
+
+```powershell
+Set-Content build\VirtualMes.args '--startup-notices 5 --dialogs form --expose menu=noaction' -Encoding utf8
+```
+
+- **시작 공지(`--startup-notices <N>`):** 회사 MES는 켤 때 자기 프로세스의 소유·모달 창 다섯 개를 띄웁니다(H15). 메인 화면이 보이고 메뉴가 채워진 뒤(`--menu-delay-ms`가 있으면 그 뒤) 메인 화면이 소유한 모달 창을 하나씩 띄웁니다. 창은 WinForms `Form`이고 제목은 `공지 1`, `공지 2`처럼 번호, 본문은 한 줄(`시스템 안내 사항 1/5`), 버튼은 `확인` 하나입니다. 하나를 닫으면 다음 창이 뜨고, 모두 닫혀야 메인 화면을 쓸 수 있습니다(그동안 메인 화면의 요소는 `disabled`). 열림과 닫힘은 `notice_shown`, `notice_closed`로 기록됩니다. 시작 옵션의 `splash_*`, `main_started`, `menu_ready`와 달리 이 두 이벤트는 공지가 있으면 언제나 기록됩니다.
+- **소유 폼 대화상자(`--dialogs form`):** 회사 MES의 대화상자는 Win32 `#32770`이 아니라 앱이 만든 소유 폼입니다(H18). `form`이면 `MessageBox.Show`로 띄우던 알림 창(조회의 기간 경고, 엑셀 저장의 데이터 없음과 저장 실패)을 같은 제목, 글, `확인` 버튼의 소유 모달 `Form`으로 띄웁니다. 창 클래스는 - **누르기 기능 없는 버튼(`--expose menu=noaction`):** 회사 MES에는 버튼 역할이라 ref는 있지만 Invoke를 알리지 않는 요소가 있습니다(H04 `NONE(I0/V0/T0)`). `noaction`의 메뉴 항목은 `ref`처럼 이름과 `menu-<자리>`, `screen-<화면 id>` ID가 있는 `button`이지만, 사용자 정의 UIA 제공자가 Invoke 패턴을 주지 않고 `IsInvokePatternAvailable`을 거짓으로 답합니다. 실제 창에서 재 보니(2026-11-27) UIA가 이런 Button에 LegacyIAccessible 기본 동작을 스스로 붙입니다. 그래서 CLI는 동작 목록에 `Click`을 넣고, `click @ref`는 Invoke를 건너뛰고 `LegacyIAccessible.DoDefaultAction`으로 성공(`delivered_unverified`)을 답하지만 앱에는 아무 일도 일어나지 않습니다. 관리형 UIA 제공자는 Legacy 속성을 답할 수 없어(모르는 속성 번호를 걸러 냄) 이 기본 동작을 지울 수 없습니다. 실제 마우스 클릭은 다른 방식과 똑같이 메뉴를 엽니다. "누르기가 성공으로 보이는데 화면이 그대로"인 경우를 하니스가 어떻게 다루는지 보는 데 씁니다. 동작 목록에 `Click`이 아예 없는 ref의 실제 클릭 대체는 이 모드가 아니라 날짜 칸(`textfield`)으로 확인합니다(`tests/test_scenes_live.py`).gacyIAccessible을 직접 구현하지 않으므로, UIA가 그 요소에 Legacy 기본 동작을 따로 붙이는지는 실제 창에서 확인해야 합니다.
+
 메뉴 목록, 드롭다운 목록, 원형 메뉴는 본 창과 별개의 창이며 `list-windows`에 나옵니다. 창 제목은 내용을 드러내지 않습니다(`메뉴 목록`, `목록`, `메뉴`).
 
 ## 화면
@@ -163,6 +177,8 @@ Set-Content build\VirtualMes.args '--splash-ms 2000 --launcher --single-instance
 | `app_started` | `profile`, `expose`, `seed`, `combo_open` |
 | `main_started` | `by`(`launcher`, `direct`), `pid`. 시작 옵션이 있을 때만. `launcher`는 실행기가 띄운 프로세스 |
 | `menu_ready` | `delay_ms`. 시작 옵션이 있을 때만. 메인 화면이 보이고 메뉴가 채워졌을 때 |
+| `notice_shown` | `index`(1부터), `count`. `--startup-notices`의 공지 창이 보였을 때 |
+| `notice_closed` | `index`. 그 공지 창이 닫혔을 때 |
 | `menu_opened` | `category` |
 | `screen_opened` | `screen`, `title` |
 | `filter_changed` | `screen`, `filter`, `value`, `closed_by`(`item_click`, `select_button`, `outside_click`, `deactivated`, `typed`) |

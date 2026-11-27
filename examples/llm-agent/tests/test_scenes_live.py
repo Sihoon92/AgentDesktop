@@ -44,6 +44,7 @@ MAIN_TITLE = "MES (가상)"
 OBSERVE = {"window_id": None, "root_ref": None, "surface": None, "include_bounds": False}
 SYSTEM = "virtualmes"
 ROW_TOLERANCE_PX = 3
+ROW_HEIGHT_LIMIT = 4
 DIALOG_WAIT_S = 15
 
 RIGHT_END_ANSWER = "2번, 칸 오른쪽 끝의 화살표를 눌러야 열려요"
@@ -207,12 +208,14 @@ class Scene:
         raise AssertionError(f"no ref named {name!r} inside {element.get('name')!r}")
 
     def row_under(self, label):
-        """The elements on the first row below the label, left to right, such as a filter's boxes."""
+        """The elements on the first row below the label, left to right, such as a filter's boxes.
+        An area many rows tall that happens to start on that row, such as the empty grid beside
+        the filters, is not one of them."""
         anchor = self.mark(label)
         top = anchor["bounds"]
         below = [e for e in self.toolbox._marks.values()
                  if e.get("bounds") and e["bounds"]["y"] >= top["y"] + top["height"] - ROW_TOLERANCE_PX
-                 and e is not anchor]
+                 and e["bounds"]["height"] <= ROW_HEIGHT_LIMIT * top["height"] and e is not anchor]
         first = min(e["bounds"]["y"] for e in below)
         row = [e for e in below if abs(e["bounds"]["y"] - first) <= ROW_TOLERANCE_PX]
         outer = [e for e in row if not any(o is not e and _inside(e["bounds"], o["bounds"]) for o in row)]
@@ -846,3 +849,36 @@ def _screenshot_size(scene, window_id, folder):
     shot = scene.desktop.run("screenshot", "--window-id", window_id, str(path))
     assert shot.get("ok")
     return shot["data"]["width"], shot["data"]["height"]
+
+
+def test_a_ref_that_advertises_no_click_is_pressed_by_hand_on_the_real_screen(scenes):
+    """A date box carries a ref (its role is a text field) but advertises no Click. The model's
+    click on its ref goes to the CLI as a real press inside the box, never as a ref click. The box
+    is disabled on this screen, so the press itself changes nothing the app logs."""
+    scene = scenes("hand-click", ("--delay-ms", "200"), "시작일 칸을 눌러줘",
+                   require=[{"role": "textfield", "name": "시작일"}])
+    sent = []
+    send = scene.desktop.run
+
+    def recording(*args, **kwargs):
+        sent.append(args)
+        return send(*args, **kwargs)
+
+    scene.desktop.run = recording
+
+    scene.run([
+        *opening("공정별 생산집계"),
+        lambda s: ("observe", {**OBSERVE, "window_id": s.main_window()["id"]}),
+        lambda s: click(s.ref("시작일", "textfield"), "any", "시작일 칸을 누른다"),
+        *finishing("시작일 칸을 눌렀다"),
+    ])
+
+    pressed = scene.tool_events("click")[-1]["result"]
+    assert pressed["pressed_by_hand"]["because"] == "NO_CLICK_ACTION", pressed
+    assert pressed.get("ok") is True, pressed
+    assert [args[0] for args in sent].count("click") == 2, "only the two menu clicks of the opening"
+    bounds = scene.native_node(scene.main_window()["id"], "date-from", "textfield")["bounds"]
+    xy = next(arg for arg in [args for args in sent if args[0] == "mouse-click"][-1] if str(arg).startswith("--xy="))
+    x, y = (float(value) for value in xy.removeprefix("--xy=").split(","))
+    assert bounds["x"] <= x <= bounds["x"] + bounds["width"], (xy, bounds)
+    assert bounds["y"] <= y <= bounds["y"] + bounds["height"], (xy, bounds)

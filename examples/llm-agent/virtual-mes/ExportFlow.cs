@@ -52,7 +52,7 @@ namespace VirtualMesApp
         internal static void RejectNoData(Form owner, Session session)
         {
             session.ExportRejected("no_data");
-            MessageBox.Show(owner, NoDataMessage, "엑셀 저장", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Alerts.Show(owner, session.Options, NoDataMessage, "엑셀 저장", MessageBoxIcon.Information);
         }
 
         /// <summary>Asks for a path with the standard save dialog and writes the table there.</summary>
@@ -99,9 +99,9 @@ namespace VirtualMesApp
                 return;
             }
             session.ExportFailed(path, failure);
-            MessageBox.Show(
-                owner, "파일을 저장하지 못했습니다." + Environment.NewLine + failure, "엑셀 저장",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Alerts.Show(
+                owner, session.Options, "파일을 저장하지 못했습니다." + Environment.NewLine + failure, "엑셀 저장",
+                MessageBoxIcon.Error);
         }
 
         /// <summary>Draws the small Excel icon: a green square with a white X.</summary>

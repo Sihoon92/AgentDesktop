@@ -83,7 +83,24 @@ namespace VirtualMesApp
             else
             {
                 this.BuildMenuBar();
-                this.Shown += delegate { session.MenuReady(); };
+                this.Shown += delegate
+                {
+                    session.MenuReady();
+                    this.OpenStartupNoticesLater();
+                };
+            }
+        }
+
+        /// <summary>
+        /// Opens the start-up notices (--startup-notices) after the handler that called it returns,
+        /// so the window has finished showing and its menu is filled before the first notice.
+        /// </summary>
+        private void OpenStartupNoticesLater()
+        {
+            int count = this.options.StartupNotices;
+            if (count > 0)
+            {
+                this.BeginInvoke(new MethodInvoker(delegate { StartupNotices.Show(this, this.session, count); }));
             }
         }
 
@@ -98,6 +115,7 @@ namespace VirtualMesApp
                 timer.Dispose();
                 this.BuildMenuBar();
                 this.session.MenuReady();
+                this.OpenStartupNoticesLater();
             };
             this.Shown += delegate { timer.Start(); };
         }

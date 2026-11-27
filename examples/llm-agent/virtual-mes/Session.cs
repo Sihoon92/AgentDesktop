@@ -60,6 +60,18 @@ namespace VirtualMesApp
             }
         }
 
+        /// <summary>Records that start-up notice `index` (from 1) of `count` is showing.</summary>
+        internal void NoticeShown(int index, int count)
+        {
+            this.log.Write("notice_shown", EventLog.Fields("index", index, "count", count));
+        }
+
+        /// <summary>Records that start-up notice `index` (from 1) closed.</summary>
+        internal void NoticeClosed(int index)
+        {
+            this.log.Write("notice_closed", EventLog.Fields("index", index));
+        }
+
         internal Exposure ExposureOf(UiRegion region)
         {
             return this.options.Expose[region];

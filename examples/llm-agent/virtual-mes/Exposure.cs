@@ -24,6 +24,8 @@ namespace VirtualMesApp
     /// AutomationId and their place. IdOnly: images with no name and no
     /// pattern, so nothing gives them a ref; only a numeric AutomationId and
     /// their place tell them apart, and only a real click reaches them.
+    /// NoAction: named buttons, so the CLI gives them a ref, that advertise no Invoke pattern;
+    /// only a real click reaches them.
     /// Pixel: one nameless image.
     /// </summary>
     internal enum Exposure
@@ -32,6 +34,7 @@ namespace VirtualMesApp
         Text,
         Bare,
         IdOnly,
+        NoAction,
         Pixel
     }
 
@@ -70,7 +73,10 @@ namespace VirtualMesApp
 
         internal static bool TryParseExposure(string text, out Exposure exposure)
         {
-            Exposure[] all = { Exposure.Ref, Exposure.Text, Exposure.Bare, Exposure.IdOnly, Exposure.Pixel };
+            Exposure[] all =
+            {
+                Exposure.Ref, Exposure.Text, Exposure.Bare, Exposure.IdOnly, Exposure.NoAction, Exposure.Pixel
+            };
             foreach (Exposure candidate in all)
             {
                 if (Name(candidate) == text)
@@ -85,11 +91,11 @@ namespace VirtualMesApp
 
         /// <summary>
         /// The icon and the arrows carry no text, so neither can be exposed as text. Only the
-        /// menu and the arrows can be bare, and only the menu can be idonly.
+        /// menu and the arrows can be bare, and only the menu can be idonly or noaction.
         /// </summary>
         internal static bool IsAllowed(UiRegion region, Exposure exposure)
         {
-            if (exposure == Exposure.IdOnly)
+            if (exposure == Exposure.IdOnly || exposure == Exposure.NoAction)
             {
                 return region == UiRegion.Menu;
             }

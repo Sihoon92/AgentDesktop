@@ -19,7 +19,11 @@ namespace VirtualMesApp
 
         /// <summary>An image with an AutomationId and nothing else: no name and no pattern, so no
         /// ref. A real click still reaches the item, which the surface hit-tests itself.</summary>
-        Image
+        Image,
+
+        /// <summary>A named button that advertises no pattern: the CLI gives it a ref for its
+        /// role, but neither Invoke nor anything else can press it. Only a real click does.</summary>
+        InertButton
     }
 
     /// <summary>
@@ -84,6 +88,11 @@ namespace VirtualMesApp
             if (exposure == Exposure.IdOnly)
             {
                 return item.Kind == ItemKind.Button || item.Kind == ItemKind.Cell ? UiaShape.Image : UiaShape.Hidden;
+            }
+            if (exposure == Exposure.NoAction)
+            {
+                UiaShape named = ShapeOf(Exposure.Ref, item);
+                return named == UiaShape.Button || named == UiaShape.Cell ? UiaShape.InertButton : named;
             }
             if (exposure == Exposure.Text)
             {
@@ -414,7 +423,7 @@ namespace VirtualMesApp
 
         private int ControlTypeId()
         {
-            if (this.shape == UiaShape.Button)
+            if (this.shape == UiaShape.Button || this.shape == UiaShape.InertButton)
             {
                 return ControlType.Button.Id;
             }

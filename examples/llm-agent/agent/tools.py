@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from agent.asking import AskingTools
 from agent.effects import EXPECTATIONS
 from agent.guard import ActionGuard, signature
+from agent.hand_click import NO_CLICK_ACTION, NO_PHYSICAL_HINT, mark_of, refs_without_click
 from agent.observe import render_marked
 from agent.ready import ready_message, signals, wait_until_ready
 from agent.results import refused as _refused
@@ -127,6 +128,7 @@ class Toolbox(AskingTools, ScreenTools):
         self._ready = False
         self._ready_cancelled = None
         self._refs = {}
+        self._no_click = frozenset()
         self._view_origin = None
         self._last_read = None
         self._levels = {s["definition"]["name"]: s["level"] for s in SCHEMAS}
@@ -267,6 +269,7 @@ class Toolbox(AskingTools, ScreenTools):
             if envelope.get("ok"):
                 self._current_window = window["id"]
                 text, self._refs, self._marks = render_marked(envelope["data"]["tree"], profile=self._profile)
+                self._no_click = refs_without_click(envelope["data"]["tree"])
                 self._marks_view = (window["id"], True)
                 self._view_origin = _origin(window)
                 self._last_read = (window, envelope, text)
@@ -367,6 +370,8 @@ class Toolbox(AskingTools, ScreenTools):
         data = envelope["data"]
         text, refs, self._marks = render_marked(data["tree"], include_bounds, profile=self._profile)
         self._refs = {**self._refs, **refs} if root_ref else refs
+        no_click = refs_without_click(data["tree"])
+        self._no_click = self._no_click | no_click if root_ref else no_click
         self._marks_view = (window_id, not root_ref and surface in FULL_SURFACES)
         self._view_origin = _origin(window)
         self._current_window = window_id
@@ -414,7 +419,21 @@ class Toolbox(AskingTools, ScreenTools):
         if spec.positional:
             args += ["--", arguments[spec.positional]]
             identity.append(arguments[spec.positional])
+        if name == "click" and ref in self._no_click:
+            return self._press_by_hand(ref)
         return self._act(name, element, identity, args, headed=spec.headed)
+
+    def _press_by_hand(self, ref):
+        """Clicks the center of the element behind `ref` physically: its observation advertised
+        no Click, so the CLI's click could only fail. Refused when the task allows no physical
+        click or the element cannot be pressed (no mark, offscreen, no area)."""
+        mark = mark_of(self._marks, ref)
+        if not self._may_run("click_part") or mark is None:
+            return _refused(NO_PHYSICAL_HINT)
+        pressed = self._tool_click_part({"mark": mark, "part": "center", "action": "click"})
+        if "refused" in pressed:
+            return pressed
+        return {**pressed, "pressed_by_hand": {"mark": mark, "because": NO_CLICK_ACTION}}
 
     def _physical(self, tool, arguments, points, args, element=None, identity=None, observed=None):
         """Clicks or drags at screen points of an owned window after giving it focus. The guard

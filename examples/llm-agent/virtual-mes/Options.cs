@@ -26,6 +26,9 @@ namespace VirtualMesApp
         internal const string MenuDupNone = "none";
         internal const string MenuDupSame = "same";
         internal const string MenuDupOther = "other";
+        internal const string DialogsMessageBox = "messagebox";
+        internal const string DialogsForm = "form";
+        internal const int MaxStartupNotices = 5;
 
         internal string Profile = Exposures.DefaultProfile;
         internal Dictionary<UiRegion, Exposure> Expose;
@@ -80,6 +83,18 @@ namespace VirtualMesApp
         /// strip under the menu bar, so only the holding area tells the two apart).
         /// </summary>
         internal string MenuDupId = MenuDupNone;
+
+        /// <summary>
+        /// How many owned modal notice windows the main window opens, one after another, once it
+        /// is shown and its menu is filled: 0 (the default) to MaxStartupNotices.
+        /// </summary>
+        internal int StartupNotices;
+
+        /// <summary>
+        /// What an alert window is: a Win32 message box (messagebox, the default) or an owned
+        /// modal form the app builds itself (form), whose window class is not #32770.
+        /// </summary>
+        internal string Dialogs = DialogsMessageBox;
 
         internal bool MenuContainerIds
         {
@@ -165,6 +180,16 @@ namespace VirtualMesApp
                     options.MenuDupId = OneOf(
                         Value(args, ref index, flag), flag, MenuDupNone, MenuDupSame, MenuDupOther);
                 }
+                else if (flag == "--startup-notices")
+                {
+                    options.StartupNotices = Between(
+                        Value(args, ref index, flag), flag, 0, MaxStartupNotices);
+                }
+                else if (flag == "--dialogs")
+                {
+                    options.Dialogs = OneOf(
+                        Value(args, ref index, flag), flag, DialogsMessageBox, DialogsForm);
+                }
                 else if (flag == "--log")
                 {
                     options.LogPath = Value(args, ref index, flag);
@@ -233,6 +258,8 @@ namespace VirtualMesApp
             root["combo_open"] = this.ComboOpen;
             root["menu_container_id"] = this.MenuContainerId;
             root["menu_dup_id"] = this.MenuDupId;
+            root["startup_notices"] = this.StartupNotices;
+            root["dialogs"] = this.Dialogs;
             root["splash_ms"] = this.SplashMs.HasValue ? (object)this.SplashMs.Value : null;
             root["launcher"] = this.Launcher;
             root["single_instance"] = this.SingleInstance;
@@ -339,6 +366,17 @@ namespace VirtualMesApp
             return value;
         }
 
+        private static int Between(string text, string flag, int low, int high)
+        {
+            int value = Integer(text, flag);
+            if (value < low || value > high)
+            {
+                throw new OptionsException(
+                    flag + " is a whole number from " + low + " to " + high + ", got: " + text);
+            }
+            return value;
+        }
+
         private static void ParseExpose(string list, List<KeyValuePair<UiRegion, Exposure>> overrides)
         {
             foreach (string entry in list.Split(','))
@@ -358,7 +396,7 @@ namespace VirtualMesApp
                 if (!Exposures.TryParseExposure(parts[1], out exposure))
                 {
                     throw new OptionsException(
-                        "Unknown mode: " + parts[1] + ". Use ref, text, bare, idonly or pixel.");
+                        "Unknown mode: " + parts[1] + ". Use ref, text, bare, idonly, noaction or pixel.");
                 }
                 if (!Exposures.IsAllowed(region, exposure))
                 {

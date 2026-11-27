@@ -98,6 +98,57 @@ def test_launcher_hands_the_menu_options_to_the_main_process():
     assert (main["menu_container_id"], main["menu_dup_id"], main["main"]) == ("off", "other", True)
 
 
+def test_company_shape_options_default_off():
+    out = parsed()
+    assert (out["startup_notices"], out["dialogs"]) == (0, "messagebox")
+
+
+@pytest.mark.parametrize("count", [0, 1, 5])
+def test_startup_notices_take_zero_to_five(count):
+    assert parsed("--startup-notices", str(count))["startup_notices"] == count
+
+
+def test_dialogs_take_form():
+    assert parsed("--dialogs", "form")["dialogs"] == "form"
+    assert parsed("--dialogs", "messagebox")["dialogs"] == "messagebox"
+
+
+def test_menu_takes_noaction():
+    out = parsed("--expose", "menu=noaction")
+    assert out["expose"]["menu"] == "noaction"
+    assert {key: value for key, value in out["expose"].items() if key != "menu"} == {
+        "filters": "text", "grid": "text", "icon": "pixel", "radial": "pixel", "arrow": "bare"}
+
+
+def test_all_three_company_shape_options_together():
+    out = parsed("--startup-notices", "5", "--dialogs", "form", "--expose", "menu=noaction")
+    assert (out["startup_notices"], out["dialogs"], out["expose"]["menu"]) == (5, "form", "noaction")
+
+
+@pytest.mark.parametrize("region", ["filters", "grid", "icon", "radial", "arrow"])
+def test_noaction_is_for_the_menu_only(region):
+    done = run_exe("--expose", f"{region}=noaction", "--parse-only")
+    assert done.returncode == 2
+    assert done.stderr.strip()
+
+
+@pytest.mark.parametrize("args", [
+    ["--startup-notices"], ["--startup-notices", "6"], ["--startup-notices", "-1"],
+    ["--startup-notices", "two"], ["--startup-notices", "1.5"],
+    ["--dialogs"], ["--dialogs", "Form"], ["--dialogs", "win32"], ["--expose", "menu=NoAction"]])
+def test_bad_company_shape_options_exit_2(args):
+    done = run_exe(*args, "--parse-only")
+    assert done.returncode == 2
+    assert done.stderr.strip()
+
+
+def test_launcher_hands_the_company_shape_options_to_the_main_process():
+    out = parsed("--startup-notices", "3", "--dialogs", "form", "--expose", "menu=noaction",
+                 "--splash-ms", "500", "--launcher")
+    main = run_command_line(out["main_command_line"])
+    assert (main["startup_notices"], main["dialogs"], main["expose"]["menu"]) == (3, "form", "noaction")
+
+
 def test_combo_open_defaults_to_arrow_and_accepts_anywhere():
     assert parsed()["combo_open"] == "arrow"
     assert parsed("--combo-open", "arrow")["combo_open"] == "arrow"

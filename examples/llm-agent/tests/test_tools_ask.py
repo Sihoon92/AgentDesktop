@@ -35,10 +35,10 @@ TABLE_SCENE = {
         _node("statictext", "양품수", {"x": 1250, "y": 640, "width": 80, "height": 24}),
         _node("statictext", "극판", {"x": 1010, "y": 664, "width": 80, "height": 24}),
         _node("statictext", "소계", {"x": 1090, "y": 664, "width": 80, "height": 24}),
-        {"role": "cell", "value": "12,480", "ref_id": "@s1:e2", "bounds": CELL_A},
+        {"role": "cell", "value": "12,480", "ref_id": "@s1:e2", "bounds": CELL_A, "available_actions": ["Click"]},
         _node("statictext", "극판", {"x": 1010, "y": 688, "width": 80, "height": 24}),
         _node("statictext", "소계", {"x": 1090, "y": 688, "width": 80, "height": 24}),
-        {"role": "cell", "value": "0", "ref_id": "@s1:e3", "bounds": CELL_B},
+        {"role": "cell", "value": "0", "ref_id": "@s1:e3", "bounds": CELL_B, "available_actions": ["Click"]},
     ]},
 }
 
