@@ -23,6 +23,7 @@ from pathlib import Path, PureWindowsPath
 
 import yaml
 
+from agent.deep_read import DEPTH_RANGE
 from agent.hotkey import parse_hotkey
 from agent.images import IMAGE_MODES
 from agent.knowledge import KnowledgeError, system_name
@@ -33,8 +34,8 @@ DEFAULT_PATH = HERE / "settings.local.yaml"
 KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
         "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side", "vision_points",
         "systems", "ready_text", "ready_timeout_s", "workflow_dir", "profile_dir", "survey_capture_hotkey",
-        "survey_end_hotkey", "survey_app_exes")
-NUMBER_KEYS = ("stage_call_limit", "vision_max_side", "ready_timeout_s")
+        "survey_end_hotkey", "survey_app_exes", "observe_deep_depth")
+NUMBER_KEYS = ("stage_call_limit", "vision_max_side", "ready_timeout_s", "observe_deep_depth")
 HOTKEY_KEYS = ("survey_capture_hotkey", "survey_end_hotkey")
 VISION_POINT_MODES = ("pixel", "normalized_1000")
 PATH_KEYS = ("knowledge_dir", "exe", "workflow_dir", "profile_dir")
@@ -190,6 +191,12 @@ def _system_path(place, name, path):
 
 
 def _number(key, value):
+    if key == "observe_deep_depth":
+        low, high = DEPTH_RANGE
+        if type(value) is not int or not low <= value <= high:
+            raise SettingsError(f"{key} 값은 {low}부터 {high}까지의 정수여야 합니다",
+                                f"{key} 값이 {low}부터 {high}까지의 정수가 아님")
+        return value
     if type(value) is not int or value < 1:
         raise SettingsError(f"{key} 값은 1 이상의 정수여야 합니다", f"{key} 값이 1 이상의 정수가 아님")
     return value

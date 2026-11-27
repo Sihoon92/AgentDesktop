@@ -29,6 +29,7 @@ namespace VirtualMesApp
         internal const string DialogsMessageBox = "messagebox";
         internal const string DialogsForm = "form";
         internal const int MaxStartupNotices = 5;
+        internal const int MaxNest = 12;
 
         internal string Profile = Exposures.DefaultProfile;
         internal Dictionary<UiRegion, Exposure> Expose;
@@ -95,6 +96,13 @@ namespace VirtualMesApp
         /// modal form the app builds itself (form), whose window class is not #32770.
         /// </summary>
         internal string Dialogs = DialogsMessageBox;
+
+        /// <summary>
+        /// How many panels wrap the screen panel: 0 (the default) to MaxNest. Odd layers have no
+        /// name and no id; even layers are named nest-&lt;i&gt;, which UI Automation shows as an
+        /// AutomationId only. Deep enough, it puts the grid's cells past the CLI's default depth.
+        /// </summary>
+        internal int Nest;
 
         internal bool MenuContainerIds
         {
@@ -185,6 +193,10 @@ namespace VirtualMesApp
                     options.StartupNotices = Between(
                         Value(args, ref index, flag), flag, 0, MaxStartupNotices);
                 }
+                else if (flag == "--nest")
+                {
+                    options.Nest = Between(Value(args, ref index, flag), flag, 0, MaxNest);
+                }
                 else if (flag == "--dialogs")
                 {
                     options.Dialogs = OneOf(
@@ -260,6 +272,7 @@ namespace VirtualMesApp
             root["menu_dup_id"] = this.MenuDupId;
             root["startup_notices"] = this.StartupNotices;
             root["dialogs"] = this.Dialogs;
+            root["nest"] = this.Nest;
             root["splash_ms"] = this.SplashMs.HasValue ? (object)this.SplashMs.Value : null;
             root["launcher"] = this.Launcher;
             root["single_instance"] = this.SingleInstance;

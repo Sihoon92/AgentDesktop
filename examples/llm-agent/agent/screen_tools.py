@@ -15,6 +15,7 @@ from agent.geometry import contains, has_area, part_point
 from agent.observe import render_marked
 from agent.results import refused
 from agent.table import find_cells
+from agent.table_tools import TableTools
 from agent.vision import auto_question
 
 CLICK_ACTIONS = {"click": ("left", 1), "double_click": ("left", 2), "right_click": ("right", 1)}
@@ -23,7 +24,7 @@ UNCONFIRMED = "unconfirmed"
 ELEMENT_EXPECTATIONS = ("content_changed", "value_changed")
 
 
-class ScreenTools:
+class ScreenTools(TableTools):
     def _init_screen(self, captures_dir, vision=None):
         self._captures_dir = Path(captures_dir) if captures_dir is not None else None
         self._marks = {}
@@ -212,8 +213,9 @@ class ScreenTools:
         self._note_cells(found["candidates"])
         return {"ok": True, **found}
 
-    def _note_cells(self, candidates):
-        """Hook for the asking part: the candidates of the latest table lookup."""
+    def _note_cells(self, candidates, whole=None):
+        """Hook for the asking part: the candidates of the latest table lookup, and the box of
+        the whole table they sit in when the lookup knows it."""
 
     def _part_point(self, element, part):
         try:

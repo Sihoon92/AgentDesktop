@@ -47,7 +47,8 @@ def read_record(run_dir, status=None):
     last done stage event, or None. actions are the action events numbered from 1, each with
     "before" (the observation the action was taken on, as recorded), "after" (the first
     observation made by an action that follows it before the next action event, or None) and
-    "delivered". observations maps each observation id to its event as written. saved_path is
+    "delivered", and "lookups", the find_rows events made on that same observation before it.
+    observations maps each observation id to its event as written. saved_path is
     the last finish_note's; main_window the window of the first observation. A run.json
     without a goal or a permission level gives "" and 0, the level that allows no action."""
     run_dir = Path(run_dir)
@@ -87,9 +88,12 @@ def _stages(plan, events):
 
 def _actions(events):
     actions = []
+    lookups = []
     for event in events:
         kind = event.get("type")
-        if kind == "action":
+        if kind == "find_rows":
+            lookups.append(event)
+        elif kind == "action":
             actions.append({
                 "n": len(actions) + 1,
                 "step": event.get("step"),
@@ -101,6 +105,8 @@ def _actions(events):
                 "before": event.get("before"),
                 "after": None,
                 "delivered": _delivered(event.get("result") or {}),
+                "lookups": [found for found in lookups
+                            if found.get("observation") is not None and found.get("observation") == event.get("before")],
             })
         elif kind == "observation" and event.get("source") == "action" and actions and actions[-1]["after"] is None:
             actions[-1]["after"] = event.get("id")

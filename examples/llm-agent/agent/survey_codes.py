@@ -5,7 +5,9 @@ reader all take their codes from here, so a code means the same thing on both PC
 are one Korean line each and carry no screen text.
 """
 
-SURVEY_VERSION = 2
+SURVEY_VERSION = 3
+READABLE_VERSIONS = (2, 3)
+"""Block versions --read-block reads without a warning: v3 only added the cut count and S to H11."""
 SURVEY_POLL_S = 0.5
 SURVEY_MAX_WINDOWS = 8
 SURVEY_SNAPSHOT_MS = 5000
@@ -31,6 +33,8 @@ READS = ("OK", "TRUNCATED", "TIMEOUT", "UNRESPONSIVE", "GONE", "ERROR")
 SIZES = ("S", "M", "L")
 SHOTS = ("OK", "SHOT_BLANK", "SHOT_FAILED")
 SLOWS = ("DONE", "QUEUE_FULL", "QUEUE_ABANDONED")
+SHALLOW = ("deep_read_too_large", "deep_read_timeout")
+"""The fallback codes of agent.deep_read a capture keeps as WindowFact.shallow."""
 APP_SEEN = ("ALREADY_RUNNING", "STARTED", "PICKED_BY_CAPTURE", "NOT_SEEN")
 EVENTS = ("window_shown", "window_hidden", "process_started", "process_exited", "hung_start",
           "hung_end", "foreground")
@@ -94,6 +98,10 @@ _SLOW = {
     "QUEUE_FULL": "대기열이 가득 차 느린 단계를 건너뜀",
     "QUEUE_ABANDONED": "세션이 끝날 때까지 느린 단계를 마치지 못함",
 }
+_SHALLOW = {
+    "deep_read_too_large": "깊게 읽은 트리가 CLI 크기 한도를 넘어 기본 깊이로 다시 읽음(H11의 S)",
+    "deep_read_timeout": "깊게 읽기가 시간 안에 끝나지 않아 기본 깊이로 다시 읽음(H11의 S)",
+}
 _APP_SEEN = {
     "ALREADY_RUNNING": "세션 시작 때 앱이 이미 떠 있었음",
     "STARTED": "세션 중 앱이 켜지는 것을 봄",
@@ -116,6 +124,6 @@ MEANINGS: dict[str, str] = {
     f"{group}:{code}": text
     for group, table in (("scene", _SCENE), ("kind", _KIND), ("rel", _REL), ("state", _STATE),
                          ("read", _READ), ("size", _SIZE), ("shot", _SHOT), ("slow", _SLOW),
-                         ("app_seen", _APP_SEEN), ("failure", _FAILURE))
+                         ("shallow", _SHALLOW), ("app_seen", _APP_SEEN), ("failure", _FAILURE))
     for code, text in table.items()
 }

@@ -1143,3 +1143,59 @@ def test_noaction_menu_click_is_reported_through_legacy_but_only_a_real_click_pr
         assert not [e for e in app.events() if e["event"] == "menu_opened"]
         app.click_at_center(item)
         assert app.wait_for_event("menu_opened")["category"] == "생산운영"
+
+
+def tree_nodes(tree):
+    """Every node of a snapshot tree, the tree itself first."""
+    found = [tree]
+    for child in tree.get("children") or []:
+        found.extend(tree_nodes(child))
+    return found
+
+
+def is_rows_cell_name(name):
+    head, _, number = (name or "").rpartition(" row")
+    return bool(head) and number.isdigit()
+
+
+def test_rows_grid_shows_rows_of_named_cells_with_values(tmp_path):
+    """--expose grid=rows: table > Data Panel > Row n > cells named '<column> row<k>' whose value is
+    the shown text. The cells carry no GridItem or TableItem pattern, so the CLI may give them the
+    row role; this test reads names, values and the click, not the role."""
+    with LiveApp(tmp_path, "--expose", "grid=rows", "--delay-ms", "200") as app:
+        open_summary(app)
+        query(app)
+        tree = app.snapshot(app.main())["tree"]
+        panel = next(n for n in tree_nodes(tree) if n.get("name") == "Data Panel")
+        rows = panel.get("children") or []
+        assert rows and [row.get("name") for row in rows[:2]] == ["Row 1", "Row 2"]
+        first = rows[0].get("children") or []
+        assert first and all(is_rows_cell_name(cell.get("name")) for cell in first)
+        assert all(cell.get("name", "").endswith(" row0") for cell in first)
+        assert not [n for n in tree_nodes(tree) if n.get("name") == "작업수"], "no header cells"
+        target = None
+        for row in rows:
+            cells = row.get("children") or []
+            values = [cell.get("value") or "" for cell in cells]
+            if "극판" in values and "소계" in values:
+                target = next(cell for cell in cells if cell.get("name", "").startswith("양품수 row"))
+                break
+        assert target is not None and (target.get("value") or "").strip()
+        placed = next(n for n in app.nodes(app.main()) if n.get("name") == target["name"])
+        app.click_at_center(placed)
+        clicked = app.wait_for_event("cell_clicked")
+        assert clicked["row"][:2] == ["극판", "소계"] and clicked["column"] == ["생산", "양품수"]
+
+
+def test_nest_12_cuts_the_cells_at_the_default_depth_and_depth_30_reaches_them(tmp_path):
+    with LiveApp(tmp_path, "--expose", "grid=rows", "--nest", "12", "--delay-ms", "200") as app:
+        open_summary(app)
+        query(app)
+        shallow = tree_nodes(app.snapshot(app.main())["tree"])
+        assert not [n for n in shallow if is_rows_cell_name(n.get("name"))]
+        assert [n for n in shallow if "children_count" in n]
+        deep = app.cli("snapshot", "--window-id", app.main(), "--compact", "--include-bounds",
+                       "--timeout-ms", "10000", "--max-depth", "30")
+        cells = [n for n in tree_nodes(deep["tree"]) if is_rows_cell_name(n.get("name"))]
+        assert cells and any((n.get("value") or "").strip() for n in cells)
+        assert [n for n in tree_nodes(deep["tree"]) if n.get("id") == "nest-12"]

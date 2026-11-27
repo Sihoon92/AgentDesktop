@@ -67,10 +67,12 @@ def recorded(tmp_path, cli=None, now=lambda: NOW, heartbeat_s=60):
     return recorder, toolbox, cli
 
 
-def events(recorder, focus=False):
-    """The recorded events in order; the focus event of the start raise only when `focus`."""
+def events(recorder, focus=False, deep=False):
+    """The recorded events in order; the focus event of the start raise only when `focus`, and the
+    deep_read events (the captured fixture trees still carry children_count) only when `deep`."""
     lines = (recorder.path / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    return [event for event in map(json.loads, lines) if focus or event["type"] != "focus"]
+    return [event for event in map(json.loads, lines)
+            if (focus or event["type"] != "focus") and (deep or event["type"] != "deep_read")]
 
 
 def run_json(recorder, attempts=50):
@@ -891,7 +893,7 @@ def test_events_written_counts_event_lines(tmp_path):
     recorder, toolbox, _ = recorded(tmp_path)
     toolbox.call("launch_target", {"intent": "앱을 연다"})
     toolbox.call("observe", OBSERVE)
-    assert recorder.events_written == len(events(recorder, focus=True)) > 0
+    assert recorder.events_written == len(events(recorder, focus=True, deep=True)) > 0
 
 
 def test_finish_closes_open_items(tmp_path):
@@ -1367,3 +1369,47 @@ def test_run_json_holds_no_workflow_goal_param_or_path_text(tmp_path):
 
     text = (recorder.path / "run.json").read_text(encoding="utf-8")
     assert MARK not in text and "shop" not in text
+
+
+def test_deep_read_events_are_kept_in_events_jsonl(tmp_path):
+    recorder, toolbox, _ = recorded(tmp_path)
+    toolbox.call("launch_target", {"intent": "앱을 연다"})
+
+    toolbox.call("observe", OBSERVE)
+
+    [deep] = [event for event in events(recorder, deep=True) if event["type"] == "deep_read"]
+    assert deep["depth"] == 30 and deep["fallback"] is None and deep["cut"] > 0
+
+
+def test_recorder_observation_event_carries_the_structure_record(tmp_path):
+    from structure_support import company
+
+    from agent.structure import analyze, record
+
+    recorder, _, _ = recorded(tmp_path)
+    tree = company()
+    recorder.on_observation(window_row(), {"ok": True, "data": {"tree": tree}}, "t")
+    recorder.on_observation(window_row(), labels_tree(2), "t")
+
+    first, second = events(recorder)
+    assert first["structure"] == record(analyze(tree))
+    assert first["structure"]["tables"][0]["rows"] == 3 and "980" not in json.dumps(first["structure"])
+    assert second["structure"] == {"areas": [], "tables": []}
+
+
+def test_recorder_and_toolbox_marks_still_agree(tmp_path):
+    from structure_support import EXE, OBSERVE, company, scene
+
+    cli = FakeCli(scene=scene(company()))
+    desktop = DesktopClient("ad.exe", "run1", runner=cli)
+    recorder = new_recorder(tmp_path, desktop)
+    toolbox = Toolbox(desktop, Task("goal", EXE, 2, []), confirm=lambda _p: False, sleep=lambda _s: None,
+                      observer=recorder)
+    toolbox.call("launch_target", {"intent": "앱을 연다"})
+    toolbox.call("observe", OBSERVE)
+
+    last = [event for event in events(recorder) if event["type"] == "observation"][-1]
+    recorded_marks = [(e["mark"], e["role"], e["name"]) for e in last["elements"]]
+    assert recorded_marks == [(e["mark"], e["role"], e["name"]) for e in toolbox.marked_elements()]
+    assert len(recorded_marks) == 13 and "양품수 row1" not in last["text"]
+    assert any(name == "양품수 row1" for _, _, name in recorded_marks)

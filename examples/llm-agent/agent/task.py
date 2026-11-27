@@ -5,6 +5,7 @@ from pathlib import PureWindowsPath
 
 import yaml
 
+from agent.deep_read import DEEP_DEPTH, DEPTH_RANGE
 from agent.images import IMAGE_MODES
 
 
@@ -37,6 +38,7 @@ class Task:
     ready_timeout_s: int = 180
     ready: tuple = ()
     ready_read: str = "snapshot"
+    observe_deep_depth: int = DEEP_DEPTH
 
 
 DEFAULT_MODEL = Task.model
@@ -44,9 +46,9 @@ MODEL_ENV = "OPENAI_MODEL"
 ARGS_MAX_STEPS = 60
 OPTIONAL_KEYS = ("max_steps", "token_budget", "model", "reasoning_effort", "baseline_target",
                  "system", "knowledge_dir", "image_mode", "ask_timeout_s", "mismatch_limit",
-                 "stage_call_limit", "plan_reasoning_effort", "ready_text", "ready_timeout_s")
+                 "stage_call_limit", "plan_reasoning_effort", "ready_text", "ready_timeout_s", "observe_deep_depth")
 DEFAULT_KEYS = ("model", "reasoning_effort", "image_mode", "knowledge_dir", "system", "stage_call_limit",
-                "plan_reasoning_effort")
+                "plan_reasoning_effort", "observe_deep_depth")
 
 
 def model_choice(file_value, settings, environ):
@@ -112,6 +114,9 @@ def _check_optional(optional):
         value = optional.get(key, 1)
         if type(value) is not int or value < 1:
             raise TaskError(f"{key} must be a whole number of at least 1")
+    depth = optional.get("observe_deep_depth", DEEP_DEPTH)
+    if type(depth) is not int or not DEPTH_RANGE[0] <= depth <= DEPTH_RANGE[1]:
+        raise TaskError(f"observe_deep_depth must be a whole number from {DEPTH_RANGE[0]} to {DEPTH_RANGE[1]}")
     for key in ("model", "reasoning_effort", "plan_reasoning_effort", "system", "knowledge_dir"):
         if key in optional and not isinstance(optional[key], str):
             raise TaskError(f"{key} must be text")

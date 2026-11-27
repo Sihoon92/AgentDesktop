@@ -547,6 +547,65 @@ def test_scene_4_cell_is_confirmed_then_clicked(scenes):
     assert len(scene.app_events("cell_clicked")) == 1
 
 
+def _column(table, start):
+    return next(column.label for column in table.columns if column.label.startswith(start))
+
+
+def rows_scene_turns():
+    """Find the 극판 subtotal rows by their labels, be refused among the shops, ask, click the first.
+    The shop column is merged, so only its first row holds the shop's name and it cannot tell the
+    rows apart: the harness must not fill it down."""
+    def table(s):
+        return s.toolbox.structure.tables[0]
+
+    def finding(s):
+        t = table(s)
+        s.memo["양품수"] = _column(t, "양품수")
+        return "find_rows", {"table": t.handle,
+                             "where": [{"column": _column(t, "그룹공정"), "value": "극판"},
+                                       {"column": _column(t, "공정"), "value": "소계"}],
+                             "columns": [s.memo["양품수"]]}
+
+    def cells(s):
+        return [row["cells"][s.memo["양품수"]] for row in s.memo["rows"]]
+
+    def pressing(s):
+        s.memo["rows"] = s.last_result()["rows"]
+        return part(s.toolbox._marks[cells(s)[0]["mark"]], "center", "window_opened", "극판 소계 행의 양품수 칸을 누른다")
+
+    return [
+        lambda s: ("observe", {**OBSERVE, "window_id": s.main_window()["id"]}),
+        finding,
+        pressing,
+        lambda s: ask("confirm", "극판 양품수는 첫 Shop의 극판 소계 행 칸이 맞나요?",
+                      [candidate(f"후보 {n}", s.toolbox._marks[cell["mark"]]) for n, cell in enumerate(cells(s), 1)],
+                      proposed=1, basis=[cell["mark"] for cell in cells(s)]),
+        lambda s: part(s.toolbox._marks[cells(s)[0]["mark"]], "center", "window_opened",
+                       "답한 1번 칸을 눌러 상세 팝업을 연다"),
+        *finishing("생산 상세 팝업이 열렸다"),
+    ]
+
+
+def test_scene_rows_find_rows_then_click_the_cell(scenes):
+    """The company-shaped grid: rows of named cells with values, nested twelve panels deep. The
+    deep read reaches the cells, the summary shows the table, find_rows picks the rows by their
+    labels, and pressing one of several matches needs a question first."""
+    scene = scenes("rows", ("--delay-ms", "200", "--expose", "grid=rows", "--nest", "12"),
+                   "극판 양품수를 눌러서 들어가줘", require=[{"name": "일자 row0"}], answers=[Answer(text="1번")])
+
+    result = scene.run([*opening("공정별 생산집계"), *querying("극판"), *rows_scene_turns()])
+
+    assert result.status == "verified", result.reason
+    found = scene.tool_events("find_rows")[0]["result"]
+    assert found["matched"] >= 2, found
+    assert scene.tool_events("click_part")[0]["result"]["refused_code"] == "needs_confirmation"
+    assert not any(event.get("fallback") for event in scene.events_of("deep_read")), scene.events_of("deep_read")
+    clicked = wait_for_logged(scene.app_log, "cell_clicked")
+    assert "극판" in clicked["row"] and "소계" in clicked["row"], clicked
+    assert "양품수" in clicked["column"], clicked
+    assert len(scene.app_events("cell_clicked")) == 1
+
+
 def save_dialog(s):
     """Waits for the standard save dialog (its file-name box has automation id 1001 in every UI
     language) and observes it."""

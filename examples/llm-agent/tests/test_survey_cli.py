@@ -23,7 +23,7 @@ def test_cli_block_latest_prints_block_and_exit_zero(home, capsys):
     folder = write_session(home / "captures" / "20261127-100000-SYS")
     assert survey.main(["--block", "latest"]) == 0
     out = capsys.readouterr().out
-    assert "세션: 20261127-100000-SYS" in out and "[전달] v2 · abc1234 · 변경없음 · SYS · 캡처2" in out
+    assert "세션: 20261127-100000-SYS" in out and "[전달] v3 · abc1234 · 변경없음 · SYS · 캡처2" in out
     assert (folder / BLOCK_TXT).is_file() and str(home) not in out
 
 

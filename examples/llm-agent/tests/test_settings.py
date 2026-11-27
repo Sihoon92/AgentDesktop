@@ -28,7 +28,7 @@ def test_contract_names():
     assert KEYS == ("model", "reasoning_effort", "image_mode", "knowledge_dir", "exe", "system", "stage_call_limit",
                     "plan_reasoning_effort", "vision_model", "vision_reasoning_effort", "vision_max_side",
                     "vision_points", "systems", "ready_text", "ready_timeout_s", "workflow_dir", "profile_dir",
-                    "survey_capture_hotkey", "survey_end_hotkey", "survey_app_exes")
+                    "survey_capture_hotkey", "survey_end_hotkey", "survey_app_exes", "observe_deep_depth")
 
 
 def test_every_key_is_read(tmp_path):
@@ -507,3 +507,18 @@ def test_bad_survey_keys_are_refused_without_values(tmp_path, text, reason):
     assert raised.value.reason == reason
     assert "SECRET" not in str(raised.value)
 
+
+
+@pytest.mark.parametrize("value", [10, 30, 50])
+def test_observe_deep_depth_from_10_to_50_is_read(tmp_path, value):
+    loaded = load_settings(write(tmp_path, f"observe_deep_depth: {value}\n"), environ={})
+
+    assert loaded == {"observe_deep_depth": value}
+
+
+@pytest.mark.parametrize("value", ["9", "51", "-3", "thirty", "2.5", "'30'"])
+def test_observe_deep_depth_outside_10_to_50_is_refused(tmp_path, value):
+    with pytest.raises(SettingsError) as raised:
+        load_settings(write(tmp_path, f"observe_deep_depth: {value}\n"), environ={})
+
+    assert "observe_deep_depth" in raised.value.reason and value not in raised.value.reason

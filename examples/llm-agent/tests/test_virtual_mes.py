@@ -377,3 +377,42 @@ def test_launcher_from_the_args_file_hands_those_options_on(tmp_path):
     out = json.loads(run_exe(exe=copy).stdout)
     main = run_command_line(out["main_command_line"])
     assert (main["profile"], main["log"], main["main"], main["splash_ms"]) == ("hard", r"C:\a b\x.jsonl", True, None)
+
+
+def test_rows_and_nest_default_off():
+    out = parsed()
+    assert out["nest"] == 0 and out["expose"]["grid"] == "text"
+
+
+def test_grid_takes_rows():
+    out = parsed("--expose", "grid=rows")
+    assert out["expose"]["grid"] == "rows"
+    assert {key: value for key, value in out["expose"].items() if key != "grid"} == {
+        "menu": "ref", "filters": "text", "icon": "pixel", "radial": "pixel", "arrow": "bare"}
+
+
+@pytest.mark.parametrize("region", ["menu", "filters", "icon", "radial", "arrow"])
+def test_rows_is_for_the_grid_only(region):
+    done = run_exe("--expose", f"{region}=rows", "--parse-only")
+    assert done.returncode == 2
+    assert done.stderr.strip()
+
+
+@pytest.mark.parametrize("depth", [0, 1, 12])
+def test_nest_takes_zero_to_twelve(depth):
+    assert parsed("--nest", str(depth))["nest"] == depth
+
+
+@pytest.mark.parametrize("args", [
+    ["--nest"], ["--nest", "13"], ["--nest", "-1"], ["--nest", "deep"], ["--nest", "2.5"],
+    ["--expose", "grid=Rows"]])
+def test_bad_rows_and_nest_options_exit_2(args):
+    done = run_exe(*args, "--parse-only")
+    assert done.returncode == 2
+    assert done.stderr.strip()
+
+
+def test_launcher_hands_rows_and_nest_to_the_main_process():
+    out = parsed("--expose", "grid=rows", "--nest", "12", "--splash-ms", "500", "--launcher")
+    main = run_command_line(out["main_command_line"])
+    assert (main["expose"]["grid"], main["nest"]) == ("rows", 12)

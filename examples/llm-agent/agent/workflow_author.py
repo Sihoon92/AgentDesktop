@@ -75,6 +75,9 @@ Parameters are the values a later run may change. Use the plan's candidate names
 Kinds: "text" (one value: the name of the pressed item, or the typed text), "list" (the items of
 a select_only), "path" (the saved file's path, on the act that typed it and on check_file).
 Put a parameter only on an act whose target has a name or that typed text, or on a select_only.
+An act on a table cell that find_rows found shows "found_by", the row's conditions; its parameter
+is the value of a condition (with two or more conditions, the parameter must already be the
+value of one of them from another step).
 A candidate the steps do not use is left out; the harness keeps it as a fixed value.
 Write one short goal per step: what is true on screen after it. Fields that do not apply are null.
 """
@@ -272,9 +275,10 @@ class _Builder:
         observation = self._before(action, n)
         element = None if action["tool"] == "press" else self._element(action, observation, n)
         scope = self._scope(observation, element, n)
+        cell = self._cell(action, observation)
         item = {**base, "kind": "act", "action": action, "observation": observation, "element": element,
-                "scope": scope, "param": raw.get("param")}
-        item.update(self._act_value(action, element, raw.get("param"), n))
+                "scope": scope, "param": raw.get("param"), "cell": cell}
+        item.update(self._act_value(action, element, raw.get("param"), n, cell))
         item.update(self._expect(action))
         self.kept.append({"n": n, "action": action})
         return item
@@ -406,7 +410,25 @@ class _Builder:
                 return kept["n"]
         return None
 
-    def _act_value(self, action, element, param, n):
+    def _cell(self, action, observation):
+        """The cell step of a click_part that pressed a cell of a find_rows lookup with one row on
+        the same observation: {"table", "column", "where"}, else None (the step is written as
+        before). The table is told by its id when ids are stable and it has one."""
+        lookup = _lookup_of(action)
+        if lookup is None:
+            return None
+        found, column = lookup
+        tables = ((observation.get("structure") or {}).get("tables")) or []
+        table = next((t for t in tables if isinstance(t, dict) and t.get("handle") == found.get("table")), None)
+        if table is None or not isinstance(table.get("identity"), dict):
+            return None
+        identity = dict(table["identity"])
+        if self.use_ids and isinstance(table.get("id"), str) and table["id"]:
+            identity = {"role": identity.get("role"), "id": table["id"],
+                        **({"in": identity["in"]} if "in" in identity else {})}
+        return {"table": identity, "column": column, "where": dict(found.get("where") or {})}
+
+    def _act_value(self, action, element, param, n, cell=None):
         tool = action["tool"]
         if tool in VALUE_TOOLS:
             recorded = (action.get("arguments") or {}).get(VALUE_TOOLS[tool])
@@ -426,10 +448,33 @@ class _Builder:
             return {"value": f"${param}"}
         if param is None:
             return {}
+        if cell is not None:
+            return self._cell_param(param, cell, n)
         if self.kinds.get(param) != "text" or element is None or _name(element) is None:
             _invalid(f"step {n}: only a named target or typed text takes a parameter")
         self._example(param, _name(element), n)
         return {"name_param": param}
+
+    def _cell_param(self, param, cell, n):
+        """A text parameter on a cell step is the value of one of its conditions: the only one, or
+        the one that equals the parameter's example from another step."""
+        values = list(cell["where"].values())
+        if self.kinds.get(param) != "text":
+            _invalid(f"step {n}: a cell step takes only a text parameter")
+        if param in self.examples:
+            if self.examples[param] not in values:
+                _invalid(f"step {n}: parameter {param} is not the value of a condition")
+        elif len(values) == 1:
+            self._example(param, values[0], n)
+        else:
+            _invalid(f"step {n}: with two or more conditions, name the parameter on another step first")
+        return {}
+
+    def _cell_step(self, cell):
+        """The cell with each condition value that equals a text parameter's example as "$name"."""
+        texts = {example: name for name, example in self.examples.items() if self.kinds.get(name) == "text"}
+        where = {column: f"${texts[value]}" if value in texts else value for column, value in cell["where"].items()}
+        return {**cell, "where": where}
 
     def _expect(self, action):
         result = action.get("result") or {}
@@ -524,6 +569,8 @@ class _Builder:
             step["target"] = {"scope": item["scope"], **self._locator(item, avoid, item.get("name_param"))}
         if "value" in item:
             step["value"] = item["value"]
+        if item.get("cell") is not None:
+            step["cell"] = self._cell_step(item["cell"])
         step["expect"] = item["expect"]
         for key in ("closes", "settle"):
             if key in item:
@@ -655,6 +702,9 @@ def _action_view(record, action, seen_in):
     for key in ("part", "action", "combo"):
         if key in arguments:
             view[key] = arguments[key]
+    lookup = _lookup_of(action)
+    if lookup is not None:
+        view["found_by"] = dict(lookup[0].get("where") or {})
     view.update({
         "expect": result.get("expect"),
         "expected_met": result.get("expected_met"),
@@ -664,6 +714,19 @@ def _action_view(record, action, seen_in):
         "seen_in": seen_in,
     })
     return view
+
+
+def _lookup_of(action):
+    """(find_rows event, column) for a click_part that pressed a cell the latest such lookup on the
+    same observation returned while it matched exactly one row, else None."""
+    if action.get("tool") != "click_part":
+        return None
+    mark = (action.get("arguments") or {}).get("mark")
+    for found in reversed(action.get("lookups") or []):
+        for cell in found.get("cells") or []:
+            if isinstance(cell, dict) and cell.get("mark") == mark and isinstance(cell.get("column"), str):
+                return (found, cell["column"]) if found.get("matched") == 1 else None
+    return None
 
 
 def _shown_text(text):

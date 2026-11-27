@@ -25,6 +25,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from agent.summary_reads import read_lines
 from agent.profile import READ_MODES
 from agent.ready import READY_STATUSES
 
@@ -77,6 +78,7 @@ def summarize(run, events, code=None):
         "  오류 코드: " + _tally(_errors(actions)),
         "  질문: " + _questions(events),
     ]
+    lines += read_lines(events)
     stages = run.get("stages") if isinstance(run.get("stages"), dict) else {}
     if _count(stages.get("stage_count")):
         lines.append("  단계: " + _stages(stages))
@@ -282,17 +284,12 @@ def _questions(events):
 def _stages(stages):
     calls = stages.get("stage_calls")
     listed = isinstance(calls, list) and all(_count(value) is not None for value in calls)
-
-    def counted(key):
-        value = _count(stages.get(key))
-        return UNKNOWN if value is None else value
-
     return SEPARATOR.join([
-        str(counted("stage_count")),
-        f"완료 {counted('stages_done')}",
+        str(_counted(stages.get("stage_count"))),
+        f"완료 {_counted(stages.get('stages_done'))}",
         f"단계별 호출 {'/'.join(str(value) for value in calls) if listed else UNKNOWN}",
-        f"한도 질문 {counted('limit_questions')}",
-        f"계획 고침 {counted('plan_revisions')}",
+        f"한도 질문 {_counted(stages.get('limit_questions'))}",
+        f"계획 고침 {_counted(stages.get('plan_revisions'))}",
     ])
 
 

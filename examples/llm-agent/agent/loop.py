@@ -36,6 +36,7 @@ Rules:
   Read it as that element's name. If it seems not to match what the screen shows, do not trust it:
   check with look, or ask the user. An element without a ref is pressed with click_part on its number.
 - An element's desc often explains it better than its name.
+- children=N on a line means N children were not read.
 - After you launch the target and observe the first screen, call plan to split the goal into
   stages. Write each stage as a result the screen shows: goal is the state of the screen when the
   stage is done (not what to press), done_when is what on the screen proves it. Put the values the
@@ -75,7 +76,10 @@ Rules:
   given for a window: window_opened and window_closed are judged from the window list alone.
 - Read disposition after each action. Repeat an action only when disposition.retry is "safe".
   Otherwise decide from the new observation.
-- Find a table cell with find_cells. Decide the usual reading of the user's words yourself (for
+- The observation starts with its structure: areas (A1), their lines left to right, and tables (T1)
+  whose cells have no line of their own. Use open_area to see one area. When a table shows as T1,
+  find a cell with find_rows by the values of other cells in its row and read it with read_table;
+  use find_cells only for a table with no T handle. Decide the usual reading of the user's words yourself (for
   example, naming only a group usually means its subtotal row) and propose it, but when there are
   two or more candidates, call ask with kind "confirm" before you press one. Do the same when several
   elements share a name and the goal does not say which one.
@@ -92,7 +96,7 @@ Rules:
 VISION_PROMPT = """\
 
 Pictures in this run:
-- Read the tree first: observe again, use find_cells and the [n] marks. Call look only for what
+- Read the tree first: observe again, use find_rows or find_cells and the [n] marks. Call look only for what
   they cannot show, and never ask about something the observation already shows.
 - You cannot see pictures. Ask the vision model through look's question, one thing at a time, and
   read the answer in the result's vision. After a mismatched or unconfirmed action the result's

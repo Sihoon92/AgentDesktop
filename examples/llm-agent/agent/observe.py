@@ -11,6 +11,7 @@ from collections import Counter
 
 from agent import identity
 from agent.profile import entry_of
+from agent.structure_view import render_summary
 
 NOISE_ACTIONS = {"ScrollTo", "SetFocus"}
 
@@ -20,28 +21,40 @@ def render_tree(tree, include_bounds=False, profile=None):
 
     include_bounds only decides whether the text shows bounds; the map always carries them.
     """
-    text, refs, _ = _render(tree, include_bounds, numbered=False, profile=profile)
+    text, refs, _ = _render(tree, include_bounds, numbered=False, profile=profile, structure=None)
     return text, refs
 
 
-def render_marked(tree, include_bounds=False, profile=None):
+def render_marked(tree, include_bounds=False, profile=None, structure=None):
     """Like render_tree, but numbers every visible element and returns that numbering too.
 
     Each line that visible_elements would return starts with "[n] " after its indentation.
     The third value maps n to that element with "mark": n and "scope" added (see
     visible_elements). Numbers follow tree order from 1 and are only meaningful for this one
     observation.
+
+    structure, when given, is this tree's agent.structure.analyze result: its summary leads the
+    text and the cells of its tables get no line of their own. Numbers and the returned marks
+    stay the same; a hidden cell is still in them.
     """
-    return _render(tree, include_bounds, numbered=True, profile=profile)
+    return _render(tree, include_bounds, numbered=True, profile=profile, structure=structure)
 
 
-def _render(tree, include_bounds, numbered, profile):
+def numbered_nodes(tree, profile=None):
+    """Every node in tree order as (node, number, area): number is its render_marked number, or
+    None for a node that is no element, and area is the one it sits in (agent.identity), or None.
+    The nodes are the tree's own dicts."""
+    return [(item.node, item.mark, item.container) for item in _items(tree, profile)]
+
+
+def _render(tree, include_bounds, numbered, profile, structure):
     """Fills refs and marks for the harness. A ref or element with a native id (such as a UIA
     AutomationId) also carries it as "native_id"; the text shows its value only on an element
     without a name."""
     lines = []
     refs = {}
     marks = {}
+    hidden = structure.cell_marks if structure is not None else frozenset()
     for item in _items(tree, profile):
         node, mark = item.node, item.mark
         native_id = _native_id(node)
@@ -58,9 +71,13 @@ def _render(tree, include_bounds, numbered, profile):
         if numbered and mark is not None:
             marks[mark] = _numbered_element(item)
             prefix = f"[{mark}] "
-        if item.has_line:
+        if item.has_line and (mark is None or mark not in hidden):
             lines.append("  " * item.depth + prefix + _line(item, include_bounds))
-    return "\n".join(lines), refs, marks
+    text = "\n".join(lines)
+    if structure is not None:
+        summary = render_summary(structure)
+        text = f"{summary}\n{text}" if summary else text
+    return text, refs, marks
 
 
 class _Item:

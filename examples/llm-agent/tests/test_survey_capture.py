@@ -186,7 +186,8 @@ def test_only_read_commands_reach_the_cli(tmp_path):
     setup.capture()
     assert {argv[0] for argv in setup.desktop.calls} <= {"list-windows", "snapshot"}
     snapshot = next(argv for argv in setup.desktop.calls if argv[0] == "snapshot")
-    assert snapshot == ("snapshot", "--window-id", "w-11", "--compact", "--include-bounds", "--timeout-ms", "5000")
+    assert snapshot == ("snapshot", "--window-id", "w-11", "--compact", "--timeout-ms", "5000", "--max-depth", "30",
+                        "--include-bounds")
 
 
 def fast_of(cid):
@@ -254,3 +255,39 @@ def test_unreadable_window_list_reads_as_error(tmp_path):
     setup.desktop.run = lambda *argv, headed=False: {"ok": False, "error": {"code": "HARNESS_SPAWN"}}
     facts = setup.capture()
     assert {item.read for item in facts.windows} == {"ERROR"} and facts.slow == "DONE"
+
+
+def test_capture_reads_the_window_at_depth_30_and_keeps_the_cut_count(tmp_path):
+    setup = Setup(tmp_path)
+    facts = setup.capture()
+    snapshot = next(argv for argv in setup.desktop.calls if argv[0] == "snapshot")
+    assert snapshot[snapshot.index("--max-depth") + 1] == "30"
+    main = facts.windows[0]
+    assert (main.depth, main.cut, main.shallow) == (30, 0, None)
+    saved = json.loads((capture_dir(tmp_path, "C01") / FACTS_JSON).read_text(encoding="utf-8"))
+    assert saved["windows"][0]["cut"] == 0 and saved["windows"][0]["depth"] == 30
+
+
+def test_capture_falls_back_and_marks_the_window_shallow(tmp_path):
+    setup = Setup(tmp_path)
+    real = setup.desktop.run
+
+    def refusing(*argv, headed=False):
+        if argv[0] == "snapshot" and "--max-depth" in argv:
+            setup.desktop.calls.append(tuple(str(arg) for arg in argv))
+            return {"ok": False, "error": {"code": "INTERNAL", "message": "RefMap exceeds 1MB size limit on write"}}
+        return real(*argv, headed=headed)
+
+    setup.desktop.run = refusing
+    setup.ctx = SlowContext(setup.desktop, setup.win32, setup.tracker, setup.watcher, setup.grab, setup.uia,
+                            windows_dir=r"C:\Windows")
+    main = setup.capture().windows[0]
+    assert (main.read, main.depth, main.shallow) == ("OK", None, "deep_read_too_large")
+    assert main.cut == 0
+
+
+def test_a_window_that_is_gone_has_no_depth_facts(tmp_path):
+    setup = Setup(tmp_path)
+    setup.desktop.gone.add(11)
+    main = setup.capture().windows[0]
+    assert (main.depth, main.cut, main.shallow) == (None, None, None)

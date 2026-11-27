@@ -1446,3 +1446,10 @@ def test_a_shortcut_with_a_ready_signal_that_cannot_be_read_is_not_waited_for(en
     assert lines_of(out)["준비 신호"] == "준비 신호: 건너뜀 (띄우지 않음)"
     assert lines_of(out)["앱 관찰"] == "앱 관찰: 실패(SHORTCUT_NOT_EXE)"
     assert "launch" not in env.cli.command_names()
+
+
+def test_check_app_observation_reads_deep(env, capsys):
+    env.run(capsys, "--skip", "llm", "--exe", str(env.exe))
+
+    snapshot = env.cli.commands()[env.cli.command_names().index("snapshot")]
+    assert snapshot[snapshot.index("--max-depth") + 1] == "30"

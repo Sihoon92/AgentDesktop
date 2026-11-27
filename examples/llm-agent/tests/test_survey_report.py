@@ -18,7 +18,7 @@ def test_finish_writes_summary_and_block_and_returns_lines(tmp_path):
     folder = write_session(tmp_path / "s")
     (folder / LABELS_YAML).write_text("version: 1\ncaptures:\n  C02: ERROR_DIALOG\nmanual:\n  H12: SOME\n", encoding="utf-8")
     lines = finish_session(folder)
-    assert lines[0].startswith("[전달] v2 · abc1234 · 변경없음 · SYS · 캡처2 · 32분 ·")
+    assert lines[0].startswith("[전달] v3 · abc1234 · 변경없음 · SYS · 캡처2 · 32분 ·")
     assert any(line.startswith("C02 ERROR_DIALOG DIALOG/SYSTEM/OK ·") for line in lines)
     assert (folder / BLOCK_TXT).read_text(encoding="utf-8") == "\n".join(lines) + "\n"
     summary = (folder / SUMMARY_MD).read_text(encoding="utf-8")

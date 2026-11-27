@@ -37,6 +37,7 @@ from agent.process_identity import process_started_at
 from agent.progress import ProgressLog
 from agent.profile import READ_MODES
 from agent.ready import READY_STATUSES
+from agent.structure import analyze, record
 from agent.summary import CODE, WORKFLOW_ID
 from agent.survey import kinds
 
@@ -57,7 +58,8 @@ RESULT_FIELDS = (
     "expect", "effects", "expected_met", "verdict", "knowledge_id", "refused_code", "capture",
 )
 KEPT_EVENTS = ("knowledge_loaded", "knowledge_used", "knowledge_failed", "completion", "registration", "warning",
-               "plan", "stage", "stop_requested", "finish_note", "workflow", "workflow_step", "focus")
+               "plan", "stage", "stop_requested", "finish_note", "workflow", "workflow_step", "focus", "deep_read",
+               "find_rows")
 MODEL_FIELDS = ("call_tokens", "stage", "stage_calls", "stage_limit")
 """Counts a model event may carry besides step and tokens; each is kept only when present."""
 STAGE_COUNTS = ("stage_count", "stages_done", "limit_questions", "plan_revisions", "max_call_tokens")
@@ -151,6 +153,7 @@ class RunRecorder:
         event["elements"], event["text_truncated"] = _elements(tree, frame, self._profile)
         event["kinds"] = kinds(tree)
         event["complete"] = envelope["data"].get("complete")
+        event["structure"] = record(analyze(tree, self._profile))
         self._append(event)
 
     @_never_raises
@@ -174,7 +177,8 @@ class RunRecorder:
         decisions, captures, vision reads, questions, answers, knowledge, completion and registration
         events are recorded; tool calls are not, because on_action already recorded each one. A
         capture, a vision read or a question without a step gets the current one. A question is tied to the latest observation
-        and its screen boxes and points get image coordinates; so does an answer's pin."""
+        and its screen boxes and points get image coordinates; so does an answer's pin. A find_rows
+        event gets "observation", the id of the latest observation, whose numbers its cells carry."""
         self.progress.note_event(event)
         kind = event.get("type")
         if kind == "question":
@@ -188,6 +192,8 @@ class RunRecorder:
             return
         if kind == "workflow":
             self._note_workflow(event)
+        if kind == "find_rows":
+            event = {**event, "observation": self._observations or None}
         if kind in KEPT_EVENTS:
             self._append(event)
             return

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from agent import identity
 from agent.capture import add_windows, stacked
+from agent.deep_read import read_window
 from agent.frames import frame_origin, to_image_rect
 from agent.observe import visible_elements
 from agent.profile import FORMAT, Profile, ProfileError, check_profile, load_profile, save_profile
@@ -111,8 +112,7 @@ class ProfileEditor:
             self._sleep(delay_s)
         row = self._window(system, window_id)
         desktop = self._desk()
-        envelope = desktop.run("snapshot", "--window-id", window_id, "--compact", "--timeout-ms", SNAPSHOT_TIMEOUT_MS,
-                               "--include-bounds")
+        envelope = read_window(desktop, window_id, SNAPSHOT_TIMEOUT_MS).envelope
         if not envelope.get("ok"):
             code = (envelope.get("error") or {}).get("code") or "UNKNOWN"
             raise EditorError(409, {"error": f"화면을 읽지 못했습니다 ({code}). 다시 읽어 주세요"})

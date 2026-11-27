@@ -802,3 +802,12 @@ def test_candidates_are_the_launched_process_and_new_windows():
     before_keys = {("w-old", 50, "proc:50"), ("w-mine", 100, "proc:100")}
 
     assert candidates([old, mine_before, fresh], (100, "proc:100"), before_keys) == [mine_before, fresh]
+
+
+def test_ready_wait_snapshot_keeps_the_default_depth():
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [main_window(menus_at=1.0)])
+
+    assert wait(desktop, clock).status == "ready"
+    reads = desktop.commands("snapshot")
+    assert reads and not any("--max-depth" in read for read in reads)

@@ -72,7 +72,7 @@ def test_every_tool_schema_meets_openai_strict_mode():
     [
         (0, "click", "press"),
         (1, "press", "type"),
-        (2, "mouse_click", "restart_target"),
+        (2, "click_point", "restart_target"),
         (3, "restart_target", None),
     ],
 )
@@ -333,6 +333,24 @@ def test_click_stays_offered_below_the_physical_level():
         assert "click" in offered(level) and "click_part" not in offered(level)
 
 
+def test_mouse_click_is_hidden_where_click_part_is_offered():
+    from agent.tool_schemas import CLICK_PART_LEVEL
+
+    names = offered(CLICK_PART_LEVEL)
+
+    assert "click_part" in names and "mouse_click" not in names and "click" not in names
+    assert "mouse_click" not in offered(3)
+
+
+def test_a_saved_mouse_click_step_still_replays(tmp_path):
+    toolbox, cli, _ = toolbox_for(SCENE, tmp_path, level=2, gated=False)
+
+    result = toolbox.call("mouse_click", raw_click())
+
+    assert result["ok"] is True
+    assert ["mouse-click", "--xy=1300,530", "--button=left"] in cli.commands()
+
+
 def test_focus_window_is_offered_at_level_zero():
     from agent.tool_schemas import definitions_for
 
@@ -550,8 +568,12 @@ def test_action_tools_require_intent():
 
     required = {tool["name"]: tool["parameters"]["required"] for tool in toolbox.definitions()}
 
-    for name in ("click_part", "press", "mouse_click"):
+    for name in ("click_part", "press", "click_point"):
         assert "intent" in required[name]
+    from agent.tool_schemas import SCHEMAS
+
+    saved = {s["definition"]["name"]: s["definition"]["parameters"]["required"] for s in SCHEMAS}
+    assert "intent" in saved["mouse_click"]
     for name in ("observe", "list_windows", "wait_for_text", "finish"):
         assert "intent" not in required[name]
 
@@ -1221,7 +1243,8 @@ def test_the_observation_text_shows_id_and_alias_from_the_profile(tmp_path):
     assert '[3] image id="56"\n' in observation
     assert '[4] image id="60" alias="Execution Plan"' in observation
     assert '[5] image id="56"' in observation
-    assert '[1] button "조회" @s1:e1' in observation and 'id="' not in observation.split("\n")[1]
+    button = next(line for line in observation.split("\n") if "[1] button" in line)
+    assert '[1] button "조회" @s1:e1' in button and 'id="' not in button
 
 
 def test_without_a_profile_the_toolbox_shows_ids_but_no_alias(tmp_path):
@@ -1449,3 +1472,86 @@ def test_a_vision_read_is_a_model_item_inside_the_tool(tmp_path):
     model = next(r for r in records if r["kind"] == "model" and r["phase"] == "start")
     assert (model["name"], model["parent"]) == ("vision", records[0]["id"])
     assert next(r for r in records if r["kind"] == "model" and r["phase"] == "end")["tokens"] == 77
+
+
+class RefusingDeepCli(FakeCli):
+    """Answers a snapshot that asks for --max-depth with the CLI's refmap-size refusal."""
+
+    def _respond(self, words):
+        if words[0] == "snapshot" and "--max-depth" in words:
+            return {"version": "2.6", "ok": False, "command": "snapshot",
+                    "error": {"code": "INTERNAL", "message": "RefMap exceeds 1MB size limit on write"}}
+        return super()._respond(words)
+
+
+CUT_SCENE = {"windows": [MAIN], "tree": {"role": "window", "name": "메인", "bounds": MAIN_BOUNDS, "children": [
+    {"role": "button", "name": "조회", "ref_id": "@s1:e1", "bounds": LINE_BOX},
+    {"role": "table", "bounds": LINE_BOX, "children_count": 200},
+]}}
+
+
+def snapshot_calls(cli):
+    return [words for words in cli.commands() if words[0] == "snapshot"]
+
+
+def depth_of(words):
+    return words[words.index("--max-depth") + 1] if "--max-depth" in words else None
+
+
+def deep_reads(observer):
+    return [event for event in observer.events if event.get("type") == "deep_read"]
+
+
+def test_every_observation_asks_the_cli_for_depth_30(tmp_path):
+    toolbox, cli, _ = toolbox_for(SCENE, tmp_path)
+    toolbox.call("click_part", part_call(mark=3, part="center"))
+    list(toolbox.observed_trees())
+    toolbox.verify_elements([])
+
+    reads = snapshot_calls(cli)
+    assert len(reads) >= 3
+    assert all(depth_of(words) == "30" for words in reads)
+
+
+def test_a_fallback_is_written_as_a_deep_read_event_and_counted(tmp_path):
+    cli = RefusingDeepCli(scene=SCENE)
+    observer = EventObserver()
+    toolbox = Toolbox(DesktopClient("ad.exe", "run1", runner=cli), Task("goal", EXE, 2, []),
+                      confirm=lambda _prompt: True, sleep=lambda _s: None, observer=observer,
+                      captures_dir=tmp_path / "captures")
+    toolbox.call("launch_target", {})
+
+    result = toolbox.call("observe", OBSERVE)
+
+    assert "observation" in result
+    reads = snapshot_calls(cli)
+    assert [depth_of(words) for words in reads] == ["30", None]
+    assert deep_reads(observer) == [{"type": "deep_read", "window_id": "w-1", "depth": None,
+                                     "fallback": "deep_read_too_large", "cut": 0}]
+
+
+def test_a_deep_read_with_nothing_cut_writes_no_event(tmp_path):
+    _, _, observer = toolbox_for(SCENE, tmp_path)
+
+    assert deep_reads(observer) == []
+
+
+def test_a_deep_read_that_still_cut_writes_its_count(tmp_path):
+    _, _, observer = toolbox_for(CUT_SCENE, tmp_path)
+
+    assert deep_reads(observer)[-1] == {"type": "deep_read", "window_id": "w-1", "depth": 30,
+                                        "fallback": None, "cut": 1}
+
+
+def test_observe_deep_depth_setting_reaches_the_snapshot(tmp_path):
+    from agent.task import task_from_args
+
+    task = task_from_args("goal", EXE, 2, defaults={"observe_deep_depth": 20})
+    cli = FakeCli(scene=SCENE)
+    toolbox = Toolbox(DesktopClient("ad.exe", "run1", runner=cli), task, confirm=lambda _prompt: True,
+                      sleep=lambda _s: None, captures_dir=tmp_path / "captures")
+    toolbox.call("launch_target", {})
+    toolbox.call("observe", OBSERVE)
+
+    assert task.observe_deep_depth == 20
+    assert [depth_of(words) for words in snapshot_calls(cli)] == ["20"]

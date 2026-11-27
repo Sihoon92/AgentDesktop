@@ -680,3 +680,20 @@ def test_summary_never_shows_goal_param_or_path_text():
     text = "\n".join(summarize(run, events))
 
     assert TEXT_MARK not in text and "shopname" not in text and "front.xlsx" not in text
+
+
+def test_summary_shows_shallow_reads_and_cuts_as_counts_only():
+    events = [
+        {"type": "deep_read", "window_id": "w-7", "depth": None, "fallback": "deep_read_too_large", "cut": 0},
+        {"type": "deep_read", "window_id": "w-7", "depth": 30, "fallback": None, "cut": 3},
+        {"type": "deep_read", "window_id": "w-8", "depth": 30, "fallback": None, "cut": 1},
+    ]
+
+    lines = summarize({}, events)
+
+    assert "  깊이: 얕게 1회 · 잘림 3" in lines
+    assert not any("w-7" in line or "too_large" in line for line in lines)
+
+
+def test_summary_has_no_depth_line_without_deep_read_events():
+    assert not any(line.startswith("  깊이") for line in summarize({}, [observation(kinds=KINDS, complete=True)]))

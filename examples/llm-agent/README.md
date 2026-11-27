@@ -336,7 +336,10 @@ python survey.py --write-docs                                                 # 
 
 - **표시 번호:** 관찰의 모든 요소 줄 앞에 `[n]`이 붙습니다. ref가 없는 글자나 그림도 번호로 가리킬 수 있습니다. 번호는 그 관찰에서만 유효합니다.
 - **부분 클릭(`click_part`):** 번호로 고른 요소의 가운데, 왼쪽, 오른쪽, 위, 아래를 누릅니다. 끝 부분은 가장자리에서 조금 안쪽입니다. 넓은 선택 칸의 오른쪽 끝은 화살표가 있는 자리입니다.
-- **셀 찾기(`find_cells`):** 행 이름과 열 이름을 주면 두 이름이 만나는 자리를 돌려줍니다. 글자의 위치만으로 계산하고 이름의 뜻은 해석하지 않습니다. 맞는 자리가 여럿이면 모두 후보로 돌려줍니다.
+- **깊게 읽기:** 하니스, 등록 화면, `check.py`, 캡처 세션은 창을 `--max-depth 30`으로 읽습니다(`agent/deep_read.py`). CLI 기본 깊이 10에서는 깊이 중첩된 표의 칸이 `children_count`만 남기고 잘리기 때문입니다. 깊이는 설정이나 작업 파일의 `observe_deep_depth`(10–50)로 바꿉니다. refmap이 1MB를 넘거나 시간이 다 되면 기본 깊이로 한 번 다시 읽고 `deep_read` 이벤트를 남기며, 요약에 `깊이: 얕게 n회 · 잘림 m` 줄이 붙습니다. 준비 확인은 기본 깊이 그대로입니다. 관찰 줄의 `children=N`은 읽지 않은 자식 수입니다.
+- **구조 요약:** 관찰 글 맨 앞에 영역(`A1` …)과 표(`T1` …)의 요약이 붙습니다(`agent/structure.py`). 영역은 id나 이름이 있는 패널이고, 이름 없는 감싸개는 접힙니다. 표는 역할이 `table`/`grid`인 노드나 칸을 두 행 이상 담은 노드이고, 표 역할 안의 자식 없는 `row` 요소도 칸으로 칩니다(GridItem 패턴이 없는 DataItem). 열 이름은 머리글, 없으면 칸 이름의 숫자를 `#`로 바꾼 모양(`양품수 row#`), 없으면 `열N`입니다. 표 칸은 관찰 줄에서 빠지지만 번호는 그대로 남고, `wait_for_text`는 칸 값도 찾습니다.
+- **표 도구(`open_area`, `read_table`, `find_rows`):** 최근 관찰의 구조만 읽고 앱을 바꾸지 않습니다(권한 단계 0). `open_area`는 영역의 줄과 표를, `read_table`은 표의 행을 30개씩 값과 번호로 보여 줍니다. `find_rows`는 `[{column, value}]` 조건에 앞뒤 공백을 뺀 값이 같은 행을 찾아 요청한 열의 칸 번호를 돌려줍니다. 빈칸(병합된 칸)을 위 행 값으로 채우지 않으므로, 병합된 열로는 행을 가르지 못하고 맞는 행이 여럿이 됩니다. 같은 열 이름이 둘이면 뒤의 것에 ` (2)`가 붙습니다.
+- **셀 찾기(`find_cells`):** 행 이름과 열 이름을 주면 두 이름이 만나는 자리를 돌려줍니다. 글자의 위치만으로 계산하고 이름의 뜻은 해석하지 않습니다. 맞는 자리가 여럿이면 모두 후보로 돌려줍니다. 표가 `T`로 보이지 않는 화면(글자만 그려진 표)에 씁니다.
 - **캡처(`look`):** 창이나 요소 주변을 찍어 번호 박스를 그린 그림을 모델에게 줍니다. 그림에서 고른 지점은 `click_point`로 누릅니다.
 - **기대와 변화:** 동작마다 모델이 기대하는 변화(`expect`: 창이 열림, 닫힘, 내용이 바뀜, 값이 바뀜, 아무 변화)를 적고, 하니스가 동작 전후의 창 목록과 요소를 비교해 실제 변화(`effects`)와 기대가 맞았는지(`expected_met`)를 돌려줍니다. 포커스만 옮겨진 것은 변화로 세지 않습니다. `click_part`와 `click_point`는 그림 속 팝업을 눌러도 다음 관찰을 그 그림의 출처 창에서 읽어 동작 전후를 같은 창으로 비교합니다. 그 창이 닫혀 다른 창을 관찰하게 되면 요소를 비교하지 않고 `effects.observed_window`로 알리며, 이때 채워지지 않은 내용·값 기대는 불일치가 아니라 확인 못 함(`unconfirmed`)으로 둡니다. 창이 열리거나 닫히면 내용이 바뀐 것으로도 봅니다(`content_changed` 충족). 기대가 창이 열림이나 닫힘이면 창 목록만으로 판정하고 그림은 보지 않습니다. 그 밖의 기대가 관찰 글과 창 목록으로 채워지지 않으면 하니스는 누른 창을 동작 직전과 직후에 찍어 누른 곳 주변(요소 사각형을 사방 64px 넓힌 곳)을 비교합니다. 거기서 20픽셀 이상 바뀌었으면 `expected_met`은 `null`, `verdict`는 `unconfirmed`(확인 못 함)이고 캡처를 붙여 모델이 눈으로 확인하게 합니다. 접근성 정보에 상태를 알리지 않는 체크 표시가 이 경우입니다. 이 판정은 연속 불일치로 세지 않고 지우지도 않습니다. 글도 그림도 바뀌지 않으면 `expected_met`은 `false`입니다. 마우스가 올라가 색이 진하게 바뀌는 것만으로도 "확인 못 함"이 될 수 있습니다. 창이 열리기를 기대한 클릭은 칸에 포커스 표시만 생겨도 불일치로 세므로, 눌러도 열리지 않는 칸에서 두 번 실패하면 사람에게 묻게 됩니다.
 
@@ -346,6 +349,7 @@ python survey.py --write-docs                                                 # 
 | --- | --- |
 | 좌표를 직접 고른 클릭(`mouse_click`, `click_point`, `drag`) | 확인 질문에 답을 받기 전에는 보내지 않음(`needs_confirmation`) |
 | `find_cells`의 후보가 둘 이상인 자리의 클릭 | 같음 |
+| `find_rows`에 맞은 행이 둘 이상일 때 그 행들의 칸 클릭 | 같음. 후보 가운데 화면 밖 칸이 있으면 표 전체를 막음 |
 | 기대와 다른 결과가 두 번 이어짐(`mismatch_limit`) | 질문에 답을 받을 때까지 앱을 바꾸는 도구를 모두 막음(`blocked_until_question`) |
 | 지식을 따라 한 동작이 기대와 다름 | 같음. 그 지식 항목의 실패 횟수도 올림 |
 | 단계의 호출 한도에 닿음(`stage_call_limit`) | 다음 모델 호출 전에 계속, 방법, 중단을 물음. 답 없이 계속하지 않음 |
@@ -419,6 +423,7 @@ python run.py --make-workflow <run_id|latest>               # 지난 실행에�
 - **대상 적기:** 좌표, 표시 번호, ref, 창 id를 쓰지 않습니다. 범위(본 창이나 "N번 단계가 연 창"), 역할, 이름으로 적고, 이름이 없거나 같은 요소가 여럿이면 가까운 글자를 기준으로 "같은 줄의 n번째"처럼 적습니다. 실행 중에 바뀐 글(칸의 값)은 기준으로 쓰지 않습니다.
 - **조작하지 않은 값:** 지시에는 있었지만 실행이 건드리지 않은 값은 파라미터로 받지 않고 "바꿀 수 없는 값"으로 남깁니다.
 - **ID:** 그 시스템의 [프로파일](#시스템-프로파일)에 `stable_ids: true`가 있을 때만 대상에 ID를 적습니다. ID는 역할과 이름에 더해지는 조건이고(`id`, 담긴 영역 `in`), 이름을 대신하지 않습니다. 이름이 파라미터인 대상에는 적지 않고, 담긴 영역의 이름이 실행 중 바뀐 글이면 `in`을 적지 않습니다. 글자가 그림으로만 그려진 메뉴처럼 이름도 가까운 글자도 없는 대상은 ID가 있어야 workflow가 만들어집니다(없으면 `LOCATOR_NOT_UNIQUE`). 재실행은 `id`가 적힌 대로 찾고, ID가 달라졌으면 `TARGET_NOT_FOUND`로 멈춥니다.
+- **표 칸:** 같은 관찰에서 `find_rows`가 정확히 한 행을 찾고 그 행의 칸을 `click_part`로 눌렀다면, 단계에 `cell: {table, column, where}`를 더합니다. `table`은 역할과 id(`stable_ids`일 때) 또는 열 이름 목록과 담긴 영역이고, `where`의 값이 파라미터 예시와 같으면 `$이름`이 됩니다. 재실행은 행 번호가 달라도 조건으로 같은 행을 찾고, 표나 행이 없거나 여럿이거나 칸이 화면 밖이면 `CELL_TABLE_NOT_FOUND`, `CELL_TABLE_AMBIGUOUS`, `CELL_NOT_FOUND`, `CELL_AMBIGUOUS`, `CELL_OFFSCREEN`으로 멈춥니다. 여러 행 가운데 질문으로 고른 칸은 지금처럼 대상 적기로만 남습니다.
 - **그림뿐인 대상:** 캡처의 픽셀을 눌러야 했던 동작은 옮기지 못합니다. 그런 동작이 필요한 실행에서는 만들지 않습니다(`PICTURE_TARGET`).
 
 만들지 못한 이유는 코드로 남습니다: `RUN_NOT_FOUND`, `RUN_NOT_SUCCESSFUL`, `NO_PLAN`, `RECORD_TOO_OLD`(표시 번호가 없는 옛 기록), `MODEL_NO_DRAFT`, `DRAFT_INVALID`, `LOCATOR_NOT_UNIQUE`, `PICTURE_TARGET`.
@@ -437,7 +442,7 @@ python run.py --make-workflow <run_id|latest>               # 지난 실행에�
 | 때 | 코드 |
 | --- | --- |
 | 시작 전 | `WORKFLOW_NOT_FOUND`, `WORKFLOW_INVALID`, `SYSTEM_MISMATCH`, `PARAM_UNKNOWN`, `PARAM_INVALID`, `FILE_EXISTS`, 준비 기다리기의 `READY_*` |
-| 실행 중 | `APP_GONE`, `TARGET_NOT_FOUND`, `TARGET_AMBIGUOUS`, `TARGET_OFFSCREEN`, `ACTION_FAILED`, `EXPECT_UNMET`, `UNEXPECTED_WINDOW`, `PARAM_VALUE_NOT_FOUND`, `WAIT_TIMEOUT`, `FILE_NOT_SAVED`, `STOPPED_BY_USER` |
+| 실행 중 | `APP_GONE`, `TARGET_NOT_FOUND`, `TARGET_AMBIGUOUS`, `TARGET_OFFSCREEN`, `CELL_TABLE_NOT_FOUND`, `CELL_TABLE_AMBIGUOUS`, `CELL_NOT_FOUND`, `CELL_AMBIGUOUS`, `CELL_OFFSCREEN`, `ACTION_FAILED`, `EXPECT_UNMET`, `UNEXPECTED_WINDOW`, `PARAM_VALUE_NOT_FOUND`, `WAIT_TIMEOUT`, `FILE_NOT_SAVED`, `STOPPED_BY_USER` |
 
 재실행은 질문 정책과 반복 동작 가드를 쓰지 않습니다. 정해진 단계를 한 번 도는 실행이고, 목록마다 같은 이름의 요소를 누르기 때문입니다. 권한 단계와 대상 프로세스 고정은 그대로입니다.
 
@@ -603,9 +608,9 @@ baseline_target: {role: switch, description_contains: 설정 패널}
 
 | 단계 | 추가되는 도구 | 앱에 미치는 영향 |
 | --- | --- | --- |
-| 0 | `launch_target`, `list_windows`, `observe`, `wait_for_text`, `look`, `find_cells`, `ask`, `plan`, `stage_done`, `restore_window`, `click`, `toggle`, `expand`, `collapse`, `finish` | 커서와 포커스를 가져가지 않음 |
+| 0 | `launch_target`, `list_windows`, `observe`, `wait_for_text`, `look`, `find_cells`, `open_area`, `read_table`, `find_rows`, `ask`, `plan`, `stage_done`, `restore_window`, `click`, `toggle`, `expand`, `collapse`, `finish` | 커서와 포커스를 가져가지 않음 |
 | 1 | `set_value`, `select`, `check`, `uncheck`, `scroll`, `press` | `press`를 뺀 도구는 같음 |
-| 2 | `type`, `double_click`, `right_click`, `mouse_click`, `mouse_wheel`, `drag`, `click_part`, `click_point` | 실제 커서와 포커스를 사용하며, 2단계부터 `press`도 포커스를 가져감 |
+| 2 | `type`, `double_click`, `right_click`, `mouse_click`, `mouse_wheel`, `drag`, `click_part`, `click_point` | 실제 커서와 포커스를 사용하며, 2단계부터 `press`도 포커스를 가져감. `click_part`가 있는 단계에서는 모델에게 `click`과 `mouse_click`을 주지 않음(workflow 재실행은 저장된 단계를 그대로 씀) |
 | 3 | `restart_target` | 실행 전 터미널에서 확인을 받고, 강제 종료는 하지 않음 |
 
 ## 하니스가 막는 동작

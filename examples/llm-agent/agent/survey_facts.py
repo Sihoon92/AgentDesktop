@@ -74,7 +74,10 @@ class UiaCounts(_Record):
 @dataclass(frozen=True)
 class WindowFact(_Record):
     """One target window of a capture. `family` is a family name or "?", `instance` is the
-    CLI's `process_instance`, `kinds` the element counts of `agent.survey.kinds`."""
+    CLI's `process_instance`, `kinds` the element counts of `agent.survey.kinds`. `depth` is the
+    --max-depth the read asked for (None after a fallback or when not read), `cut` how many nodes
+    that depth still cut, `shallow` the fallback code of agent.deep_read; all None in sessions
+    written before deep reads (block v2)."""
 
     win: str = ""
     proc: str | None = None
@@ -90,6 +93,9 @@ class WindowFact(_Record):
     read_s: float | None = None
     kinds: dict | None = None
     id_keys: tuple = ()
+    depth: int | None = None
+    cut: int | None = None
+    shallow: str | None = None
 
     _NESTED: ClassVar[dict] = {"id_keys": ("tuple", None)}
 

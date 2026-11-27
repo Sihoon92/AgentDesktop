@@ -643,3 +643,10 @@ def test_items_follow_the_tree_order(tmp_path):
 
     assert order == [("button", None), ("toolbar", "12"), ("image", "56"), ("image", "60"), ("toolbar", "13"),
                      ("image", "56"), ("group", "71"), ("text", None)]
+
+
+def test_profile_editor_reads_deep(tmp_path):
+    _, desktop, _ = read_main(tmp_path)
+
+    [read] = desktop.commands("snapshot")
+    assert read[read.index("--max-depth") + 1] == "30"

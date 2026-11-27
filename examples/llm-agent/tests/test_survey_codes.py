@@ -1,10 +1,10 @@
 import re
 
 from agent.survey_codes import (APP_SEEN, CHECK_ALPHABET, FAILURES, KINDS, MEANINGS, READS, RELS, SCENES,
-                                SHOTS, SIZES, SLOWS, STATES)
+                                SHALLOW, SHOTS, SIZES, SLOWS, STATES)
 
 GROUPS = {"scene": SCENES, "kind": KINDS, "rel": RELS, "state": STATES, "read": READS, "size": SIZES,
-          "shot": SHOTS, "slow": SLOWS, "app_seen": APP_SEEN, "failure": FAILURES}
+          "shot": SHOTS, "slow": SLOWS, "shallow": SHALLOW, "app_seen": APP_SEEN, "failure": FAILURES}
 
 
 def test_every_code_has_a_meaning():

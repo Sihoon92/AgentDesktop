@@ -26,7 +26,7 @@ KNOWLEDGE_ID = {
 MARK = {"type": "integer", "description": "A [n] mark number from the latest observation"}
 CLICK_ACTION = {"type": "string", "enum": ["click", "double_click", "right_click"]}
 READ_ONLY_TOOLS = frozenset({"list_windows", "observe", "wait_for_text", "look", "find_cells", "ask", "finish",
-                             "plan", "stage_done"})
+                             "plan", "stage_done", "open_area", "read_table", "find_rows"})
 """Tools that change nothing in the app. Every other tool takes a required intent."""
 EXPECTING_TOOLS = frozenset({
     "click", "toggle", "expand", "collapse", "set_value", "select", "check", "uncheck", "scroll",
@@ -94,6 +94,46 @@ SCHEMAS = [
               "description": "Labels on one table row, such as a group and its subtotal label"},
         columns={"type": "array", "items": {"type": "string"},
                  "description": "Stacked header labels of one column, top level first"},
+    ),
+    _tool(
+        "open_area",
+        "Show one area (A1, A2 in the observation's structure) with its lines left to right, each "
+        "element's [n] mark, role and name, and its tables. Clicks nothing.",
+        0,
+        area={"type": "string", "description": "An area handle from the latest observation, such as A1"},
+    ),
+    _tool(
+        "read_table",
+        "Show up to 30 rows of a table (T1, T2 in the structure) from start, as column=value[n] with "
+        "each cell's mark. Clicks nothing. Read on from the result's next.",
+        0,
+        table={"type": "string", "description": "A table handle from the latest observation, such as T1"},
+        columns={"type": ["array", "null"], "items": {"type": "string"},
+                 "description": "Column labels exactly as shown, or null for every column"},
+        start={"type": ["integer", "null"], "description": "First row index, or null for 0"},
+    ),
+    _tool(
+        "find_rows",
+        "Find the rows of a table whose cells equal the given values (outer spaces ignored, blank "
+        "cells are blank). Returns each matching row with the marks of its cells. Clicks nothing. "
+        "Two or more matching rows mean you must ask before you press one of their cells.",
+        0,
+        table={"type": "string", "description": "A table handle from the latest observation, such as T1"},
+        where={
+            "type": "array",
+            "description": "Conditions that must all hold, one per column",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "column": {"type": "string", "description": "A column label exactly as shown"},
+                    "value": {"type": "string", "description": "The cell value that row must have"},
+                },
+                "required": ["column", "value"],
+                "additionalProperties": False,
+            },
+        },
+        columns={"type": ["array", "null"], "items": {"type": "string"},
+                 "description": "Column labels whose cells to return, or null for every column"},
     ),
     _tool(
         "ask",
@@ -305,5 +345,6 @@ def definitions_for(level, vision):
 
 
 CLICK_PART_LEVEL = next(s["level"] for s in SCHEMAS if s["definition"]["name"] == "click_part")
-HIDDEN_BY_CLICK_PART = frozenset({"click"})
-"""Tools the model does not see once click_part is offered."""
+HIDDEN_BY_CLICK_PART = frozenset({"click", "mouse_click"})
+"""Tools the model does not see once click_part is offered. mouse_click takes screen coordinates the
+model makes up; click_part and click_point press a mark or a point it was shown instead."""

@@ -341,3 +341,18 @@ def test_verdict_texts_hold_no_names():
     loaded = session_of(read_one(), (process(classes=FamilyCount({"WinForms": 3}, 2)),), events=events)
     for _, v in judge_all(loaded, NO_LABELS):
         assert "Tfrm" not in v.evidence and "\\" not in v.evidence and ".dll" not in v.evidence
+
+
+def test_h11_detail_carries_the_cut_count():
+    read = WindowFact(win="W1", proc="P1", instance="i1", rel="APP", family="WinForms", kind="MAIN", read="OK",
+                      read_s=2.5, kinds=kinds_of(named_ref=5, text=5), depth=30, cut=0)
+    assert verdict(session_of((capture("C01", read),)), "H11")[:2] == ("COMPLETE", "2.5s/c0")
+
+
+def test_h11_detail_marks_a_shallow_fallback():
+    read = WindowFact(win="W1", proc="P1", instance="i1", rel="APP", family="WinForms", kind="MAIN", read="OK",
+                      read_s=3.1, kinds=kinds_of(named_ref=5, text=5), depth=None, cut=2,
+                      shallow="deep_read_too_large")
+    timed_out = app_window("W2", read="TIMEOUT", kind="DIALOG")
+    assert verdict(session_of((capture("C01", read), capture("C02", timed_out))), "H11")[:2] == \
+        ("COMPLETE", "3.1s/T1/c2/S")

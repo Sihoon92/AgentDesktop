@@ -1,0 +1,306 @@
+{
+ "role": "window",
+ "name": "연습 앱",
+ "bounds": {
+  "x": 0.0,
+  "y": 0.0,
+  "width": 916.0,
+  "height": 640.0
+ },
+ "children": [
+  {
+   "role": "pane",
+   "bounds": {
+    "x": 0.0,
+    "y": 0.0,
+    "width": 900.0,
+    "height": 600.0
+   },
+   "children": [
+    {
+     "role": "pane",
+     "bounds": {
+      "x": 0.0,
+      "y": 0.0,
+      "width": 900.0,
+      "height": 600.0
+     },
+     "children": [
+      {
+       "role": "pane",
+       "bounds": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 900.0,
+        "height": 600.0
+       },
+       "children": [
+        {
+         "role": "pane",
+         "bounds": {
+          "x": 0.0,
+          "y": 0.0,
+          "width": 900.0,
+          "height": 600.0
+         },
+         "children": [
+          {
+           "role": "pane",
+           "bounds": {
+            "x": 0.0,
+            "y": 0.0,
+            "width": 900.0,
+            "height": 600.0
+           },
+           "children": [
+            {
+             "role": "pane",
+             "bounds": {
+              "x": 0.0,
+              "y": 0.0,
+              "width": 900.0,
+              "height": 600.0
+             },
+             "children": [
+              {
+               "role": "pane",
+               "bounds": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 900.0,
+                "height": 600.0
+               },
+               "children": [
+                {
+                 "role": "table",
+                 "native_id": {
+                  "kind": "automation_id",
+                  "value": "gc_Count"
+                 },
+                 "bounds": {
+                  "x": 10.0,
+                  "y": 180.0,
+                  "width": 446.0,
+                  "height": 320.0
+                 },
+                 "children": [
+                  {
+                   "role": "pane",
+                   "name": "Data Panel",
+                   "bounds": {
+                    "x": 10.0,
+                    "y": 200.0,
+                    "width": 446.0,
+                    "height": 300.0
+                   },
+                   "children": [
+                    {
+                     "role": "unknown",
+                     "name": "Row 1",
+                     "bounds": {
+                      "x": 10.0,
+                      "y": 200.0,
+                      "width": 446.0,
+                      "height": 22.0
+                     },
+                     "children": [
+                      {
+                       "role": "cell",
+                       "name": "공정 row0",
+                       "ref_id": "@scompany:e1",
+                       "bounds": {
+                        "x": 10.0,
+                        "y": 200.0,
+                        "width": 146.0,
+                        "height": 22.0
+                       },
+                       "available_actions": [
+                        "Click"
+                       ],
+                       "value": "극판"
+                      },
+                      {
+                       "role": "cell",
+                       "name": "구분 row0",
+                       "ref_id": "@scompany:e2",
+                       "bounds": {
+                        "x": 160.0,
+                        "y": 200.0,
+                        "width": 146.0,
+                        "height": 22.0
+                       },
+                       "available_actions": [
+                        "Click"
+                       ],
+                       "value": "A"
+                      },
+                      {
+                       "role": "cell",
+                       "name": "양품수 row0",
+                       "ref_id": "@scompany:e3",
+                       "bounds": {
+                        "x": 310.0,
+                        "y": 200.0,
+                        "width": 146.0,
+                        "height": 22.0
+                       },
+                       "available_actions": [
+                        "Click"
+                       ],
+                       "value": "1,200"
+                      }
+                     ]
+                    },
+                    {
+                     "role": "unknown",
+                     "name": "Row 2",
+                     "bounds": {
+                      "x": 10.0,
+                      "y": 224.0,
+                      "width": 446.0,
+                      "height": 22.0
+                     },
+                     "children": [
+                      {
+                       "role": "cell",
+                       "name": "공정 row1",
+                       "ref_id": "@scompany:e4",
+                       "bounds": {
+                        "x": 10.0,
+                        "y": 224.0,
+                        "width": 146.0,
+                        "height": 22.0
+                       },
+                       "available_actions": [
+                        "Click"
+                       ]
+                      },
+                      {
+                       "role": "cell",
+                       "name": "구분 row1",
+                       "ref_id": "@scompany:e5",
+                       "bounds": {
+                        "x": 160.0,
+                        "y": 224.0,
+                        "width": 146.0,
+                        "height": 22.0
+                       },
+                       "available_actions": [
+                        "Click"
+                       ],
+                       "value": "소계"
+                      },
+                      {
+                       "role": "cell",
+                       "name": "양품수 row1",
+                       "ref_id": "@scompany:e6",
+                       "bounds": {
+                        "x": 310.0,
+                        "y": 224.0,
+                        "width": 146.0,
+                        "height": 22.0
+                       },
+                       "available_actions": [
+                        "Click"
+                       ],
+                       "value": "980"
+                      }
+                     ]
+                    },
+                    {
+                     "role": "unknown",
+                     "name": "Row 3",
+                     "bounds": {
+                      "x": 10.0,
+                      "y": 248.0,
+                      "width": 446.0,
+                      "height": 22.0
+                     },
+                     "children": [
+                      {
+                       "role": "cell",
+                       "name": "공정 row2",
+                       "ref_id": "@scompany:e7",
+                       "bounds": {
+                        "x": 10.0,
+                        "y": 248.0,
+                        "width": 146.0,
+                        "height": 22.0
+                       },
+                       "available_actions": [
+                        "Click"
+                       ],
+                       "value": "조립"
+                      },
+                      {
+                       "role": "cell",
+                       "name": "구분 row2",
+                       "ref_id": "@scompany:e8",
+                       "bounds": {
+                        "x": 160.0,
+                        "y": 248.0,
+                        "width": 146.0,
+                        "height": 22.0
+                       },
+                       "available_actions": [
+                        "Click"
+                       ],
+                       "value": "소계"
+                      },
+                      {
+                       "role": "cell",
+                       "name": "양품수 row2",
+                       "ref_id": "@scompany:e9",
+                       "bounds": {
+                        "x": 310.0,
+                        "y": 248.0,
+                        "width": 146.0,
+                        "height": 22.0
+                       },
+                       "available_actions": [
+                        "Click"
+                       ],
+                       "value": "640"
+                      }
+                     ]
+                    }
+                   ]
+                  }
+                 ]
+                }
+               ],
+               "native_id": {
+                "kind": "automation_id",
+                "value": "pn_Main"
+               }
+              }
+             ]
+            }
+           ]
+          }
+         ],
+         "native_id": {
+          "kind": "automation_id",
+          "value": "usSplitContainerControl1"
+         }
+        }
+       ],
+       "native_id": {
+        "kind": "automation_id",
+        "value": "pn_Content"
+       }
+      }
+     ],
+     "native_id": {
+      "kind": "automation_id",
+      "value": "sc_Count"
+     }
+    }
+   ],
+   "native_id": {
+    "kind": "automation_id",
+    "value": "XtraLayoutControl"
+   }
+  }
+ ]
+}

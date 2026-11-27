@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from agent.deep_read import read_window
 from agent.handles import window_number
 from agent.overlay import draw_overlay
 from agent.survey import id_keys, kinds
@@ -213,19 +214,21 @@ def _window_pictures(ctx: SlowContext, target: Path, bbox, tree: dict | None) ->
 
 
 def _read_window(ctx: SlowContext, hwnd: int, row: WindowRow | None, listed_row: dict | None, target: Path):
-    """(read code, seconds, tree or None)."""
+    """(read code, seconds, tree or None, depth facts). The window is read deep with the harness's
+    fallback (agent.deep_read); depth facts are {"depth", "cut", "shallow"} for WindowFact, empty
+    when the window was gone before it could be read."""
     if listed_row is None or row is None:
-        return "GONE", None, None
+        return "GONE", None, None, {}
     started = time.monotonic()
-    envelope = ctx.desktop.run("snapshot", "--window-id", listed_row["id"], "--compact", "--include-bounds",
-                               "--timeout-ms", SURVEY_SNAPSHOT_MS)
+    read = read_window(ctx.desktop, listed_row["id"], SURVEY_SNAPSHOT_MS)
     seconds = round(time.monotonic() - started, 1)
-    code = read_code(envelope)
-    tree = (envelope.get("data") or {}).get("tree") if code in TREE_READS else None
+    depth = {"depth": read.depth, "cut": read.cut, "shallow": read.fallback}
+    code = read_code(read.envelope)
+    tree = (read.envelope.get("data") or {}).get("tree") if code in TREE_READS else None
     if not isinstance(tree, dict):
-        return (code if code not in TREE_READS else "ERROR"), seconds, None
+        return (code if code not in TREE_READS else "ERROR"), seconds, None, depth
     write_json(target / "trees" / f"{ctx.watcher.number(hwnd)}.json", tree)
-    return code, seconds, tree
+    return code, seconds, tree, depth
 
 
 def slow_capture(fast: FastCapture, folder: Path, ctx: SlowContext) -> CaptureFacts:
@@ -243,8 +246,8 @@ def slow_capture(fast: FastCapture, folder: Path, ctx: SlowContext) -> CaptureFa
         win = ctx.watcher.number(hwnd)
         pid = row.pid if row is not None else int((listed_row or {}).get("pid") or 0)
         proc, is_app = ctx.tracker.proc(pid), ctx.tracker.is_app(pid)
-        read = ("ERROR", None, None) if unlisted else _read_window(ctx, hwnd, row, listed_row, target)
-        code, seconds, tree = read
+        read = ("ERROR", None, None, {}) if unlisted else _read_window(ctx, hwnd, row, listed_row, target)
+        code, seconds, tree, depth = read
         if index == 0 and code != "GONE":
             _window_pictures(ctx, target, _bbox(listed_row, row), tree)
         kind = window_kind(row, app_rows, is_app) if row is not None else "TOP"
@@ -266,7 +269,7 @@ def slow_capture(fast: FastCapture, folder: Path, ctx: SlowContext) -> CaptureFa
             modal=bool(row is not None and not row.owner_enabled), hung=hwnd in fast.hung,
             size=size_class(row.rect, ctx.watcher.screen) if row is not None else "M", read=code, read_s=seconds,
             kinds=kinds(tree) if tree is not None else None,
-            id_keys=tuple(sorted(id_keys(tree))) if tree is not None else ()))
+            id_keys=tuple(sorted(id_keys(tree))) if tree is not None else (), **depth))
     facts = CaptureFacts(id=fast.id, t=fast.t, shot=fast.shot, main=windows[0].win if windows else None,
                          windows=tuple(windows), new_since_last=fast.new_since_last, uia=uia, uia_code=uia_code,
                          monitor=monitor, monitor_count=monitor_count, slow="DONE")

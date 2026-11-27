@@ -143,7 +143,7 @@ def test_session_writes_events_captures_and_session_json(env):
     lines = session.end()
     facts = read_json(session.folder / SESSION_JSON)
     assert facts["captures"] == ["C01", "C02"] and facts["app_seen"] == "ALREADY_RUNNING"
-    assert facts["head"] == "abc1234" and facts["changed"] == 1 and facts["system"] == "연습" and facts["version"] == 2
+    assert facts["head"] == "abc1234" and facts["changed"] == 1 and facts["system"] == "연습" and facts["version"] == 3
     assert [item["name"] for item in facts["checks"]][:2] == ["바이너리", "설정"]
     process = facts["processes"][0]
     assert process["proc"] == "P1" and process["rel"] == "APP" and process["target_exe"] is True

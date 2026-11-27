@@ -294,6 +294,7 @@ def judge_h11(loaded):
     capture, window = first
     timeouts = sum(w.read == "TIMEOUT" for _, w in app_windows(loaded))
     parts = ([f"{window.read_s:.1f}s"] if window.read_s is not None else []) + ([f"T{timeouts}"] if timeouts else [])
+    parts += ([f"c{window.cut}"] if window.cut is not None else []) + (["S"] if window.shallow else [])
     code = "COMPLETE" if window.read == "OK" else "TRUNCATED"
     return Verdict(code, "/".join(parts), f"{capture.id} 주 창 읽기, 앱 창 시간 초과 {timeouts}")
 

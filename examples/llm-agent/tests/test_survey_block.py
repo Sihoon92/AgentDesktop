@@ -23,7 +23,7 @@ def body(line):
 
 def test_header_and_four_hypotheses_per_line():
     lines = block()
-    assert body(lines[0]) == "[전달] v2 · abc1234 · 변경없음 · SYS · 캡처2 · 32분"
+    assert body(lines[0]) == "[전달] v3 · abc1234 · 변경없음 · SYS · 캡처2 · 32분"
     items = body(lines[1]).split("   ")
     assert [item.split(" ")[0] for item in items] == ["H01", "H02", "H03", "H04"]
     assert items[0] == "H01 WINFORMS(16/16)"
@@ -151,11 +151,11 @@ def test_explain_gives_meaning_and_next_and_marks_unknown():
 
 def test_explain_marks_typo_and_version():
     lines = block()
-    lines[0] = lines[0].replace("v2", "v1")
+    lines[0] = lines[0].replace("v3", "v1")
     lines[3] = lines[3][:-1] + ("A" if lines[3][-1] != "A" else "B")
     out = explain(parse_block("\n".join(lines)))
     assert out[0].startswith("오타? 머리:")
-    assert any("블록 버전 v1, 지금 코드 v2" in line for line in out)
+    assert any("블록 버전 v1, 지금 코드 v3" in line for line in out)
     assert sum(line.startswith("오타?") for line in out) == 2
 
 
@@ -182,3 +182,18 @@ def test_parse_block_edges(text):
     parsed = parse_block(text)
     assert len(parsed) == (1 if text == "[전달]" else 0)
     assert all(not line.ok for line in parsed)
+
+
+def test_read_block_accepts_a_v2_block_without_a_version_warning():
+    lines = block()
+    assert lines[0].startswith("[전달] v3 ")
+    header = body(lines[0]).replace("v3", "v2", 1)
+    old = [f"{header} ·{check_chars(header)}", *lines[1:]]
+    out = explain(parse_block("\n".join(old)))
+    assert not any("블록 버전" in line for line in out)
+    assert out[0].startswith("머리:")
+
+
+def test_shallow_codes_have_meanings():
+    from agent.survey_codes import MEANINGS
+    assert {"shallow:deep_read_too_large", "shallow:deep_read_timeout"} <= set(MEANINGS)

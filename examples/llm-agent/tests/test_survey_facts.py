@@ -117,3 +117,13 @@ def test_capture_codes_state_order(shot, read, hung, state):
 def test_capture_without_main_window():
     assert capture_codes(capture(windows=[], main=None)) == ("TOP", "UNKNOWN", "GONE")
     assert capture_codes(capture(main="W9")) == ("TOP", "UNKNOWN", "GONE")
+
+
+def test_old_facts_without_depth_fields_still_load():
+    old = window().to_dict()
+    for key in ("depth", "cut", "shallow"):
+        old.pop(key, None)
+    loaded = WindowFact.from_dict(old)
+    assert (loaded.depth, loaded.cut, loaded.shallow) == (None, None, None)
+    deep = window(depth=30, cut=4, shallow="deep_read_timeout")
+    assert WindowFact.from_dict(deep.to_dict()) == deep

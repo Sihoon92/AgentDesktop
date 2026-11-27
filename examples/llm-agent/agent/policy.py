@@ -2,7 +2,7 @@
 
 Two kinds of target need a confirmation first: a point the model chose itself (a raw
 coordinate), and any point inside the candidates of the latest table lookup that found
-more than one. An answered question allows one such action, at an answered candidate. Once
+more than one (the whole table when one of them is off the screen). An answered question allows one such action, at an answered candidate. Once
 an action inside the candidates has passed and been delivered, those candidates stop being
 ambiguous. An allowed action that was not delivered (refused before it ran, or reported
 not_delivered) uses up neither the answer nor the ambiguity, so repeating it needs no new
@@ -77,9 +77,10 @@ class AskPolicy:
         if pending.settles_ambiguity:
             self._ambiguous = []
 
-    def note_ambiguous(self, rects):
-        """Records the candidate areas of the latest table lookup; fewer than two clears them."""
-        self._ambiguous = list(rects) if len(rects) >= 2 else []
+    def note_ambiguous(self, rects, always=False):
+        """Records the candidate areas of the latest table lookup; fewer than two clears them,
+        unless always (a lookup with a candidate off the screen holds the one area it gives)."""
+        self._ambiguous = list(rects) if always or len(rects) >= 2 else []
 
     def note_answer(self, rects, points):
         """Records an answered question: it allows one action at these candidates and unblocks."""

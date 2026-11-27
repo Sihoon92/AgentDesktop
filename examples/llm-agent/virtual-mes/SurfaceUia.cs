@@ -23,7 +23,11 @@ namespace VirtualMesApp
 
         /// <summary>A named button that advertises no pattern: the CLI gives it a ref for its
         /// role, but neither Invoke nor anything else can press it. Only a real click does.</summary>
-        InertButton
+        InertButton,
+
+        /// <summary>A data cell of the rows exposure: a DataItem in its Row, named by its column
+        /// header and row, with Invoke and a read-only Value but no GridItem or TableItem.</summary>
+        RowCell
     }
 
     /// <summary>
@@ -71,6 +75,7 @@ namespace VirtualMesApp
         private readonly object gate = new object();
         private SurfaceItem[] cachedSource;
         private SurfaceItemProvider[] cachedChildren = new SurfaceItemProvider[0];
+        private RowsPanelProvider cachedPanel;
 
         internal SurfaceRootProvider(Surface surface, IntPtr handle)
         {
@@ -93,6 +98,14 @@ namespace VirtualMesApp
             {
                 UiaShape named = ShapeOf(Exposure.Ref, item);
                 return named == UiaShape.Button || named == UiaShape.Cell ? UiaShape.InertButton : named;
+            }
+            if (exposure == Exposure.Rows)
+            {
+                if (item.Kind == ItemKind.Cell)
+                {
+                    return UiaShape.RowCell;
+                }
+                return item.Header ? UiaShape.Hidden : ShapeOf(Exposure.Text, item);
             }
             if (exposure == Exposure.Text)
             {
@@ -125,30 +138,60 @@ namespace VirtualMesApp
                 if (!object.ReferenceEquals(source, this.cachedSource))
                 {
                     List<SurfaceItemProvider> built = new List<SurfaceItemProvider>();
+                    List<SurfaceItem> rowCells = new List<SurfaceItem>();
                     foreach (SurfaceItem item in source)
                     {
-                        this.AddChild(built, item, false);
+                        this.AddChild(built, rowCells, item, false);
                         if (item.Parts != null)
                         {
                             foreach (SurfaceItem part in item.Parts)
                             {
-                                this.AddChild(built, part, true);
+                                this.AddChild(built, rowCells, part, true);
                             }
                         }
                     }
                     this.cachedSource = source;
                     this.cachedChildren = built.ToArray();
+                    this.cachedPanel = rowCells.Count > 0 ? new RowsPanelProvider(this, rowCells) : null;
                 }
                 return this.cachedChildren;
             }
         }
 
-        /// <summary>Adds the item as the next child when its exposure shows it.</summary>
-        private void AddChild(List<SurfaceItemProvider> built, SurfaceItem item, bool isPart)
+        /// <summary>The Data Panel of a grid shown with the rows exposure, or null.</summary>
+        internal RowsPanelProvider Panel()
+        {
+            this.Children();
+            lock (this.gate)
+            {
+                return this.cachedPanel;
+            }
+        }
+
+        /// <summary>The surface's direct children: the exposed items, then the Data Panel if any.</summary>
+        internal IRawElementProviderFragment[] TopChildren()
+        {
+            SurfaceItemProvider[] items = this.Children();
+            RowsPanelProvider panel = this.Panel();
+            List<IRawElementProviderFragment> top = new List<IRawElementProviderFragment>(items);
+            if (panel != null)
+            {
+                top.Add(panel);
+            }
+            return top.ToArray();
+        }
+
+        /// <summary>Adds the item as the next child when its exposure shows it; a rows cell goes
+        /// to `rowCells` for the Data Panel instead.</summary>
+        private void AddChild(List<SurfaceItemProvider> built, List<SurfaceItem> rowCells, SurfaceItem item, bool isPart)
         {
             Exposure exposure = item.Exposure ?? this.surface.Exposure;
             UiaShape shape = ShapeOf(exposure, item);
-            if (shape != UiaShape.Hidden)
+            if (shape == UiaShape.RowCell)
+            {
+                rowCells.Add(item);
+            }
+            else if (shape != UiaShape.Hidden)
             {
                 built.Add(new SurfaceItemProvider(this, built.Count, item, shape, exposure, isPart));
             }
@@ -223,6 +266,10 @@ namespace VirtualMesApp
             {
                 return this.surface.AreaId;
             }
+            if (propertyId == AutomationElementIdentifiers.ControlTypeProperty.Id && this.Panel() != null)
+            {
+                return ControlType.Table.Id;
+            }
             return null;
         }
 
@@ -233,7 +280,7 @@ namespace VirtualMesApp
 
         public IRawElementProviderFragment Navigate(NavigateDirection direction)
         {
-            SurfaceItemProvider[] children = this.Children();
+            IRawElementProviderFragment[] children = this.TopChildren();
             if (children.Length == 0)
             {
                 return null;
@@ -276,6 +323,12 @@ namespace VirtualMesApp
         public IRawElementProviderFragment ElementProviderFromPoint(double x, double y)
         {
             System.Windows.Point point = new System.Windows.Point(x, y);
+            RowsPanelProvider panel = this.Panel();
+            SurfaceItemProvider cell = panel != null ? panel.CellAt(point) : null;
+            if (cell != null)
+            {
+                return cell;
+            }
             SurfaceItemProvider[] children = this.Children();
             foreach (SurfaceItemProvider child in children)
             {
@@ -305,7 +358,7 @@ namespace VirtualMesApp
     /// to the surface's current item with the same id, so state is never stale.
     /// </summary>
     internal sealed class SurfaceItemProvider
-        : IRawElementProviderFragment, IInvokeProvider, IToggleProvider, IGridItemProvider
+        : IRawElementProviderFragment, IInvokeProvider, IToggleProvider, IGridItemProvider, IValueProvider
     {
         private readonly SurfaceRootProvider root;
         private readonly int index;
@@ -313,9 +366,20 @@ namespace VirtualMesApp
         private readonly UiaShape shape;
         private readonly Exposure exposure;
         private readonly bool isPart;
+        private readonly RowProvider row;
+        private readonly int position;
 
         internal SurfaceItemProvider(
             SurfaceRootProvider root, int index, SurfaceItem item, UiaShape shape, Exposure exposure, bool isPart)
+            : this(root, index, item, shape, exposure, isPart, null, index)
+        {
+        }
+
+        /// <summary>A cell of the rows exposure: `row` is its parent, `position` its place in the
+        /// row, and `index` a number no other element of the surface uses, for its runtime id.</summary>
+        internal SurfaceItemProvider(
+            SurfaceRootProvider root, int index, SurfaceItem item, UiaShape shape, Exposure exposure, bool isPart,
+            RowProvider row, int position)
         {
             this.root = root;
             this.index = index;
@@ -323,6 +387,19 @@ namespace VirtualMesApp
             this.shape = shape;
             this.exposure = exposure;
             this.isPart = isPart;
+            this.row = row;
+            this.position = position;
+        }
+
+        /// <summary>The item this provider was built for.</summary>
+        internal SurfaceItem Item
+        {
+            get { return this.original; }
+        }
+
+        private bool Invokable
+        {
+            get { return this.shape == UiaShape.Button || this.shape == UiaShape.Cell || this.shape == UiaShape.RowCell; }
         }
 
         /// <summary>True for a part of another item, such as a box's arrow.</summary>
@@ -336,6 +413,12 @@ namespace VirtualMesApp
             if (this.original.Id == null)
             {
                 return this.original;
+            }
+            if (this.row != null)
+            {
+                RowsPanelProvider panel = this.root.Panel();
+                SurfaceItem found = panel != null ? panel.Find(this.original.Id) : null;
+                return found ?? this.original;
             }
             foreach (SurfaceItemProvider sibling in this.root.Children())
             {
@@ -354,8 +437,11 @@ namespace VirtualMesApp
 
         public object GetPatternProvider(int patternId)
         {
-            if (patternId == InvokePatternIdentifiers.Pattern.Id
-                && (this.shape == UiaShape.Button || this.shape == UiaShape.Cell))
+            if (patternId == InvokePatternIdentifiers.Pattern.Id && this.Invokable)
+            {
+                return this;
+            }
+            if (patternId == ValuePatternIdentifiers.Pattern.Id && this.shape == UiaShape.RowCell)
             {
                 return this;
             }
@@ -383,6 +469,10 @@ namespace VirtualMesApp
                 {
                     return string.Empty;
                 }
+                if (this.shape == UiaShape.RowCell)
+                {
+                    return (item.ColumnName ?? string.Empty) + " row" + (item.Row - 1);
+                }
                 return item.Text.Length > 0 ? item.Text : (item.Name ?? string.Empty);
             }
             if (propertyId == AutomationElementIdentifiers.AutomationIdProperty.Id)
@@ -408,7 +498,11 @@ namespace VirtualMesApp
             }
             if (propertyId == AutomationElementIdentifiers.IsInvokePatternAvailableProperty.Id)
             {
-                return this.shape == UiaShape.Button || this.shape == UiaShape.Cell;
+                return this.Invokable;
+            }
+            if (propertyId == AutomationElementIdentifiers.IsValuePatternAvailableProperty.Id)
+            {
+                return this.shape == UiaShape.RowCell;
             }
             if (propertyId == AutomationElementIdentifiers.IsTogglePatternAvailableProperty.Id)
             {
@@ -431,7 +525,7 @@ namespace VirtualMesApp
             {
                 return ControlType.CheckBox.Id;
             }
-            if (this.shape == UiaShape.Cell)
+            if (this.shape == UiaShape.Cell || this.shape == UiaShape.RowCell)
             {
                 return ControlType.DataItem.Id;
             }
@@ -449,19 +543,19 @@ namespace VirtualMesApp
 
         public IRawElementProviderFragment Navigate(NavigateDirection direction)
         {
-            SurfaceItemProvider[] siblings = this.root.Children();
             if (direction == NavigateDirection.Parent)
             {
-                return this.root;
+                return this.row != null ? (IRawElementProviderFragment)this.row : this.root;
             }
-            if (direction == NavigateDirection.NextSibling && this.index + 1 < siblings.Length)
+            IRawElementProviderFragment[] siblings = this.row != null ? this.row.Cells : this.root.TopChildren();
+            if (direction == NavigateDirection.NextSibling && this.position + 1 < siblings.Length)
             {
-                return siblings[this.index + 1];
+                return siblings[this.position + 1];
             }
-            if (direction == NavigateDirection.PreviousSibling && this.index > 0
-                && this.index - 1 < siblings.Length)
+            if (direction == NavigateDirection.PreviousSibling && this.position > 0
+                && this.position - 1 < siblings.Length)
             {
-                return siblings[this.index - 1];
+                return siblings[this.position - 1];
             }
             return null;
         }
@@ -544,6 +638,21 @@ namespace VirtualMesApp
         public IRawElementProviderSimple ContainingGrid
         {
             get { return this.root; }
+        }
+
+        public string Value
+        {
+            get { return this.Current().Text; }
+        }
+
+        public bool IsReadOnly
+        {
+            get { return true; }
+        }
+
+        public void SetValue(string value)
+        {
+            throw new InvalidOperationException("A grid cell is read-only");
         }
     }
 }

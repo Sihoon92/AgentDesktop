@@ -31,6 +31,7 @@ namespace VirtualMesApp
                 head.Back = Ui.HeaderBack;
                 head.Border = true;
                 head.Align = ContentAlignment.MiddleCenter;
+                head.Header = true;
                 head.Bounds = new Rectangle(column * columnWidth, 0, columnWidth, rowHeight);
                 head.RightClick = rightClick;
                 items.Add(head);
@@ -49,6 +50,7 @@ namespace VirtualMesApp
                     cell.Text = text;
                     cell.Row = rowNumber;
                     cell.Column = column;
+                    cell.ColumnName = result.Header[column];
                     cell.Border = true;
                     cell.Align = IsNumeric(text) ? ContentAlignment.MiddleRight : ContentAlignment.MiddleCenter;
                     cell.Bounds = new Rectangle(
@@ -116,12 +118,12 @@ namespace VirtualMesApp
                         run++;
                     }
                     Rectangle tall = new Rectangle(lefts[0], top + row * rowHeight, widths[0], run * rowHeight);
-                    items.Add(DataCell(rowNumber, 0, values[0], tall, rightClick));
+                    items.Add(DataCell(rowNumber, 0, values[0], tall, rightClick, result.Header[0]));
                 }
                 for (int column = 1; column < columns; column++)
                 {
                     Rectangle bounds = new Rectangle(lefts[column], top + row * rowHeight, widths[column], rowHeight);
-                    SurfaceItem cell = DataCell(rowNumber, column, values[column], bounds, rightClick);
+                    SurfaceItem cell = DataCell(rowNumber, column, values[column], bounds, rightClick, result.Header[column]);
                     if (cellClick != null && column >= result.LabelColumns)
                     {
                         int columnNumber = column;
@@ -173,12 +175,14 @@ namespace VirtualMesApp
             head.Back = Ui.HeaderBack;
             head.Border = true;
             head.Align = ContentAlignment.MiddleCenter;
+            head.Header = true;
             head.Bounds = bounds;
             head.RightClick = rightClick;
             return head;
         }
 
-        private static SurfaceItem DataCell(int row, int column, string text, Rectangle bounds, Action<Point> rightClick)
+        private static SurfaceItem DataCell(
+            int row, int column, string text, Rectangle bounds, Action<Point> rightClick, string columnName)
         {
             SurfaceItem cell = new SurfaceItem();
             cell.Id = "cell-" + row + "-" + column;
@@ -186,6 +190,7 @@ namespace VirtualMesApp
             cell.Text = text;
             cell.Row = row;
             cell.Column = column;
+            cell.ColumnName = columnName;
             cell.Border = true;
             cell.Align = IsNumeric(text) ? ContentAlignment.MiddleRight : ContentAlignment.MiddleCenter;
             cell.Bounds = bounds;

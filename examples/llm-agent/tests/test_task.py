@@ -271,3 +271,20 @@ def test_profile_ready_fields_default_and_are_not_task_file_keys(tmp_path):
     assert "ready" not in DEFAULT_KEYS and "ready_read" not in DEFAULT_KEYS
     assert (task_from_args("열어", r"C:\a\b.exe").ready, task_from_args("열어", r"C:\a\b.exe").ready_read) == \
         ((), "snapshot")
+
+
+def test_observe_deep_depth_defaults_to_30_and_comes_from_settings_or_the_task_file(tmp_path):
+    exe = r"C:\apps\Tool.exe"
+    assert task_from_args("goal", exe).observe_deep_depth == 30
+    assert "observe_deep_depth" in DEFAULT_KEYS and "observe_deep_depth" in OPTIONAL_KEYS
+    path = tmp_path / "task.yaml"
+    path.write_text("goal: g\nexe: 'C:\\apps\\Tool.exe'\npermission_level: 2\nobserve_deep_depth: 12\n",
+                    encoding="utf-8")
+    assert load_task(path, defaults={"observe_deep_depth": 40}).observe_deep_depth == 12
+    assert task_from_args("goal", exe, defaults={"observe_deep_depth": 40}).observe_deep_depth == 40
+
+
+@pytest.mark.parametrize("value", [9, 51, "30", True])
+def test_observe_deep_depth_outside_10_to_50_is_refused_in_a_task(value):
+    with pytest.raises(TaskError):
+        task_from_args("goal", r"C:\apps\Tool.exe", defaults={"observe_deep_depth": value})

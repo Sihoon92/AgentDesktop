@@ -49,6 +49,12 @@ namespace VirtualMesApp
         internal int Row;
         internal int Column;
 
+        /// <summary>The header text of a data cell's column, which the rows exposure names it by.</summary>
+        internal string ColumnName;
+
+        /// <summary>True for a grid header cell, which the rows exposure leaves out.</summary>
+        internal bool Header;
+
         internal Action Click;
         internal Action<Point> RightClick;
 

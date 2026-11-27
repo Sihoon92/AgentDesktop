@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from agent import checks
 from agent.capture import Capture
 from agent.checks import failed, passed, skipped
+from agent.deep_read import read_window
 from agent.desktop import DesktopClient, start_session
 from agent.envfiles import ProfileError, load_env
 from agent.handles import process_window_handles
@@ -556,8 +557,7 @@ def _ready_failure(outcome):
 def _observe(deps, desktop, window):
     """(app result, element id keys) of one read of `window`; keys is None when the read failed."""
     started = deps.clock()
-    snapshot = desktop.run("snapshot", "--window-id", window, "--compact", "--include-bounds",
-                           "--timeout-ms", OBSERVE_TIMEOUT_MS)
+    snapshot = read_window(desktop, window, OBSERVE_TIMEOUT_MS).envelope
     elapsed = deps.clock() - started
     if not snapshot.get("ok"):
         return failed(APP, f"snapshot {checks.envelope_code(snapshot)}", checks.seconds(elapsed)), None

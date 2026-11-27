@@ -26,6 +26,9 @@ namespace VirtualMesApp
     /// their place tell them apart, and only a real click reaches them.
     /// NoAction: named buttons, so the CLI gives them a ref, that advertise no Invoke pattern;
     /// only a real click reaches them.
+    /// Rows: the grid as the company MES shows it: the table holds a Data Panel, the panel one
+    /// Row n per data row, and each row its cells, named "&lt;column header&gt; row&lt;k&gt;" with the
+    /// shown text as their Value. No header cells, and no GridItem or TableItem pattern.
     /// Pixel: one nameless image.
     /// </summary>
     internal enum Exposure
@@ -35,6 +38,7 @@ namespace VirtualMesApp
         Bare,
         IdOnly,
         NoAction,
+        Rows,
         Pixel
     }
 
@@ -75,7 +79,8 @@ namespace VirtualMesApp
         {
             Exposure[] all =
             {
-                Exposure.Ref, Exposure.Text, Exposure.Bare, Exposure.IdOnly, Exposure.NoAction, Exposure.Pixel
+                Exposure.Ref, Exposure.Text, Exposure.Bare, Exposure.IdOnly, Exposure.NoAction, Exposure.Rows,
+                Exposure.Pixel
             };
             foreach (Exposure candidate in all)
             {
@@ -91,10 +96,15 @@ namespace VirtualMesApp
 
         /// <summary>
         /// The icon and the arrows carry no text, so neither can be exposed as text. Only the
-        /// menu and the arrows can be bare, and only the menu can be idonly or noaction.
+        /// menu and the arrows can be bare, only the menu can be idonly or noaction, and only the
+        /// grid can be rows.
         /// </summary>
         internal static bool IsAllowed(UiRegion region, Exposure exposure)
         {
+            if (exposure == Exposure.Rows)
+            {
+                return region == UiRegion.Grid;
+            }
             if (exposure == Exposure.IdOnly || exposure == Exposure.NoAction)
             {
                 return region == UiRegion.Menu;

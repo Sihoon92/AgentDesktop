@@ -259,8 +259,31 @@ namespace VirtualMesApp
                 control.Dispose();
             }
             this.screen = new ScreenPanel(this.session, this.session.Screen, this);
-            this.body.Controls.Add(this.screen);
+            this.body.Controls.Add(Nested(this.screen, this.options.Nest));
             this.SetStatus("준비");
+        }
+
+        /// <summary>
+        /// The screen wrapped in `layers` filling panels (--nest), outermost first: an odd layer
+        /// has no name, an even one is named nest-&lt;i&gt;, which UI Automation shows as an
+        /// AutomationId and no name. With 0 layers the screen itself.
+        /// </summary>
+        private static Control Nested(Control screen, int layers)
+        {
+            Control inner = screen;
+            for (int layer = layers; layer >= 1; layer--)
+            {
+                Panel wrapper = new Panel();
+                wrapper.Dock = DockStyle.Fill;
+                wrapper.BackColor = Ui.WindowBack;
+                if (layer % 2 == 0)
+                {
+                    wrapper.Name = "nest-" + layer;
+                }
+                wrapper.Controls.Add(inner);
+                inner = wrapper;
+            }
+            return inner;
         }
     }
 }

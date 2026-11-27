@@ -60,7 +60,7 @@ def test_session_to_block_to_read_block(env, capsys, tmp_path):
     folder = session.folder
     block = console[console.index(next(line for line in console if line.startswith("[전달]"))):]
 
-    assert block[0].startswith("[전달] v2 · abc1234 · 변경있음 1 · 연습 · 캡처2 · ")
+    assert block[0].startswith("[전달] v3 · abc1234 · 변경있음 1 · 연습 · 캡처2 · ")
     text = "\n".join(block)
     assert "H06 EXE" in text and "H15 OTHER_PROC" in text
     assert any(line.startswith("C01 ? DIALOG/OTHER/OK ·") for line in block)

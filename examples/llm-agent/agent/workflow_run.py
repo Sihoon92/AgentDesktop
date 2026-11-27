@@ -11,6 +11,13 @@ named by its window handle (agent/locator.py); {"opened_by": N, "top": True} is 
 list row step N opened, read on its own. Step N "opened" a window when its expectation was
 window_opened and exactly one new row of the window list appeared.
 
+A click_part step with "cell" finds its cell as find_rows does, in the scope's latest read:
+the one table with the recorded identity, the one row with the recorded conditions, and that
+row's cell in the recorded column. No table or no row is read again until STEP_TIMEOUT_S
+(CELL_TABLE_NOT_FOUND, CELL_NOT_FOUND); two tables or two rows stop at once
+(CELL_TABLE_AMBIGUOUS, CELL_AMBIGUOUS), and so does a cell off the screen (CELL_OFFSCREEN),
+which the replay does not scroll to.
+
 Time comes only from toolbox.clock and toolbox.sleep. The codes are the ones of the design
 (section 7); no screen text goes into them.
 """
@@ -23,6 +30,7 @@ from agent.effects import diff, met, state
 from agent.guard import AgentStopped
 from agent.loop import RunResult
 from agent.ready import signals
+from agent.structure import find_rows, table_identity
 from agent.tools import REF_ACTIONS
 from agent.workflow_format import VALUE_TOOLS, other_values, param_name
 
@@ -32,6 +40,7 @@ POLL_S = 0.5
 PASSED_REASON = "workflow 통과"
 UNCONFIRMED = "unconfirmed"
 CHECKED = "checked"
+STOP_AT_ONCE = ("CELL_TABLE_AMBIGUOUS", "CELL_AMBIGUOUS", "CELL_OFFSCREEN")
 ROLE_WITH_STATE = "checkbox"
 
 
@@ -189,13 +198,34 @@ class _Replay:
                 raise _Stop("TARGET_NOT_FOUND")
             self._toolbox.sleep(POLL_S)
 
+    def _find_cell(self, scope, cell):
+        """Reads the scope until its cell is found as find_rows finds it, by STEP_TIMEOUT_S.
+        Returns (view, element)."""
+        where = {column: self._value(value) for column, value in cell["where"].items()}
+        deadline = self._toolbox.clock() + STEP_TIMEOUT_S
+        while True:
+            self._live_rows()
+            view = self._view(scope)
+            code = "CELL_TABLE_NOT_FOUND"
+            if view is not None:
+                code, element = _cell_in(self._toolbox.structure, view[2], cell, where)
+                if code is None:
+                    return view, element
+                if code in STOP_AT_ONCE:
+                    raise _Stop(code)
+            if self._toolbox.clock() >= deadline:
+                raise _Stop(code)
+            self._toolbox.sleep(POLL_S)
+
     def _value(self, raw):
         name = param_name(raw)
         return self._values[name] if name is not None else raw
 
     def _act(self, step):
         tool, target = step["tool"], step["target"]
-        if tool == "press":
+        if "cell" in step:
+            view, element = self._find_cell(target["scope"], step["cell"])
+        elif tool == "press":
             view, element = self._find(target["scope"], None)
         else:
             shape = {key: value for key, value in target.items() if key != "scope"}
@@ -396,6 +426,27 @@ class _Check:
             return any(row_id not in now_ids for row_id in self._before_ids)
         opened = self._replay._opened.get(closes)
         return opened is not None and opened["row"] not in now_ids
+
+
+def _cell_in(structure, elements, cell, where):
+    """(code, None) or (None, element) for a cell step in one read."""
+    wanted = cell["table"]
+    tables = [table for table in (structure.tables if structure is not None else ())
+              if table_identity(table, use_ids="id" in wanted) == wanted]
+    if not tables:
+        return "CELL_TABLE_NOT_FOUND", None
+    if len(tables) > 1:
+        return "CELL_TABLE_AMBIGUOUS", None
+    found = find_rows(tables[0], where, [cell["column"]])
+    if len(found["rows"]) > 1:
+        return "CELL_AMBIGUOUS", None
+    if not found["rows"] or found["rows"][0]["cells"][cell["column"]] is None:
+        return "CELL_NOT_FOUND", None
+    chosen = found["rows"][0]["cells"][cell["column"]]
+    if chosen["offscreen"]:
+        return "CELL_OFFSCREEN", None
+    element = _marks(elements).get(chosen["mark"])
+    return ("CELL_NOT_FOUND", None) if element is None else (None, element)
 
 
 def _observe_args(window_id):

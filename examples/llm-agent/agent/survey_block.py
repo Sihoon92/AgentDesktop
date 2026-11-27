@@ -11,7 +11,8 @@ import zlib
 from typing import NamedTuple
 
 from agent.hypotheses import HYPOTHESES
-from agent.survey_codes import BLOCK_MAX_LINES, CHECK_ALPHABET, HYPOTHESES_PER_LINE, MEANINGS, SURVEY_VERSION
+from agent.survey_codes import (BLOCK_MAX_LINES, CHECK_ALPHABET, HYPOTHESES_PER_LINE, MEANINGS, READABLE_VERSIONS,
+                                SURVEY_VERSION)
 from agent.survey_facts import capture_codes
 
 HEADER = "[전달]"
@@ -175,7 +176,7 @@ def _explain_body(body):
         version = VERSION.match(body)
         if version is None:
             notes.append(f"버전을 읽지 못함: {UNKNOWN}")
-        elif int(version.group(1)) != SURVEY_VERSION:
+        elif int(version.group(1)) not in READABLE_VERSIONS:
             notes.append(f"블록 버전 v{version.group(1)}, 지금 코드 v{SURVEY_VERSION}: 코드의 뜻이 다를 수 있음")
         return notes
     if body.startswith(DROPPED):

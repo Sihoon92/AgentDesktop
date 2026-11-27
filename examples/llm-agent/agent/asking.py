@@ -329,16 +329,25 @@ class AskingTools:
         })
         self._failed_knowledge = None
 
-    def _note_cells(self, candidates):
+    def _note_cells(self, candidates, whole=None):
+        """Tells the policy where the candidates of the latest table lookup are. A candidate with
+        neither a box nor a point is off the screen: then the whole table (or, without its box,
+        every candidate that has one) stays held until a question is answered."""
         rects = []
+        unplaced = False
         for candidate in candidates:
             if has_area(candidate.get("bounds")):
                 rects.append(candidate["bounds"])
-            else:
+            elif candidate.get("point") is not None:
                 x, y = candidate["point"]
                 rects.append({"x": x - TOLERANCE_PX, "y": y - TOLERANCE_PX,
                               "width": 2 * TOLERANCE_PX + 1, "height": 2 * TOLERANCE_PX + 1})
-        self._policy.note_ambiguous(rects)
+            else:
+                unplaced = True
+        if unplaced and len(candidates) >= 2:
+            self._policy.note_ambiguous([whole] if has_area(whole) else rects, always=True)
+        else:
+            self._policy.note_ambiguous(rects)
 
     def _gate(self, name, arguments, consume):
         """The refusal for an app-changing call before it runs, or None. Checks knowledge_id,

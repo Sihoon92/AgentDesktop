@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 
 from agent.asking import AskingTools
+from agent.deep_read import read_window
 from agent.effects import EXPECTATIONS
 from agent.guard import ActionGuard, signature
 from agent.hand_click import NO_CLICK_ACTION, NO_PHYSICAL_HINT, mark_of, refs_without_click
@@ -18,6 +19,7 @@ from agent.progress import NULL_PROGRESS, result_fields, tool_item_fields
 from agent.ready import ready_message, signals, wait_until_ready
 from agent.results import refused as _refused
 from agent.screen_tools import UNCONFIRMED, ScreenTools
+from agent.structure import analyze
 from agent.tool_schemas import READ_ONLY_TOOLS, SCHEMAS, definitions_for
 from agent.verify import first_unmet
 
@@ -144,6 +146,7 @@ class Toolbox(AskingTools, ScreenTools):
         self._ready = False
         self._ready_cancelled = None
         self._refs = {}
+        self._structure = None
         self._no_click = frozenset()
         self._view_origin = None
         self._last_read = None
@@ -155,6 +158,11 @@ class Toolbox(AskingTools, ScreenTools):
     def current_window(self):
         """The id of the window the latest observation read or the latest action aimed at, or None."""
         return self._current_window
+
+    @property
+    def structure(self):
+        """The latest observation's agent.structure.Structure, or None before the first read."""
+        return self._structure
 
     def marked_elements(self):
         """Copies of the latest observation's elements in mark order, each carrying its "mark"."""
@@ -301,7 +309,9 @@ class Toolbox(AskingTools, ScreenTools):
             envelope = self._snapshot(window["id"])
             if envelope.get("ok"):
                 self._current_window = window["id"]
-                text, self._refs, self._marks = render_marked(envelope["data"]["tree"], profile=self._profile)
+                self._structure = analyze(envelope["data"]["tree"], self._profile)
+                text, self._refs, self._marks = render_marked(envelope["data"]["tree"], profile=self._profile,
+                                                              structure=self._structure)
                 self._no_click = refs_without_click(envelope["data"]["tree"])
                 self._marks_view = (window["id"], True)
                 self._view_origin = _origin(window)
@@ -401,13 +411,19 @@ class Toolbox(AskingTools, ScreenTools):
         return next((row for row in self._rows() if row["id"] == window_id), None)
 
     def _snapshot(self, window_id, root_ref=None, surface=None):
-        args = ["snapshot", "--window-id", window_id, "--compact", "--timeout-ms", OBSERVE_TIMEOUT_MS]
-        if root_ref:
-            args += ["--root", root_ref]
-        if surface:
-            args += ["--surface", surface]
-        args.append("--include-bounds")
-        return self._desktop.run(*args)
+        """Reads `window_id` at the task's deep depth (agent.deep_read) and returns the envelope used.
+        A read that fell back to the default depth, or that still left nodes cut, sends a deep_read
+        event with counts and the code only."""
+        extra = (*(("--root", root_ref) if root_ref else ()), *(("--surface", surface) if surface else ()))
+        read = read_window(self._desktop, window_id, OBSERVE_TIMEOUT_MS, extra=extra,
+                           depth=self._task.observe_deep_depth)
+        if read.fallback is not None or read.cut > 0:
+            self._deep_read_event(window_id, read)
+        return read.envelope
+
+    def _deep_read_event(self, window_id, read):
+        self._emit({"type": "deep_read", "window_id": window_id, "depth": read.depth, "fallback": read.fallback,
+                    "cut": read.cut})
 
     def _observe(self, window, root_ref=None, surface=None, include_bounds=False, source="observe"):
         """Reads one window. A None source reads quietly: no observer call, only _last_read."""
@@ -421,7 +437,9 @@ class Toolbox(AskingTools, ScreenTools):
         window) and reports it to the observer under `source`, unless `source` is None."""
         window_id = window["id"]
         data = envelope["data"]
-        text, refs, self._marks = render_marked(data["tree"], include_bounds, profile=self._profile)
+        self._structure = analyze(data["tree"], self._profile)
+        text, refs, self._marks = render_marked(data["tree"], include_bounds, profile=self._profile,
+                                                structure=self._structure)
         self._refs = {**self._refs, **refs} if root_ref else refs
         no_click = refs_without_click(data["tree"])
         self._no_click = self._no_click | no_click if root_ref else no_click
@@ -549,13 +567,20 @@ class Toolbox(AskingTools, ScreenTools):
         while True:
             latest = self._observe_current(source=None)
             polls += 1
-            found = text in latest.get("observation", "")
+            found = text in latest.get("observation", "") or ("observation" in latest and self._cells_hold(text))
             if found or self.clock() >= deadline:
                 break
             self.sleep(POLL_S)
         waited_ms = round((self.clock() - started) * 1000)
         self.report_wait({"text": text, "found": found, "polls": polls, "waited_ms": waited_ms})
         return {"ok": True, "found": found, **latest}
+
+    def _cells_hold(self, text):
+        """Whether a table cell of the latest observation holds `text`: cells have no line of
+        their own in the observation text."""
+        tables = self._structure.tables if self._structure is not None else ()
+        return any(cell is not None and cell.value is not None and text in cell.value
+                   for table in tables for row in table.rows for cell in row.cells)
 
     def _tool_restore_window(self, arguments):
         window_id = arguments["window_id"]

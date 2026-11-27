@@ -757,3 +757,7 @@ def test_model_calls_and_tool_calls_are_items_with_steps(tmp_path):
     assert model_end["tokens"] == 100
     tools = [r for r in records if r["phase"] == "start" and r["kind"] == "tool"]
     assert len(tools) == 2, "Toolbox.call does not open a second item inside the loop's"
+
+
+def test_system_prompt_says_what_children_n_means():
+    assert "- children=N on a line means N children were not read." in SYSTEM_PROMPT

@@ -2,7 +2,9 @@
 
 A workflow names its targets by window scope, role, name, description and a named
 neighbour (agent/locator.py), never by coordinates, refs or window ids. A system whose ids
-stay the same adds the target's native id ("id") and its area ("in", only with "id"). Only the keys
+stay the same adds the target's native id ("id") and its area ("in", only with "id"). A
+click_part step on a table cell that find_rows found adds "cell": the table's identity, the
+column and the row's conditions, which the replay finds the row by instead. Only the keys
 below are accepted, so a hand edit that adds a coordinate or misspells a key is refused
 instead of replayed. Error messages say which step and which key, never the value: the
 values are screen text and paths, and the messages reach the terminal and the viewer.
@@ -32,17 +34,19 @@ TOP_KEYS = ("format", "id", "system", "goal", "source", "status", "passes", "fai
 SOURCE_KEYS = ("run_id", "date")
 PARAM_KEYS = ("kind", "example")
 FIXED_KEYS = ("name", "value")
-ACT_KEYS = ("n", "goal", "do", "tool", "args", "target", "value", "expect", "closes", "settle")
+ACT_KEYS = ("n", "goal", "do", "tool", "args", "target", "value", "expect", "closes", "settle", "cell")
 ACT_REQUIRED = ("n", "goal", "do", "tool", "target")
 SELECT_KEYS = ("n", "goal", "do", "scope", "all", "item_role", "items")
 CHECK_FILE_KEYS = ("n", "goal", "do", "path")
 LOCATOR_KEYS = ("role", "name", "description", "id", "in", "near")
+CELL_KEYS = ("table", "column", "where")
+TABLE_KEYS = ("role", "id", "in", "columns")
 AREA_SHAPES = ({"role", "id"}, {"role", "name"})
 NEAR_KEYS = ("name", "relation", "nth")
 SCOPE_KEYS = ("opened_by", "top")
 ARGS_KEYS = {"click_part": ("part", "action"), "press": ("combo",)}
 FORBIDDEN_KEYS = frozenset({"x", "y", "bounds", "rect", "points", "mark", "ref", "window_id"})
-PARAM_USES = {"text": ("name", "value"), "list": ("items",), "path": ("value", "path")}
+PARAM_USES = {"text": ("name", "value", "cell"), "list": ("items",), "path": ("value", "path")}
 
 PARAM_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 WORKFLOW_ID = re.compile(r"w-\d{8}-\d{3}")
@@ -264,6 +268,10 @@ def _check_act(step, where, earlier):
     else:
         uses += _check_locator(locator, f"{where}.target", name_may_be_param=True)
     uses += _check_value(step, tool, where)
+    if "cell" in step:
+        if tool != "click_part":
+            _invalid(f"{where}.cell", "click_part 단계에만 적습니다")
+        uses += _check_cell(step["cell"], f"{where}.cell")
     expect = step.get("expect")
     if expect is not None and expect not in EXPECTS:
         _invalid(f"{where}.expect", f"{', '.join(EXPECTS)} 중 하나나 null이어야 합니다")
@@ -371,6 +379,48 @@ def _check_locator(locator, where, name_may_be_param):
             _invalid(f"{where}.near.relation", f"{', '.join(RELATIONS)} 중 하나여야 합니다")
         if type(near["nth"]) is not int or near["nth"] < 1:
             _invalid(f"{where}.near.nth", "1 이상의 정수여야 합니다")
+    return uses
+
+
+def _check_cell(cell, where):
+    """A table cell found by the values of its row: the table's identity (role with an id, or role
+    with its column labels; "in" its area), the column pressed, and the conditions of find_rows,
+    whose values may be text parameters."""
+    if not isinstance(cell, dict):
+        _invalid(where, "키와 값의 묶음이 아닙니다")
+    _exact(cell, CELL_KEYS, CELL_KEYS, where)
+    table = cell["table"]
+    if not isinstance(table, dict):
+        _invalid(f"{where}.table", "키와 값의 묶음이 아닙니다")
+    _exact(table, TABLE_KEYS, ("role",), f"{where}.table")
+    _require_text(table["role"], f"{where}.table.role")
+    if ("id" in table) == ("columns" in table):
+        _invalid(f"{where}.table", "id와 columns 가운데 하나만 적습니다")
+    columns = None
+    if "id" in table:
+        _require_text(table["id"], f"{where}.table.id")
+    else:
+        columns = table["columns"]
+        if not isinstance(columns, list) or not columns:
+            _invalid(f"{where}.table.columns", "비어 있지 않은 목록이어야 합니다")
+        for label in columns:
+            _require_text(label, f"{where}.table.columns")
+    if "in" in table and (not isinstance(table["in"], dict) or set(table["in"]) not in AREA_SHAPES
+                          or any(not isinstance(v, str) or not v.strip() for v in table["in"].values())):
+        _invalid(f"{where}.table.in", "role과 id, 또는 role과 name이어야 합니다")
+    _require_text(cell["column"], f"{where}.column")
+    where_values = cell["where"]
+    if not isinstance(where_values, dict) or not where_values:
+        _invalid(f"{where}.where", "비어 있지 않은 키와 값의 묶음이어야 합니다")
+    if columns is not None and any(label not in columns for label in (cell["column"], *where_values)):
+        _invalid(f"{where}.where", "표의 열 이름에 없는 열을 씁니다")
+    uses = []
+    for label, value in where_values.items():
+        if not isinstance(label, str) or not label.strip() or not isinstance(value, str):
+            _invalid(f"{where}.where", "열 이름과 글 값이어야 합니다")
+        name = param_name(value)
+        if name:
+            uses.append((name, "cell"))
     return uses
 
 
