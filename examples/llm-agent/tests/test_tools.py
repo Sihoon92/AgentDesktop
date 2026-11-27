@@ -232,6 +232,96 @@ def test_mouse_click_is_refused_when_our_window_could_not_take_focus():
     assert "mouse-click" not in cli.command_names()
 
 
+FOCUS_DENIED = {"version": "2.6", "ok": False, "command": "focus-window", "error": {
+    "code": "ACTION_FAILED", "message": "Target window did not become foreground before headed delivery",
+    "suggestion": "Retry after ensuring the target window can accept focus"}}
+FOCUS_PERM = {"version": "2.6", "ok": False, "command": "focus-window", "error": {
+    "code": "PERM_DENIED", "message": "activation denied"}}
+
+
+def test_physical_focus_failure_carries_the_cli_reason():
+    cli = FakeCli()
+    cli.action_results["focus-window"] = FOCUS_DENIED
+    toolbox, _ = launched(cli=cli)
+    allow(toolbox, (2000, 100))
+
+    result = toolbox.call("mouse_click", {"window_id": WINDOW_A, "x": 2000, "y": 100, "button": "left"})
+
+    assert result["refused_code"] == "focus_failed"
+    assert result["focus_error"]["code"] == "ACTION_FAILED"
+    assert "focus_window" in result["refused"]
+    assert "mouse-click" not in cli.command_names()
+
+
+def test_physical_focus_perm_denied_names_rights():
+    cli = FakeCli()
+    cli.action_results["focus-window"] = FOCUS_PERM
+    toolbox, _ = launched(cli=cli)
+    allow(toolbox, (2000, 100))
+
+    result = toolbox.call("mouse_click", {"window_id": WINDOW_A, "x": 2000, "y": 100, "button": "left"})
+
+    assert result["focus_error"]["code"] == "PERM_DENIED"
+    assert "higher rights" in result["refused"]
+
+
+def test_physical_unconfirmed_focus_has_its_own_code():
+    cli = FakeCli()
+    cli.focused = False
+    toolbox, _ = launched(cli=cli)
+    allow(toolbox, (2000, 100))
+
+    result = toolbox.call("mouse_click", {"window_id": WINDOW_A, "x": 2000, "y": 100, "button": "left"})
+
+    assert result["refused_code"] == "focus_not_confirmed"
+    assert "focus_window" in result["refused"]
+
+
+def test_focus_window_raises_our_window():
+    toolbox, cli = launched()
+
+    result = toolbox.call("focus_window", {"window_id": WINDOW_A, "intent": "앞으로"})
+
+    assert result["ok"] is True
+    assert ["focus-window", "--window-id", WINDOW_A] in cli.commands()
+    assert "--headed" in cli.last_call("focus-window")
+    assert toolbox.current_window == WINDOW_A
+
+
+def test_focus_window_refuses_a_foreign_window():
+    toolbox, cli = launched()
+    before = cli.command_names().count("focus-window")
+
+    result = toolbox.call("focus_window", {"window_id": WINDOW_OTHER_INSTANCE, "intent": "앞으로"})
+
+    assert result["ok"] is False and "refused" in result
+    assert cli.command_names().count("focus-window") == before
+
+
+def test_focus_window_reports_the_cli_error():
+    cli = FakeCli()
+    toolbox, _ = launched(cli=cli)
+    cli.action_results["focus-window"] = FOCUS_DENIED
+
+    result = toolbox.call("focus_window", {"window_id": WINDOW_A, "intent": "앞으로"})
+
+    assert result["ok"] is False
+    assert result["code"] == "ACTION_FAILED"
+
+
+def test_launch_target_raises_the_launched_window():
+    toolbox, cli = launched()
+
+    names = cli.command_names()
+    assert names.index("launch") < names.index("focus-window")
+
+
+def test_focus_window_is_offered_at_level_zero():
+    from agent.tool_schemas import definitions_for
+
+    assert "focus_window" in [definition["name"] for definition in definitions_for(0, False)]
+
+
 def test_drag_needs_both_points_inside_the_window():
     toolbox, cli = launched()
     outside = {"window_id": WINDOW_A, "from_x": 2000, "from_y": 100, "to_x": 100, "to_y": 100}

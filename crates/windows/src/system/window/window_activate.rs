@@ -145,7 +145,7 @@ fn raise_with_budget(
         }
         #[cfg(test)]
         attempt_probe::begin_attempt(attempt);
-        bring_to_foreground(handle, evidence)?;
+        bring_to_foreground(handle, evidence, attempt > 0)?;
         if is_owned_foreground(handle, evidence) {
             return Ok(());
         }
@@ -248,9 +248,10 @@ fn restore_if_iconic(
 fn bring_to_foreground(
     handle: super::window_enum::WindowHandle,
     evidence: &WindowIdentityEvidence<'_>,
+    attach: bool,
 ) -> Result<(), AdapterError> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IsWindowVisible, SW_SHOW, SetForegroundWindow, ShowWindowAsync,
+        BringWindowToTop, IsWindowVisible, SW_SHOW, SetForegroundWindow, ShowWindowAsync,
     };
 
     unsafe {
@@ -267,7 +268,16 @@ fn bring_to_foreground(
         if !owned_for_write(evidence)? {
             return Err(recycled_before_foreground());
         }
+        let attachment = if attach {
+            super::window_input_attach::attach_to_foreground_input()
+        } else {
+            None
+        };
+        if attachment.is_some() {
+            let _ = BringWindowToTop(handle);
+        }
         let _ = SetForegroundWindow(handle);
+        drop(attachment);
     }
     Ok(())
 }
@@ -276,6 +286,7 @@ fn bring_to_foreground(
 fn bring_to_foreground(
     _handle: super::window_enum::WindowHandle,
     _evidence: &WindowIdentityEvidence<'_>,
+    _attach: bool,
 ) -> Result<(), AdapterError> {
     Err(AdapterError::not_supported("focus_window"))
 }

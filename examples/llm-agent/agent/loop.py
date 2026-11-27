@@ -55,6 +55,8 @@ Rules:
 - Prefer semantic tools (toggle, check, uncheck, select, set_value, click). Use press next. Use
   physical tools (type, double_click, right_click, click_part, mouse_*, drag) only when no semantic
   path exists. Use click_part for an element without a ref, or for one end of an element.
+- When an action is refused with focus_failed or focus_not_confirmed, call focus_window on that
+  window and retry once; if focus_error.code is PERM_DENIED, ask the user.
 - For a switch or checkbox whose actions include Toggle, use check or uncheck when available,
   otherwise toggle, never click. Use click for buttons, links and menu items.
 - Every action takes an intent: one sentence on why you take it. A person reads it beside the

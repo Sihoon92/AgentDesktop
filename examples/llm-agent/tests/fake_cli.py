@@ -132,6 +132,10 @@ class FakeCli:
     def full_call(self, name):
         return next(c for c in self.calls if c[0] != "taskkill" and strip_globals(c)[0] == name)
 
+    def last_call(self, name):
+        """The latest full call of command `name`, with the binary and global flags."""
+        return [c for c in self.calls if c[0] != "taskkill" and strip_globals(c)[0] == name][-1]
+
     def _respond(self, words):
         name = words[0]
         if self.on_command is not None and name not in READ_COMMANDS:

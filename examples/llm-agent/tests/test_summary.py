@@ -79,6 +79,16 @@ def test_a_detailed_run_gives_every_line_of_the_contract():
     ]
 
 
+def test_summary_names_a_failed_start_focus_by_code_only():
+    events = [{"type": "focus", "phase": "start", "ok": False, "code": "ACTION_FAILED"}]
+    assert "  포커스: 시작 뒤 실패 · ACTION_FAILED" in summarize({}, events)
+
+
+def test_summary_has_no_focus_line_when_start_focus_succeeded():
+    events = [{"type": "focus", "phase": "start", "ok": True}]
+    assert not any(line.startswith("  포커스") for line in summarize({}, events))
+
+
 def test_unnamed_refs_show_how_many_carry_an_id_only_when_recorded():
     without_key = {key: value for key, value in KINDS.items() if key != "unnamed_ref_with_id"}
     not_a_count = dict(KINDS, unnamed_ref_with_id="둘")

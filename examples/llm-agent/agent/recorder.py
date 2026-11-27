@@ -56,7 +56,7 @@ RESULT_FIELDS = (
     "expect", "effects", "expected_met", "verdict", "knowledge_id", "refused_code", "capture",
 )
 KEPT_EVENTS = ("knowledge_loaded", "knowledge_used", "knowledge_failed", "completion", "registration", "warning",
-               "plan", "stage", "stop_requested", "finish_note", "workflow", "workflow_step")
+               "plan", "stage", "stop_requested", "finish_note", "workflow", "workflow_step", "focus")
 MODEL_FIELDS = ("call_tokens", "stage", "stage_calls", "stage_limit")
 """Counts a model event may carry besides step and tokens; each is kept only when present."""
 STAGE_COUNTS = ("stage_count", "stages_done", "limit_questions", "plan_revisions", "max_call_tokens")

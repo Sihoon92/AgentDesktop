@@ -108,6 +108,7 @@ class TimelineDesktop:
         self.find_timeouts = set(find_timeouts)
         self.snapshot_failing = snapshot_failing
         self.list_s = list_s
+        self.focus_result = {"ok": True, "command": "focus-window", "data": {}}
         self.calls = []
         self.closed = []
         self.launched = False
@@ -132,6 +133,8 @@ class TimelineDesktop:
             return self._snapshot(args)
         if args[0] == "find":
             return self._find(args)
+        if args[0] == "focus-window":
+            return self.focus_result
         return {"ok": False, "command": args[0], "error": {"code": "INVALID_ARGS", "message": "not faked"}}
 
     def close_process(self, pid):

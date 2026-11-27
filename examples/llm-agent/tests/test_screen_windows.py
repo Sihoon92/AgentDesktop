@@ -101,7 +101,7 @@ def test_a_point_on_the_popup_clicks_the_popup_window(tmp_path):
     result = toolbox.call("click_point", point_call(capture="c1", x=ON_POPUP[0], y=ON_POPUP[1]))
 
     assert result["ok"], result
-    assert "--window-id" in cli.full_call("focus-window") and "w-2" in cli.full_call("focus-window")
+    assert "--window-id" in cli.last_call("focus-window") and "w-2" in cli.last_call("focus-window")
     assert f"--xy={ON_POPUP_SCREEN[0]},{ON_POPUP_SCREEN[1]}" in cli.full_call("mouse-click")
 
 
@@ -111,7 +111,7 @@ def test_a_point_on_the_main_window_still_clicks_the_main_window(tmp_path):
     confirm_point(toolbox, "c1", 10, 20)
 
     assert toolbox.call("click_point", point_call(capture="c1", x=10, y=20))["ok"]
-    assert "w-1" in cli.full_call("focus-window")
+    assert "w-1" in cli.last_call("focus-window")
 
 
 def test_the_preview_of_a_popup_point_names_the_popup_window(tmp_path):
@@ -191,7 +191,7 @@ def test_click_part_on_a_popup_item_past_the_window_edge_clicks_the_popup(tmp_pa
     result = part_click(toolbox, "넘친 항목")
 
     assert result["ok"], result
-    assert "w-2" in cli.full_call("focus-window")
+    assert "w-2" in cli.last_call("focus-window")
     assert "--xy=1180,860" in cli.full_call("mouse-click")
 
 
@@ -199,21 +199,21 @@ def test_click_part_on_a_popup_item_over_the_window_clicks_the_popup(tmp_path):
     toolbox, cli = toolbox_with_popup_items(tmp_path)
 
     assert part_click(toolbox, "겹친 항목")["ok"]
-    assert "w-2" in cli.full_call("focus-window")
+    assert "w-2" in cli.last_call("focus-window")
 
 
 def test_click_part_presses_the_window_listed_on_top_where_two_overlap(tmp_path):
     toolbox, cli = toolbox_with_popup_items(tmp_path, windows=(MAIN, POPUP))
 
     assert part_click(toolbox, "겹친 항목")["ok"]
-    assert "w-1" in cli.full_call("focus-window")
+    assert "w-1" in cli.last_call("focus-window")
 
 
 def test_click_part_on_the_window_itself_clicks_the_observed_window(tmp_path):
     toolbox, cli = toolbox_with_popup_items(tmp_path)
 
     assert part_click(toolbox, "Shop")["ok"]
-    assert "w-1" in cli.full_call("focus-window")
+    assert "w-1" in cli.last_call("focus-window")
 
 
 def test_click_part_ignores_a_window_left_out_of_the_picture(tmp_path):
@@ -221,7 +221,7 @@ def test_click_part_ignores_a_window_left_out_of_the_picture(tmp_path):
     toolbox, cli = toolbox_with_popup_items(tmp_path, windows=(MAIN, elsewhere))
 
     assert part_click(toolbox, "Shop")["ok"]
-    assert "w-1" in cli.full_call("focus-window")
+    assert "w-1" in cli.last_call("focus-window")
 
 
 def test_click_part_lists_the_windows_once_more_than_before(tmp_path):
@@ -242,7 +242,7 @@ def test_click_part_under_a_window_left_out_of_the_picture_clicks_the_observed_w
 
     assert part_click(toolbox, "가장자리")["ok"]
     assert "--xy=1340,798" in cli.full_call("mouse-click")
-    assert "w-1" in cli.full_call("focus-window")
+    assert "w-1" in cli.last_call("focus-window")
 
 
 POPUP_TREE = {"role": "window", "name": "", "bounds": POPUP["bounds"], "children": [
@@ -282,7 +282,7 @@ def test_after_a_point_on_the_popup_the_observation_stays_on_the_captured_window
 
     result = toolbox.call("click_point", point_call(capture="c1", x=ON_POPUP[0], y=ON_POPUP[1]))
 
-    assert result["ok"] and "w-2" in cli.full_call("focus-window"), result
+    assert result["ok"] and "w-2" in cli.last_call("focus-window"), result
     assert result["window_id"] == "w-1" and last_observation(toolbox) == "w-1"
 
 

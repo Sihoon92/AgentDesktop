@@ -66,6 +66,9 @@ def summarize(run, events, code=None):
     ready = _ready(run.get("ready"))
     if ready:
         lines.append("  준비: " + ready)
+    focus = _start_focus(events)
+    if focus:
+        lines.append("  포커스: " + focus)
     if actions:
         lines.append("  마지막 동작: " + _last_action(actions[-1]))
     lines += [
@@ -320,6 +323,15 @@ def _ready(ready):
         parts += [ready["read"], f"확인 {polls}바퀴",
                   f"읽기 {reads}회(실패 {failed}, 시간 초과 {timeouts}, 최대 {_tenths(longest)}초)"]
     return SEPARATOR.join([*parts, moved])
+
+
+def _start_focus(events):
+    """`시작 뒤 실패 · CODE` when bringing the target to the front after it started failed, or None."""
+    starts = [event for event in events if event.get("type") == "focus" and event.get("phase") == "start"]
+    if not starts or starts[-1].get("ok") is not False:
+        return None
+    code = starts[-1].get("code")
+    return SEPARATOR.join(["시작 뒤 실패", NO_CODE if code is None else _code(code)])
 
 
 def _tenths(ms):

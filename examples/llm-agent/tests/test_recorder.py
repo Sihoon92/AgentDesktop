@@ -67,9 +67,10 @@ def recorded(tmp_path, cli=None, now=lambda: NOW, heartbeat_s=60):
     return recorder, toolbox, cli
 
 
-def events(recorder):
+def events(recorder, focus=False):
+    """The recorded events in order; the focus event of the start raise only when `focus`."""
     lines = (recorder.path / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    return [json.loads(line) for line in lines]
+    return [event for event in map(json.loads, lines) if focus or event["type"] != "focus"]
 
 
 def run_json(recorder, attempts=50):
@@ -872,6 +873,18 @@ def test_plan_and_stage_events_are_kept(tmp_path):
     assert kept[1]["note"] == f"{MARK} 메모"
 
 
+def test_a_failed_start_focus_reaches_the_summary(tmp_path):
+    from agent.summary import summary_of
+
+    recorder, _, _ = recorded(tmp_path)
+
+    recorder.on_event({"type": "focus", "phase": "start", "ok": False, "code": "ACTION_FAILED"})
+
+    assert [e for e in events(recorder, focus=True) if e["type"] == "focus"] == [
+        {"type": "focus", "phase": "start", "ok": False, "code": "ACTION_FAILED"}]
+    assert "  포커스: 시작 뒤 실패 · ACTION_FAILED" in summary_of(recorder.path)
+
+
 def test_model_events_keep_call_and_stage_counts(tmp_path):
     recorder, _, _ = recorded(tmp_path)
 
@@ -1093,9 +1106,9 @@ def test_a_ready_run_is_recorded_from_the_toolbox_to_the_summary(tmp_path):
     result = run_agent(ScriptedModel([GIVE_UP]), toolbox, the_task, log=recorder.on_event)
     recorder.finish(result)
 
-    recorded_events = events(recorder)
-    assert [(event["type"], event.get("phase")) for event in recorded_events[:3]] == [
-        ("ready", "start"), ("observation", None), ("ready", "end")]
+    recorded_events = events(recorder, focus=True)
+    assert [(event["type"], event.get("phase")) for event in recorded_events[:4]] == [
+        ("ready", "start"), ("observation", None), ("focus", "start"), ("ready", "end")]
     assert recorded_events[1]["source"] == "ready"
     ready = run_json(recorder)["ready"]
     assert {key: ready[key] for key in ("status", "waited_s", "switched")} == {

@@ -58,6 +58,21 @@ MARK_TOOLS = frozenset({"click_part", "click_point"})
 REOBSERVING_TOOLS = frozenset(REF_ACTIONS) | frozenset(POINT_TOOLS) | WINDOW_TOOLS | MARK_TOOLS
 NON_IDENTITY_ARGUMENTS = frozenset({"window_id", "intent", "expect", "knowledge_id"})
 FULL_SURFACES = (None, "window")
+RETRY_FOCUS = "Call focus_window on it and try again."
+HIGHER_RIGHTS = ("The target runs with higher rights than this agent; "
+                 "ask the user to start the agent as administrator.")
+FOCUS_ERROR_KEYS = ("code", "message", "suggestion")
+
+
+def _focus_refusal(window_id, focused):
+    """The refusal of a physical action whose window the CLI could not bring to the front,
+    carrying the CLI's code, message and suggestion as focus_error."""
+    reason = (f"Window {window_id} could not take focus ({focused.get('code')}: {focused.get('message')}), "
+              f"so the point may hit another app. {RETRY_FOCUS}")
+    if focused.get("code") == "PERM_DENIED":
+        reason += " " + HIGHER_RIGHTS
+    error = {key: focused[key] for key in FOCUS_ERROR_KEYS if key in focused}
+    return {**_refused(reason, "focus_failed"), "focus_error": error}
 
 
 class _NoObserver:
@@ -308,6 +323,7 @@ class Toolbox(AskingTools, ScreenTools):
             self._instance = outcome.instance
             self._ready = True
             self._record_read(outcome.window, outcome.tree_envelope, source="ready")
+            self._focus_after_start()
         self._emit({"type": "ready", "phase": "end", "status": outcome.status, "waited_ms": outcome.waited_ms,
                     "polls": outcome.polls, "switched": outcome.switched, "running_hint": outcome.running_hint,
                     "reads": outcome.reads, "failed_reads": outcome.failed_reads, "timeouts": outcome.timeouts,
@@ -329,7 +345,20 @@ class Toolbox(AskingTools, ScreenTools):
         self._pid = data["pid"]
         self._instance = data.get("process_instance")
         self._current_window = (data.get("window") or {}).get("id")
+        self._focus_after_start()
         return {"ok": True, "pid": self._pid, "windows": self._window_summaries()}
+
+    def _focus_after_start(self):
+        """Brings the current window to the front once the target has started, so the first
+        physical action finds it there, and sends a focus event with the CLI's code on failure.
+        A refusal does not stop the run: observing needs no focus."""
+        if self._current_window is None:
+            return
+        focused = self._focus(self._current_window)
+        event = {"type": "focus", "phase": "start", "ok": bool(focused["ok"])}
+        if not focused["ok"] and focused.get("code") is not None:
+            event["code"] = focused["code"]
+        self._emit(event)
 
     def _rows(self):
         envelope = self._desktop.run("list-windows")
@@ -447,16 +476,31 @@ class Toolbox(AskingTools, ScreenTools):
         for point in points:
             if not _inside(row["bounds"], *point):
                 return _refused(f"{point} is outside window {window_id}: {row['bounds']}")
-        self._desktop.run("focus-window", "--window-id", window_id, headed=True)
+        focused = self._focus(window_id)
+        if not focused["ok"]:
+            return _focus_refusal(window_id, focused)
         row = self._owned_window(window_id)
         if row is None or not row.get("is_focused"):
-            return _refused(f"Window {window_id} could not take focus, so the point may hit another app")
+            return _refused(f"Window {window_id} could not take focus, so the point may hit another app. "
+                            f"{RETRY_FOCUS}", "focus_not_confirmed")
         if identity is None:
             identity = sorted((k, v) for k, v in arguments.items() if k not in NON_IDENTITY_ARGUMENTS)
         if element is None:
             element = {"role": "window", "name": window_id}
         self._current_window = observed or window_id
         return self._act(tool, element, identity, args, headed=True)
+
+    def _focus(self, window_id):
+        """Asks the CLI to bring `window_id` to the front; returns its summary, with the error's
+        code, message and suggestion when Windows refused."""
+        return _summary(self._desktop.run("focus-window", "--window-id", window_id, headed=True))
+
+    def _tool_focus_window(self, arguments):
+        window_id = arguments["window_id"]
+        if self._owned_window(window_id) is None:
+            return _refused(f"{window_id} is not a window of the target process")
+        self._current_window = window_id
+        return self._focus(window_id)
 
     def _tool_list_windows(self, _arguments):
         return {"ok": True, "windows": self._window_summaries()}

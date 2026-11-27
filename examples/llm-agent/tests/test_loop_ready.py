@@ -79,6 +79,43 @@ def test_launch_ready_moves_the_target_to_the_ready_window():
     assert [window["id"] for window in toolbox.call("list_windows", {})["windows"]] == ["w-main"]
 
 
+def test_ready_raises_the_ready_window():
+    clock = FakeClock()
+    desktop = splash_then_main(clock)
+    toolbox, observer = toolbox_for(desktop, clock)
+
+    toolbox.launch_ready()
+
+    assert desktop.commands("focus-window") == [("focus-window", "--window-id", "w-main")]
+    assert [e for e in observer.events if e.get("type") == "focus"] == [
+        {"type": "focus", "phase": "start", "ok": True}]
+
+
+def test_ready_focus_failure_does_not_stop_the_run():
+    clock = FakeClock()
+    desktop = splash_then_main(clock)
+    desktop.focus_result = {"ok": False, "command": "focus-window",
+                            "error": {"code": "ACTION_FAILED", "message": "refused"}}
+    toolbox, observer = toolbox_for(desktop, clock)
+
+    result = toolbox.launch_ready()
+
+    assert result["ok"] is True
+    assert [e for e in observer.events if e.get("type") == "focus"] == [
+        {"type": "focus", "phase": "start", "ok": False, "code": "ACTION_FAILED"}]
+
+
+def test_failed_ready_raises_nothing():
+    clock = FakeClock()
+    desktop = TimelineDesktop(clock, [], launch_pid=100)
+    toolbox, observer = toolbox_for(desktop, clock)
+
+    toolbox.launch_ready()
+
+    assert desktop.commands("focus-window") == []
+    assert not [e for e in observer.events if e.get("type") == "focus"]
+
+
 def test_launch_ready_records_events_and_one_ready_observation():
     clock = FakeClock()
     desktop = splash_then_main(clock)

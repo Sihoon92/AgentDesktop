@@ -175,6 +175,13 @@ SCHEMAS = [
     ),
     _tool("restore_window", "Restore a minimized window. Refs fail while it is minimized.", 0, window_id=WINDOW),
     _tool(
+        "focus_window",
+        "Bring a window of the target to the front so physical clicks and keys reach it. Use it when an "
+        "action was refused because the window could not take focus.",
+        0,
+        window_id=WINDOW,
+    ),
+    _tool(
         "click",
         "Invoke a button, link or menu item without moving the cursor. "
         "For a switch or checkbox use toggle, check or uncheck instead.",
