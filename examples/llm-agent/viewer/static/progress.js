@@ -85,11 +85,17 @@
     return chain;
   }
 
+  /* The last n finished items at the level being worked on: the children of the innermost open
+     item that has finished any (a running command has none, so its tool's finished commands
+     show), else the finished top-level items. */
   function recentDone(progress, n) {
-    const open = innermostOpen(progress);
-    const ids = open ? open.children : progress.roots;
-    const done = ids.filter((id) => progress.items.get(id).endMs !== null);
-    return groupSiblings(progress, done).slice(-n);
+    const finished = (ids) => ids.filter((id) => progress.items.get(id).endMs !== null);
+    const chain = openChain(progress);
+    for (let at = chain.length - 1; at >= 0; at -= 1) {
+      const done = finished(chain[at].children);
+      if (done.length > 0) return groupSiblings(progress, done).slice(-n);
+    }
+    return groupSiblings(progress, finished(progress.roots)).slice(-n);
   }
 
   function depth(progress, item) {

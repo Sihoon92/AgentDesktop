@@ -98,3 +98,11 @@ test("an acting tool between reads starts a new fold", () => {
     s(3, "tool", 20, { name: "observe", read_only: true }), e(3, "tool", 30)]);
   assert.deepEqual(P.groupSiblings(p, p.roots).map((g) => [g.name, g.count]), [["observe", 1], ["click_part", 1], ["observe", 1]]);
 });
+
+test("recentDone shows the finished siblings when a command is running", () => {
+  const p = P.buildProgress([
+    s(1, "tool", 0, { name: "click_part" }),
+    s(2, "cli", 0, { parent: 1, name: "focus-window" }), e(2, "cli", 100),
+    s(3, "cli", 100, { parent: 1, name: "mouse-click" })]);
+  assert.deepEqual(P.recentDone(p, 5).map((g) => g.name), ["focus-window"]);
+});
